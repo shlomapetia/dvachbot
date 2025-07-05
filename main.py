@@ -123,13 +123,6 @@ async def git_commit_and_push():
         print(f"⛔ Критическая ошибка в git_commit_and_push: {e}")
         return False
 
-# Для работы на Render (health check)
-async def handle_health_check(request):
-    return web.Response(text="OK")
-
-app = web.Application()
-app.router.add_get('/health', handle_health_check)
-
 dp = Dispatcher()
 # Настройка логирования - только важные сообщения
 logging.basicConfig(
