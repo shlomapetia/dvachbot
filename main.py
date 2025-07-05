@@ -194,30 +194,28 @@ async def shutdown():
     await bot.session.close()
 
 async def auto_backup():
-    """Бэкап + коммит в GitHub."""
+    """Автоматическое сохранение состояния в GitHub каждые 2 часа"""
     while True:
         try:
-            await asyncio.sleep(12000)  # 2.8 часа
+            await asyncio.sleep(7200)  # Точные 2 часа между бэкапами
             
-            backup_name = f'backup_state_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
-            if os.path.exists('state.json'):
-                shutil.copy('state.json', backup_name)
-                print(f"✅ Создан бэкап: {backup_name}")
+            # 1. Сохраняем основные данные
+            success = await save_state()
+            if not success:
+                print("⚠️ Не удалось сохранить state.json")
+                continue
                 
-                # Удаляем старые бэкапы
-                current_time = time.time()
-                for old_backup in glob.glob('backup_state_*.json'):
-                    if os.path.basename(old_backup) != backup_name:
-                        file_time = os.path.getmtime(old_backup)
-                        if current_time - file_time > 36000:  # 10 часов
-                            os.remove(old_backup)
-                            print(f"🗑️ Удален старый бэкап: {old_backup}")
-                
-                await git_commit_and_push()  # <- Коммитим бэкап
-            else:
-                print("⚠️ state.json не найден, пропускаем бэкап")
+            # 2. Сохраняем кэш ответов
+            save_reply_cache()
+            
+            # 3. Коммитим и пушим в GitHub
+            await git_commit_and_push()
+            
+            print("✅ Полный бэкап выполнен успешно")
+            
         except Exception as e:
-            print(f"❌ Ошибка бэкапа: {e}")
+            print(f"❌ Критическая ошибка в auto_backup: {e}")
+            await asyncio.sleep(600)  # Ждем 10 минут при ошибке
 
 # Настройка сборщика мусора
 gc.set_threshold(
@@ -269,7 +267,7 @@ ADMINS = {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
 SPAM_LIMIT = 12
 SPAM_WINDOW = 15
 STATE_FILE = 'state.json'
-SAVE_INTERVAL = 120  # секунд
+SAVE_INTERVAL = 180  # секунд
 STICKER_WINDOW = 10  # секунд
 STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
@@ -524,140 +522,92 @@ def is_admin(uid: int) -> bool:
     return uid in ADMINS
 
 async def save_state():
-    """Сохранение состояния с надежным бэкапом и очисткой старых"""
+    """Только сохранение state.json и push в GitHub"""
     try:
-        # Подготовка данных
-        data = {
-            'post_counter': state['post_counter'],
-            'users_data': {
-                'active': list(state['users_data']['active']),
-                'banned': list(state['users_data']['banned']),
-            },
-            'message_counter': state['message_counter'],
-            'settings': state['settings'],
-            'recent_post_mappings': {
-                str(k): v for k, v in list(post_to_messages.items())[-500:]
-            }
-        }
-        
-        # Сохранение state.json
+        # 1. Сохраняем state.json
         with open('state.json', 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump({
+                'post_counter': state['post_counter'],
+                'users_data': {
+                    'active': list(state['users_data']['active']),
+                    'banned': list(state['users_data']['banned']),
+                },
+                'message_counter': state['message_counter'],
+                'settings': state['settings'],
+                'recent_post_mappings': {
+                    str(k): v for k, v in list(post_to_messages.items())[-500:]
+                }
+            }, f, ensure_ascii=False, indent=2)
         
-        # Создание бэкапа
-        backup_name = f'backup_state_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
-        shutil.copy('state.json', backup_name)
-        
-        # Очистка старых бэкапов - оставляем только:
-        # - Последние 3 обычных бэкапа
-        # - По одному на последние 5 дней
-        backups = sorted(glob.glob('backup_state_*.json'), key=os.path.getmtime)
-        backups_to_keep = set()
-        
-        # 1. Всегда оставляем последние 3 бэкапа
-        backups_to_keep.update(backups[-3:])
-        
-        # 2. По одному бэкапу на день за последние 5 дней
-        daily_backups = defaultdict(list)
-        for backup in backups:
-            date_part = os.path.basename(backup)[12:20]  # Извлекаем YYYYMMDD
-            daily_backups[date_part].append(backup)
-        
-        last_3_days = sorted(daily_backups.keys())[-3:]
-        for day in last_3_days:
-            if daily_backups[day]:
-                backups_to_keep.add(daily_backups[day][-1])  # Последний бэкап за день
-        
-        # Удаляем все, кроме тех что нужно сохранить
-        for old_backup in set(backups) - backups_to_keep:
-            try:
-                os.remove(old_backup)
-                print(f"🗑️ Удален старый бэкап: {os.path.basename(old_backup)}")
-            except Exception as e:
-                print(f"⚠️ Не удалось удалить бэкап {old_backup}: {e}")
-        
-        # Сохранение в GitHub
-        git_success = await git_commit_and_push()
-        if not git_success:
-            print("⚠️ Не удалось сохранить в GitHub, но локальные файлы сохранены")
-        
-        # Всегда сохраняем reply-cache
-        save_reply_cache()
+        # 2. Пушим в GitHub если есть изменения
+        if os.path.exists('/data'):
+            # Простая проверка изменений через git diff
+            changed = subprocess.run(
+                ['git', 'diff', '--quiet', 'state.json'],
+                cwd='/data'
+            ).returncode != 0
+            
+            if changed:
+                print("💾 Обнаружены изменения в state.json, пушим в GitHub...")
+                await git_commit_and_push()
+            else:
+                print("ℹ️ state.json не изменился")
         
         return True
         
     except Exception as e:
-        print(f"⛔ Критическая ошибка при сохранении состояния: {e}")
+        print(f"⛔ Ошибка сохранения state: {e}")
         return False
 
 def save_reply_cache():
-    """Надежное сохранение reply-cache"""
+    """Сохраняет кэш ответов только если есть изменения"""
     try:
-        recent = sorted(messages_storage.keys())[-REPLY_CACHE:]
-        if not recent:
-            print("⚠️ Нет данных для reply-cache")
-            return False
-
-        m2p, p2m, meta = {}, {}, {}
-
-        for p in recent:
-            # post → {uid: mid}
-            if p in post_to_messages:
-                p2m[str(p)] = post_to_messages[p]
-
-            # message → post
-            for (uid, mid), post_num in message_to_post.items():
-                if post_num == p:
-                    m2p[f"{uid}_{mid}"] = post_num
-
-            # метаданные
-            ms = messages_storage.get(p, {})
-            a_id = ms.get("author_id") or ms.get("author", "")
-            meta[str(p)] = {
-                "author_id": a_id,
-                "timestamp": ms.get("timestamp", datetime.now(UTC)).isoformat(),
-                "author_msg": ms.get("author_message_id"),
+        # Собираем актуальные данные
+        recent_posts = sorted(messages_storage.keys())[-REPLY_CACHE:]
+        new_data = {
+            "post_to_messages": {
+                str(p): post_to_messages[p]
+                for p in recent_posts 
+                if p in post_to_messages
+            },
+            "message_to_post": {
+                f"{uid}_{mid}": p 
+                for (uid, mid), p in message_to_post.items() 
+                if p in recent_posts
+            },
+            "messages_storage_meta": {
+                str(p): {
+                    "author_id": messages_storage[p].get("author_id", ""),
+                    "timestamp": messages_storage[p].get("timestamp", datetime.now(UTC)).isoformat(),
+                    "author_msg": messages_storage[p].get("author_message_id")
+                }
+                for p in recent_posts
             }
+        }
 
-        # Сохраняем локально
-        with open(REPLY_FILE, "w", encoding="utf-8") as f:
-            json.dump({
-                "post_to_messages": p2m,
-                "message_to_post": m2p,
-                "messages_storage_meta": meta,
-            }, f, ensure_ascii=False, indent=2)
+        # Проверяем существующий файл
+        old_data = {}
+        if os.path.exists(REPLY_FILE):
+            with open(REPLY_FILE, 'r', encoding='utf-8') as f:
+                try:
+                    old_data = json.load(f)
+                except json.JSONDecodeError:
+                    old_data = {}
 
-        # Пытаемся сохранить в GitHub только если есть изменения
-        try:
-            # Проверяем есть ли изменения
-            status_result = subprocess.run(["git", "diff", "--exit-code", REPLY_FILE], 
-                                         cwd="/data")
-            if status_result.returncode == 0:
-                print("ℹ️ reply_cache.json не изменился, пропускаем коммит")
-                return True
+        # Если данные не изменились - выходим
+        if old_data == new_data:
+            print("ℹ️ reply_cache.json без изменений")
+            return True
 
-            subprocess.run(["git", "add", REPLY_FILE], cwd="/data", check=True)
-            commit_result = subprocess.run(
-                ["git", "commit", "-m", f"Update reply cache: {datetime.now().strftime('%Y-%m-%d %H:%M')}"], 
-                cwd="/data"
-            )
-            if commit_result.returncode != 0:
-                print("⚠️ Нет изменений для коммита reply_cache.json")
-                return True
+        # Сохраняем новые данные
+        with open(REPLY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(new_data, f, ensure_ascii=False, indent=2)
+            print("✅ reply_cache.json обновлен")
 
-            push_result = subprocess.run(["git", "push"], cwd="/data")
-            if push_result.returncode == 0:
-                print("✅ reply_cache.json сохранен и залит в GitHub")
-                return True
-            else:
-                print("⚠️ Ошибка push reply_cache.json")
-                return False
-        except subprocess.CalledProcessError as e:
-            print(f"⚠️ Ошибка коммита reply_cache.json: {e}")
-            return False
+        return True
 
     except Exception as e:
-        print(f"⛔ Ошибка сохранения reply-cache: {e}")
+        print(f"⛔ Ошибка сохранения reply_cache: {str(e)[:200]}")
         return False
 
 def check_restart_needed():
