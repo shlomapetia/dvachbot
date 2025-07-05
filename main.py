@@ -45,8 +45,9 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переме�
 
 def git_commit_and_push():
     try:
-        # Проверка токена
-        if not os.getenv("GITHUB_TOKEN"):
+        # Проверка переменных
+        token = os.getenv("GITHUB_TOKEN")
+        if not token:
             print("❌ Нет GITHUB_TOKEN")
             return
 
@@ -54,42 +55,28 @@ def git_commit_and_push():
         subprocess.run(["git", "config", "--global", "user.name", "Backup Bot"])
         subprocess.run(["git", "config", "--global", "user.email", "bot@example.com"])
 
-        # Если папка не пустая, но .git нет — удаляем всё, кроме бекапов
-        if not os.path.exists(".git") and os.listdir("."):
-            for file in os.listdir("."):
-                if file not in ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"):
-                    try:
-                        if os.path.isdir(file):
-                            shutil.rmtree(file)
-                        else:
-                            os.remove(file)
-                    except:
-                        pass
+        # Рабочая директория
+        work_dir = "/data"  # Специальная папка для Railway
+        if not os.path.exists(work_dir):
+            os.makedirs(work_dir)
+        
+        # Клонируем или обновляем репозиторий
+        if not os.path.exists(os.path.join(work_dir, ".git")):
+            subprocess.run(["git", "clone", f"https://{token}@github.com/shlomapetia/dvachbot.git", work_dir])
+        os.chdir(work_dir)
+        subprocess.run(["git", "pull"])
 
-        # Инициализация репозитория
-        if not os.path.exists(".git"):
-            subprocess.run(["git", "init"])
-            subprocess.run(["git", "remote", "add", "origin", f"https://{os.getenv('GITHUB_TOKEN')}@github.com/shlomapetia/dvachbot.git"])
-
-        # Принудительно переключаемся на main
-        subprocess.run(["git", "fetch"])
-        subprocess.run(["git", "checkout", "-B", "main", "--track", "origin/main"])
-
-        # Добавляем ТОЛЬКО нужные файлы
-        files = []
+        # Копируем файлы для бэкапа
         for f in ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"):
             if os.path.exists(f):
-                files.append(f)
-        
-        if not files:
-            print("⚠️ Нет файлов для коммита")
-            return
+                shutil.copy(f, work_dir)
 
-        # Коммит и пуш
-        subprocess.run(["git", "add", *files])
+        # Git операции
+        subprocess.run(["git", "add", "state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"))
         subprocess.run(["git", "commit", "-m", f"Backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
-        subprocess.run(["git", "push", "origin", "main"])
-        print("✅ Бекапы залиты в GitHub, остальные файлы не тронуты")
+        subprocess.run(["git", "push"])
+        
+        print("✅ Бекапы сохранены в GitHub")
 
     except Exception as e:
         print(f"❌ Ошибка: {str(e)}")
