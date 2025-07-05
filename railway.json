@@ -1,11 +1,15 @@
 {
+  "$schema": "https://railway.app/railway.schema.json",
   "build": {
+    "builder": "nixpacks",
     "nixpacksPlan": {
-      "providers": {
-        "python": {
-          "version": "3.13.5"
+      "providers": [
+        {
+          "python": {
+            "version": "3.13.5"
+          }
         }
-      },
+      ],
       "phases": {
         "build": {
           "commands": [
@@ -22,7 +26,11 @@
   },
   "deploy": {
     "restartPolicy": {
-      "restartOnChanges": false
+      "policy": "on-failure",
+      "maxRetries": 3
+    },
+    "paths": {
+      "exclude": ["**/*.json", "**/*.txt"]
     }
   }
 }
