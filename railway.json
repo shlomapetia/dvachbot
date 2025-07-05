@@ -1,0 +1,28 @@
+{
+  "build": {
+    "nixpacksPlan": {
+      "providers": {
+        "python": {
+          "version": "3.13.5"
+        }
+      },
+      "phases": {
+        "build": {
+          "commands": [
+            "pip install -r requirements.txt"
+          ]
+        },
+        "start": {
+          "commands": [
+            "python main.py"
+          ]
+        }
+      }
+    }
+  },
+  "deploy": {
+    "restartPolicy": {
+      "restartOnChanges": false
+    }
+  }
+}
