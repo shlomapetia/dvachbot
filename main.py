@@ -44,7 +44,7 @@ from datetime import datetime, UTC  # Добавьте UTC в импорты
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
-def git_commit_and_push():
+async def git_commit_and_push():
     """Надежная функция бэкапа state и reply в GitHub"""
     try:
         # Проверка переменных окружения
@@ -71,7 +71,6 @@ def git_commit_and_push():
                 print("❌ Ошибка клонирования репозитория")
                 return False
         else:
-            # Вместо pull используем fetch + reset для избежания конфликтов
             subprocess.run(["git", "fetch", "origin"], cwd=work_dir, check=True)
             subprocess.run(["git", "reset", "--hard", "origin/main"], cwd=work_dir, check=True)
 
@@ -111,7 +110,7 @@ def git_commit_and_push():
                     return True
                 else:
                     print(f"⚠️ Ошибка при push в GitHub (попытка {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(5)  # Теперь это внутри async функции
             
             print("❌ Не удалось выполнить push после нескольких попыток")
             return False
@@ -221,7 +220,7 @@ async def auto_backup():
                             os.remove(old_backup)
                             print(f"🗑️ Удален старый бэкап: {old_backup}")
                 
-                git_commit_and_push()  # <- Коммитим бэкап
+                await git_commit_and_push()  # <- Коммитим бэкап
             else:
                 print("⚠️ state.json не найден, пропускаем бэкап")
         except Exception as e:
@@ -531,7 +530,7 @@ def escape_html(text: str) -> str:
 def is_admin(uid: int) -> bool:
     return uid in ADMINS
 
-def save_state():
+async def save_state():
     """Сохранение состояния с надежным бэкапом и очисткой старых"""
     try:
         # Подготовка данных
@@ -585,7 +584,7 @@ def save_state():
                 print(f"⚠️ Не удалось удалить бэкап {old_backup}: {e}")
         
         # Сохранение в GitHub
-        git_success = git_commit_and_push()
+        git_success = await git_commit_and_push()
         if not git_success:
             print("⚠️ Не удалось сохранить в GitHub, но локальные файлы сохранены")
         
@@ -869,7 +868,7 @@ async def auto_save_state():
     """Автоматическое сохранение состояния"""
     while True:
         await asyncio.sleep(SAVE_INTERVAL)
-        save_state()
+        await save_state()
 
 SPAM_RULES = {
     'text': {
@@ -2661,7 +2660,7 @@ async def admin_save(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
 
-    save_state()
+    await save_state()
     await callback.answer("Состояние сохранено")
 
 @dp.callback_query(F.data == "stats")
