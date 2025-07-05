@@ -532,7 +532,7 @@ def is_admin(uid: int) -> bool:
     return uid in ADMINS
 
 def save_state():
-    """Сохранение состояния с надежным бэкапом"""
+    """Сохранение состояния с надежным бэкапом и очисткой старых"""
     try:
         # Подготовка данных
         data = {
@@ -556,9 +556,28 @@ def save_state():
         backup_name = f'backup_state_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
         shutil.copy('state.json', backup_name)
         
-        # Очистка старых бэкапов (сохраняем последние 5)
-        backups = sorted(glob.glob('backup_state_*.json'))
-        for old_backup in backups[:-5]:
+        # Очистка старых бэкапов - оставляем только:
+        # - Последние 3 обычных бэкапа
+        # - По одному на последние 5 дней
+        backups = sorted(glob.glob('backup_state_*.json'), key=os.path.getmtime)
+        backups_to_keep = set()
+        
+        # 1. Всегда оставляем последние 3 бэкапа
+        backups_to_keep.update(backups[-3:])
+        
+        # 2. По одному бэкапу на день за последние 5 дней
+        daily_backups = defaultdict(list)
+        for backup in backups:
+            date_part = os.path.basename(backup)[12:20]  # Извлекаем YYYYMMDD
+            daily_backups[date_part].append(backup)
+        
+        last_3_days = sorted(daily_backups.keys())[-3:]
+        for day in last_3_days:
+            if daily_backups[day]:
+                backups_to_keep.add(daily_backups[day][-1])  # Последний бэкап за день
+        
+        # Удаляем все, кроме тех что нужно сохранить
+        for old_backup in set(backups) - backups_to_keep:
             try:
                 os.remove(old_backup)
                 print(f"🗑️ Удален старый бэкап: {os.path.basename(old_backup)}")
