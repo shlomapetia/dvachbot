@@ -71,11 +71,9 @@ def git_commit_and_push():
                 print("❌ Ошибка клонирования репозитория")
                 return False
         else:
-            pull_cmd = ["git", "pull"]
-            result = subprocess.run(pull_cmd, cwd=work_dir)
-            if result.returncode != 0:
-                print("❌ Ошибка обновления репозитория")
-                return False
+            # Вместо pull используем fetch + reset для избежания конфликтов
+            subprocess.run(["git", "fetch", "origin"], cwd=work_dir, check=True)
+            subprocess.run(["git", "reset", "--hard", "origin/main"], cwd=work_dir, check=True)
 
         # Копируем файлы для бэкапа
         files_to_backup = []
@@ -93,18 +91,30 @@ def git_commit_and_push():
             # Добавляем файлы
             subprocess.run(["git", "add"] + files_to_backup, cwd=work_dir, check=True)
             
+            # Проверяем есть ли изменения для коммита
+            status_result = subprocess.run(["git", "status", "--porcelain"], cwd=work_dir, 
+                                         capture_output=True, text=True)
+            if not status_result.stdout.strip():
+                print("ℹ️ Нет изменений для коммита")
+                return True
+            
             # Коммит
             commit_msg = f"Backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             subprocess.run(["git", "commit", "-m", commit_msg], cwd=work_dir, check=True)
             
-            # Push
-            push_result = subprocess.run(["git", "push"], cwd=work_dir)
-            if push_result.returncode == 0:
-                print(f"✅ Бекапы сохранены в GitHub: {', '.join(files_to_backup)}")
-                return True
-            else:
-                print("❌ Ошибка при push в GitHub")
-                return False
+            # Push с повторными попытками при ошибках
+            max_retries = 3
+            for attempt in range(max_retries):
+                push_result = subprocess.run(["git", "push"], cwd=work_dir)
+                if push_result.returncode == 0:
+                    print(f"✅ Бекапы сохранены в GitHub: {', '.join(files_to_backup)}")
+                    return True
+                else:
+                    print(f"⚠️ Ошибка при push в GitHub (попытка {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(5)
+            
+            print("❌ Не удалось выполнить push после нескольких попыток")
+            return False
                 
         except subprocess.CalledProcessError as e:
             print(f"❌ Ошибка git-операции: {e}")
@@ -606,20 +616,63 @@ def save_reply_cache():
                 "messages_storage_meta": meta,
             }, f, ensure_ascii=False, indent=2)
 
-        # Пытаемся сохранить в GitHub
+        # Пытаемся сохранить в GitHub только если есть изменения
         try:
+            # Проверяем есть ли изменения
+            status_result = subprocess.run(["git", "diff", "--exit-code", REPLY_FILE], 
+                                         cwd="/data")
+            if status_result.returncode == 0:
+                print("ℹ️ reply_cache.json не изменился, пропускаем коммит")
+                return True
+
             subprocess.run(["git", "add", REPLY_FILE], cwd="/data", check=True)
-            subprocess.run(["git", "commit", "-m", f"Update reply cache: {datetime.now().strftime('%Y-%m-%d %H:%M')}"], 
-                          cwd="/data", check=True)
-            subprocess.run(["git", "push"], cwd="/data")
-            print("✅ reply_cache.json сохранен и залит в GitHub")
-            return True
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", f"Update reply cache: {datetime.now().strftime('%Y-%m-%d %H:%M')}"], 
+                cwd="/data"
+            )
+            if commit_result.returncode != 0:
+                print("⚠️ Нет изменений для коммита reply_cache.json")
+                return True
+
+            push_result = subprocess.run(["git", "push"], cwd="/data")
+            if push_result.returncode == 0:
+                print("✅ reply_cache.json сохранен и залит в GitHub")
+                return True
+            else:
+                print("⚠️ Ошибка push reply_cache.json")
+                return False
         except subprocess.CalledProcessError as e:
             print(f"⚠️ Ошибка коммита reply_cache.json: {e}")
             return False
 
     except Exception as e:
         print(f"⛔ Ошибка сохранения reply-cache: {e}")
+        return False
+
+def check_restart_needed():
+    """Проверяет, нужно ли перезапускать бота (только при изменении main.py)"""
+    try:
+        # Получаем хэш текущего файла
+        current_hash = subprocess.run(
+            ["git", "hash-object", "main.py"],
+            capture_output=True, text=True
+        ).stdout.strip()
+        
+        # Получаем хэш из последнего коммита
+        last_commit_hash = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True
+        ).stdout.strip()
+        
+        # Получаем хэш main.py в последнем коммите
+        file_hash = subprocess.run(
+            ["git", "ls-tree", last_commit_hash, "main.py"],
+            capture_output=True, text=True
+        ).stdout.split()[2] if last_commit_hash else ""
+        
+        return current_hash != file_hash
+    except Exception as e:
+        print(f"⚠️ Ошибка при проверке необходимости перезапуска: {e}")
         return False
 
 def load_state():
@@ -3225,7 +3278,11 @@ async def supervisor():
         bot = Bot(token=BOT_TOKEN, connector=connector)
 
         # Основной цикл работы бота
-        while True:
+        restart_count = 0
+        max_restarts = 10  # Максимальное количество перезапусков
+        restart_delay = 30  # Задержка между перезапусками в секундах
+        
+        while restart_count < max_restarts:
             try:
                 print("▶️ Start polling...")
                 await dp.start_polling(
@@ -3235,13 +3292,20 @@ async def supervisor():
                     handle_signals=False
                 )
             except TelegramNetworkError as e:
-                print(f"⚠️ Network error: {e} (restarting in 10 seconds)")
-                await asyncio.sleep(10)
+                restart_count += 1
+                print(f"⚠️ Network error: {e} (restarting in {restart_delay} seconds)")
+                await asyncio.sleep(restart_delay)
             except Exception as e:
-                print(f"⚠️ Unexpected error: {e} (restarting in 30 seconds)")
-                await asyncio.sleep(30)
+                restart_count += 1
+                print(f"⚠️ Unexpected error: {e} (restarting in {restart_delay} seconds)")
+                await asyncio.sleep(restart_delay)
             else:
                 print("⏹️ Polling finished normally")
+                break
+
+            # Проверяем нужно ли перезапускать из-за изменений в main.py
+            if check_restart_needed():
+                print("🔄 Обнаружены изменения в main.py - требуется перезапуск")
                 break
 
     except asyncio.CancelledError:
