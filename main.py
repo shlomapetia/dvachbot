@@ -3267,10 +3267,7 @@ async def supervisor():
 
     load_state()
     
-    try:
-        # Запускаем веб-сервер синхронно (не как задачу)
-        runner = await start_web_server()
-        
+    try:        
         # Запускаем фоновые задачи
         bg_tasks = await start_background_tasks()
 
