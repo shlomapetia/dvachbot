@@ -4,3 +4,4 @@ flask
 aiohttp
 Pillow
 future
+python-dotenv
