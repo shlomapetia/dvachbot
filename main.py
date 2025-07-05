@@ -50,31 +50,37 @@ def git_commit_and_push():
             print("❌ Нет GITHUB_TOKEN")
             return
 
-        # Настройка Git (без лишних команд)
-        subprocess.run(["git", "config", "--global", "user.name", "Backup Bot"])
-        subprocess.run(["git", "config", "--global", "user.email", "bot@example.com"])
+        # Настройка Git
+        subprocess.run(["git", "config", "--global", "user.name", "Backup Bot"], check=False)
+        subprocess.run(["git", "config", "--global", "user.email", "bot@example.com"], check=False)
 
-        # Инициализация репозитория (если его нет)
+        # Если репозитория нет - клонируем
         if not os.path.exists(".git"):
-            subprocess.run(["git", "init"])
-            subprocess.run(["git", "remote", "add", "origin", f"https://{GITHUB_TOKEN}@github.com/shlomapetia/dvachbot.git"])
+            subprocess.run(["git", "clone", f"https://{GITHUB_TOKEN}@github.com/shlomapetia/dvachbot.git", "."], check=False)
+        else:
+            # Обновляем существующий репозиторий
+            subprocess.run(["git", "fetch"], check=False)
+            subprocess.run(["git", "reset", "--hard", "origin/main"], check=False)
 
-        # Принудительное создание/переключение на main (ВМЕСТО переименования)
-        subprocess.run(["git", "checkout", "-B", "main"])
+        # Добавляем ТОЛЬКО целевые файлы
+        files = []
+        for f in ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"):
+            if os.path.exists(f):
+                files.append(f)
         
-        # Добавляем ТОЛЬКО нужные файлы (не --all)
-        files = [f for f in ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json") if os.path.exists(f)]
         if not files:
             print("⚠️ Нет файлов для коммита")
             return
 
-        subprocess.run(["git", "add", *files])
-        subprocess.run(["git", "commit", "-m", f"Auto-update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
-        subprocess.run(["git", "push", "-f", "origin", "main"])
-        print("✅ Успешно залито в GitHub")
+        # Коммит и пуш
+        subprocess.run(["git", "add", *files], check=False)
+        subprocess.run(["git", "commit", "-m", f"Backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"], check=False)
+        subprocess.run(["git", "pull", "--rebase"], check=False)  # Сначала тянем изменения
+        subprocess.run(["git", "push", "origin", "main"], check=False)
+        print("✅ Данные сохранены, другие файлы не тронуты")
 
     except Exception as e:
-        print(f"❌ Ошибка: {str(e)}")
+        print(f"❌ Критическая ошибка: {str(e)}")
 
 # Для работы на Render (health check)
 async def handle_health_check(request):
