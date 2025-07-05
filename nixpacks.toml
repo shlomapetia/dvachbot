@@ -1,0 +1,7 @@
+[phases]
+setup = """
+apt-get update && apt-get install -y git
+"""
+
+[start]
+cmd = "python main.py"
