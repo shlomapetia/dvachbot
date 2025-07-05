@@ -3259,17 +3259,7 @@ async def start_background_tasks():
         asyncio.create_task(cleanup_old_messages()),
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
-    return tasks
-
-
-async def start_web_server():
-    """Запуск веб-сервера для health check"""
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    print("✅ Health check server started on port 8080")
-    return runner  # Возвращаем runner для корректного завершения    
+    return tasks 
 
 async def supervisor():
     """One event-loop: background tasks live forever, polling restarts."""
