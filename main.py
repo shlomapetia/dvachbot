@@ -30,6 +30,7 @@ from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramForbiddenError,
     TelegramNetworkError,
+    TelegramConflictError,
 )
 from aiogram.filters import Command
 from aiogram.types import (
@@ -44,42 +45,74 @@ GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
 def git_commit_and_push():
+    """Надежная функция бэкапа state и reply в GitHub"""
     try:
-        # Проверка переменных
+        # Проверка переменных окружения
         token = os.getenv("GITHUB_TOKEN")
         if not token:
             print("❌ Нет GITHUB_TOKEN")
-            return
+            return False
 
         # Настройка Git
-        subprocess.run(["git", "config", "--global", "user.name", "Backup Bot"])
-        subprocess.run(["git", "config", "--global", "user.email", "bot@example.com"])
+        subprocess.run(["git", "config", "--global", "user.name", "Backup Bot"], check=True)
+        subprocess.run(["git", "config", "--global", "user.email", "bot@example.com"], check=True)
 
         # Рабочая директория
-        work_dir = "/data"  # Специальная папка для Railway
+        work_dir = "/data"
         if not os.path.exists(work_dir):
-            os.makedirs(work_dir)
+            os.makedirs(work_dir, exist_ok=True)
         
         # Клонируем или обновляем репозиторий
-        if not os.path.exists(os.path.join(work_dir, ".git")):
-            subprocess.run(["git", "clone", f"https://{token}@github.com/shlomapetia/dvachbot.git", work_dir])
-        os.chdir(work_dir)
-        subprocess.run(["git", "pull"])
+        git_dir = os.path.join(work_dir, ".git")
+        if not os.path.exists(git_dir):
+            clone_cmd = ["git", "clone", f"https://{token}@github.com/shlomapetia/dvachbot.git", work_dir]
+            result = subprocess.run(clone_cmd, cwd=work_dir)
+            if result.returncode != 0:
+                print("❌ Ошибка клонирования репозитория")
+                return False
+        else:
+            pull_cmd = ["git", "pull"]
+            result = subprocess.run(pull_cmd, cwd=work_dir)
+            if result.returncode != 0:
+                print("❌ Ошибка обновления репозитория")
+                return False
 
         # Копируем файлы для бэкапа
+        files_to_backup = []
         for f in ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"):
             if os.path.exists(f):
-                shutil.copy(f, work_dir)
+                shutil.copy2(f, work_dir)
+                files_to_backup.append(os.path.basename(f))
+        
+        if not files_to_backup:
+            print("⚠️ Нет файлов для бэкапа")
+            return False
 
         # Git операции
-        subprocess.run(["git", "add", "state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"))
-        subprocess.run(["git", "commit", "-m", f"Backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
-        subprocess.run(["git", "push"])
-        
-        print("✅ Бекапы сохранены в GitHub")
+        try:
+            # Добавляем файлы
+            subprocess.run(["git", "add"] + files_to_backup, cwd=work_dir, check=True)
+            
+            # Коммит
+            commit_msg = f"Backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            subprocess.run(["git", "commit", "-m", commit_msg], cwd=work_dir, check=True)
+            
+            # Push
+            push_result = subprocess.run(["git", "push"], cwd=work_dir)
+            if push_result.returncode == 0:
+                print(f"✅ Бекапы сохранены в GitHub: {', '.join(files_to_backup)}")
+                return True
+            else:
+                print("❌ Ошибка при push в GitHub")
+                return False
+                
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Ошибка git-операции: {e}")
+            return False
 
     except Exception as e:
-        print(f"❌ Ошибка: {str(e)}")
+        print(f"⛔ Критическая ошибка в git_commit_and_push: {e}")
+        return False
 
 # Для работы на Render (health check)
 async def handle_health_check(request):
@@ -432,6 +465,11 @@ async def global_error_handler(event: types.ErrorEvent) -> bool:
         await asyncio.sleep(10)  # Увеличиваем задержку перед повторной попыткой
         return False  # Можно перезапустить polling
 
+    # Обработка KeyError (проблемы с хранилищем)
+    elif isinstance(exception, KeyError):
+        print(f"🔑 KeyError: {exception}. Пропускаем обработку этого сообщения.")
+        return True
+
     # Все остальные ошибки
     else:
         print(f"⛔ Непредвиденная ошибка: {exception}")
@@ -484,73 +522,105 @@ def is_admin(uid: int) -> bool:
     return uid in ADMINS
 
 def save_state():
-    """Основной state.json + коммит в GitHub."""
-    data = {
-        'post_counter': state['post_counter'],
-        'users_data': {
-            'active': list(state['users_data']['active']),
-            'banned': list(state['users_data']['banned']),
-        },
-        'message_counter': state['message_counter'],
-        'settings': state['settings'],
-        'recent_post_mappings': {
-            str(k): v for k, v in list(post_to_messages.items())[-500:]
+    """Сохранение состояния с надежным бэкапом"""
+    try:
+        # Подготовка данных
+        data = {
+            'post_counter': state['post_counter'],
+            'users_data': {
+                'active': list(state['users_data']['active']),
+                'banned': list(state['users_data']['banned']),
+            },
+            'message_counter': state['message_counter'],
+            'settings': state['settings'],
+            'recent_post_mappings': {
+                str(k): v for k, v in list(post_to_messages.items())[-500:]
+            }
         }
-    }
-    
-    with open('state.json', 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    
-    git_commit_and_push()  # <- Коммитим изменения
-    save_reply_cache()     # Сохраняем reply-cache тоже
+        
+        # Сохранение state.json
+        with open('state.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        # Создание бэкапа
+        backup_name = f'backup_state_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+        shutil.copy('state.json', backup_name)
+        
+        # Очистка старых бэкапов (сохраняем последние 5)
+        backups = sorted(glob.glob('backup_state_*.json'))
+        for old_backup in backups[:-5]:
+            try:
+                os.remove(old_backup)
+                print(f"🗑️ Удален старый бэкап: {os.path.basename(old_backup)}")
+            except Exception as e:
+                print(f"⚠️ Не удалось удалить бэкап {old_backup}: {e}")
+        
+        # Сохранение в GitHub
+        git_success = git_commit_and_push()
+        if not git_success:
+            print("⚠️ Не удалось сохранить в GitHub, но локальные файлы сохранены")
+        
+        # Всегда сохраняем reply-cache
+        save_reply_cache()
+        
+        return True
+        
+    except Exception as e:
+        print(f"⛔ Критическая ошибка при сохранении состояния: {e}")
+        return False
 
 def save_reply_cache():
-    """reply_cache.json: связи для последних REPLY_CACHE постов + коммит в GitHub"""
-    recent = sorted(messages_storage.keys())[-REPLY_CACHE:]
+    """Надежное сохранение reply-cache"""
+    try:
+        recent = sorted(messages_storage.keys())[-REPLY_CACHE:]
+        if not recent:
+            print("⚠️ Нет данных для reply-cache")
+            return False
 
-    m2p, p2m, meta = {}, {}, {}
+        m2p, p2m, meta = {}, {}, {}
 
-    for p in recent:
-        # ---------- post → {uid: mid} ----------
-        if p in post_to_messages:
-            p2m[str(p)] = post_to_messages[p]
+        for p in recent:
+            # post → {uid: mid}
+            if p in post_to_messages:
+                p2m[str(p)] = post_to_messages[p]
 
-        # ---------- message → post -------------
-        for (uid, mid), post_num in message_to_post.items():
-            if post_num == p:
-                m2p[f"{uid}_{mid}"] = post_num
+            # message → post
+            for (uid, mid), post_num in message_to_post.items():
+                if post_num == p:
+                    m2p[f"{uid}_{mid}"] = post_num
 
-        # ---------- минимальная мета -----------
-        ms = messages_storage[p]
-        a_id = ms.get("author_id") or ms.get("author")  # может быть str
+            # метаданные
+            ms = messages_storage.get(p, {})
+            a_id = ms.get("author_id") or ms.get("author", "")
+            meta[str(p)] = {
+                "author_id": a_id,
+                "timestamp": ms.get("timestamp", datetime.now(UTC)).isoformat(),
+                "author_msg": ms.get("author_message_id"),
+            }
 
-        meta[str(p)] = {
-            "author_id": a_id,
-            "timestamp": ms.get("timestamp", datetime.now(UTC)).isoformat(),
-            "author_msg": ms.get("author_message_id"),
-        }
-
-    # Сохраняем локально
-    with open(REPLY_FILE, "w", encoding="utf-8") as f:
-        json.dump(
-            {
+        # Сохраняем локально
+        with open(REPLY_FILE, "w", encoding="utf-8") as f:
+            json.dump({
                 "post_to_messages": p2m,
                 "message_to_post": m2p,
                 "messages_storage_meta": meta,
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+            }, f, ensure_ascii=False, indent=2)
 
-    # Коммитим в GitHub
-    try:
-        subprocess.run(["git", "add", REPLY_FILE], check=True)
-        subprocess.run(["git", "commit", "-m", f"Update reply cache: {datetime.now().strftime('%Y-%m-%d %H:%M')}"], check=True)
-        subprocess.run(["git", "push"], check=True)
-        print("✅ reply_cache.json сохранен и залит в GitHub")
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Ошибка коммита reply_cache.json: {e}")
+        # Пытаемся сохранить в GitHub
+        try:
+            subprocess.run(["git", "add", REPLY_FILE], cwd="/data", check=True)
+            subprocess.run(["git", "commit", "-m", f"Update reply cache: {datetime.now().strftime('%Y-%m-%d %H:%M')}"], 
+                          cwd="/data", check=True)
+            subprocess.run(["git", "push"], cwd="/data")
+            print("✅ reply_cache.json сохранен и залит в GitHub")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️ Ошибка коммита reply_cache.json: {e}")
+            return False
+
+    except Exception as e:
+        print(f"⛔ Ошибка сохранения reply-cache: {e}")
+        return False
 
 def load_state():
     if not os.path.exists('state.json'):
@@ -2874,224 +2944,236 @@ async def handle_message(message: Message):
         return
 
     user_id = message.from_user.id
-    # сохраняем объект сообщения для возможного удаления
-    get_user_msgs_deque(user_id).append(message)
+    
+    try:
+        # 1. Проверка мута (должна быть ПЕРВОЙ)
+        until = mutes.get(user_id)
+        if until and until > datetime.now(UTC):
+            left = until - datetime.now(UTC)
+            minutes = int(left.total_seconds() // 60)
+            seconds = int(left.total_seconds() % 60)
+            try:
+                await message.delete()
+                await bot.send_message(
+                    user_id, 
+                    f"🔇 Эй пидор, ты в муте ещё {minutes}м {seconds}с\nСпамишь дальше - получишь бан",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+            return
+        elif until:  # срок мута вышел
+            mutes.pop(user_id, None)
 
-    # 1. Проверка мута (должна быть ПЕРВОЙ)
-    until = mutes.get(user_id)
-    if until and until > datetime.now(UTC):
-        left = until - datetime.now(UTC)
-        minutes = int(left.total_seconds() // 60)
-        seconds = int(left.total_seconds() % 60)
+        # 1. автоматически добавляем в active
+        if user_id not in state['users_data']['active']:
+            state['users_data']['active'].add(user_id)
+            print(f"✅ Добавлен новый пользователь: ID {user_id}")
+
+        # 2. бан
+        if user_id in state['users_data']['banned']:
+            await message.delete()
+            await message.answer("❌ Ты забанен", show_alert=True)
+            return
+
+        # 3. сохраняем объект сообщения для возможного удаления
+        get_user_msgs_deque(user_id).append(message)
+
+        # 4. спам-проверка с прогрессивным наказанием           
+        spam_check = await check_spam(user_id, message)
+        if not spam_check:
+            await message.delete()
+            msg_type = message.content_type
+            # Если это медиа с подписью - считаем как текстовый спам
+            if message.content_type in ['photo', 'video', 'document'] and message.caption:
+                msg_type = 'text'
+
+            # Применяем наказание
+            await apply_penalty(user_id, msg_type)
+            return
+
+        # 5. получатели (исключаем автора из получателей)
+        recipients = state['users_data']['active'] - {user_id}
+
+        # Проверяем, это ответ?
+        reply_to_post = None
+        reply_info = {}
+
+        if message.reply_to_message:
+            reply_key = (user_id, message.reply_to_message.message_id)
+            reply_to_post = message_to_post.get(reply_key)
+
+            if reply_to_post and reply_to_post in post_to_messages:
+                reply_info = post_to_messages[reply_to_post]
+            else:
+                reply_to_post = None  # Сбрасываем, если нет в post_to_messages
+
+        # Форматируем заголовок
+        header, current_post_num = format_header()
+
+        # Логируем текст для дневного архива
+        if message.text:
+            daily_log.write(
+                f"[{datetime.now(timezone.utc).isoformat()}] {message.text}\n"
+            )
+
+        # Определяем тип контента
+        content_type = message.content_type
+
+        # Удаляем оригинальное сообщение
         try:
             await message.delete()
-            await bot.send_message(
-                user_id, 
-                f"🔇 Эй пидор, ты в муте ещё {minutes}м {seconds}с\nСпамишь дальше - получишь бан",
-                parse_mode="HTML"
-            )
         except:
             pass
-        return
-    elif until:  # срок мута вышел
-        mutes.pop(user_id, None)
 
-    # 1. автоматически добавляем в active
-    if user_id not in state['users_data']['active']:
-        state['users_data']['active'].add(user_id)
-        print(f"✅ Добавлен новый пользователь: ID {user_id}")  # Добавьте эту строку
-        logging.info(f"Новый пользователь добавлен: ID {user_id}")  # Или эту для более формального лога
+        # Для остальных типов контента
+        content = {
+            'type': content_type,
+            'header': header,  # Здесь header без тегов
+            'reply_to_post': reply_to_post
+        }
 
-    # 2. бан
-    if user_id in state['users_data']['banned']:
-        await message.delete()
-        await message.answer("❌ Ты забанен", show_alert=True)
-        return
-
-    # 4. спам-проверка с прогрессивным наказанием           
-    spam_check = await check_spam(user_id, message)
-    if not spam_check:
-        await message.delete()
-        msg_type = message.content_type
-        # Если это медиа с подписью - считаем как текстовый спам
-        if message.content_type in ['photo', 'video', 'document'] and message.caption:
-            msg_type = 'text'
-
-        # Применяем наказание
-        await apply_penalty(user_id, msg_type)
-        return
-
-    # 5. получатели (исключаем автора из получателей)
-    recipients = state['users_data']['active'] - {user_id}
-
-    # Проверяем, это ответ?
-    reply_to_post = None
-    reply_info = {}
-
-    if message.reply_to_message:
-        reply_key = (user_id, message.reply_to_message.message_id)
-        reply_to_post = message_to_post.get(reply_key)
-
-        if reply_to_post and reply_to_post in post_to_messages:
-            reply_info = post_to_messages[reply_to_post]
-        else:
-            reply_to_post = None  # Сбрасываем, если нет в post_to_messages
-
-    # Форматируем заголовок
-    header, current_post_num = format_header()
-
-    # Логируем текст для дневного архива
-    if message.text:
-        daily_log.write(
-            f"[{datetime.now(timezone.utc).isoformat()}] {message.text}\n"
-        )
-
-    # Определяем тип контента
-    content_type = message.content_type
-
-    # Удаляем оригинальное сообщение
-    try:
-        await message.delete()
-    except:
-        pass
-
-    # Для остальных типов контента
-    content = {
-        'type': content_type,
-        'header': header,  # Здесь header без тегов
-        'reply_to_post': reply_to_post
-    }
-
-    if content_type == 'text':
-        if message.entities:
-            text_content = message.html_text
-        else:
-            text_content = escape_html(message.text)
-        content['text'] = text_content
-    elif content_type == 'photo':
-        content['file_id'] = message.photo[-1].file_id
-        content['caption'] = message.caption
-    elif content_type == 'video':
-        content['file_id'] = message.video.file_id
-        content['caption'] = message.caption
-    elif content_type == 'sticker':
-        content['file_id'] = message.sticker.file_id
-    elif content_type == 'animation':
-        content['file_id'] = message.animation.file_id
-        content['caption'] = message.caption
-    elif content_type == 'document':
-        content['file_id'] = message.document.file_id
-        content['caption'] = message.caption
-    elif content_type == 'voice':
-        content['file_id'] = message.voice.file_id
-    elif content_type == 'audio':
-        content['file_id'] = message.audio.file_id
-        content['caption'] = message.caption
-    elif content_type == 'video_note':
-        content['file_id'] = message.video_note.file_id
-
-    # Сохраняем сообщение
-    messages_storage[current_post_num] = {
-        'author_id': user_id,
-        'timestamp': datetime.now(MSK),
-        'content': content,
-        'reply_to': reply_to_post
-    }
-
-    # Отправляем автору
-    reply_to_message_id = reply_info.get(user_id) if reply_info else None
-    sent_to_author = None
-
-    # Формируем текст для автора (без (You))
-    header_text = f"<i>{header}</i>"
-    reply_text = ""
-    if reply_to_post:
-        reply_text = f">>{reply_to_post}\n"
-
-    if content_type == 'text':
-        full_text = f"{header_text}\n\n{reply_text}{content['text']}" if reply_text else f"{header_text}\n\n{content['text']}"
-        sent_to_author = await bot.send_message(
-            user_id,
-            full_text,
-            reply_to_message_id=reply_to_message_id,
-            parse_mode="HTML"
-        )
-    elif content_type in ['photo', 'video', 'animation', 'document', 'audio']:
-        caption = header_text
-        if content.get('caption'):
-            caption += f"\n\n{escape_html(content['caption'])}"
-        if reply_to_post:
-            caption = f"{header_text}\n\n{reply_text}{escape_html(content['caption']) if content.get('caption') else ''}"
-
-        if content_type == 'photo':
-            sent_to_author = await bot.send_photo(
-                user_id,
-                content['file_id'],
-                caption=caption,
-                reply_to_message_id=reply_to_message_id,
-                parse_mode="HTML"
-            )
+        if content_type == 'text':
+            if message.entities:
+                text_content = message.html_text
+            else:
+                text_content = escape_html(message.text)
+            content['text'] = text_content
+        elif content_type == 'photo':
+            content['file_id'] = message.photo[-1].file_id
+            content['caption'] = message.caption
         elif content_type == 'video':
-            sent_to_author = await bot.send_video(
-                user_id,
-                content['file_id'],
-                caption=caption,
-                reply_to_message_id=reply_to_message_id,
-                parse_mode="HTML"
-            )
+            content['file_id'] = message.video.file_id
+            content['caption'] = message.caption
+        elif content_type == 'sticker':
+            content['file_id'] = message.sticker.file_id
         elif content_type == 'animation':
-            sent_to_author = await bot.send_animation(
-                user_id,
-                content['file_id'],
-                caption=caption,
-                reply_to_message_id=reply_to_message_id,
-                parse_mode="HTML"
-            )
+            content['file_id'] = message.animation.file_id
+            content['caption'] = message.caption
         elif content_type == 'document':
-            sent_to_author = await bot.send_document(
-                user_id,
-                content['file_id'],
-                caption=caption,
-                reply_to_message_id=reply_to_message_id,
-                parse_mode="HTML"
-            )
+            content['file_id'] = message.document.file_id
+            content['caption'] = message.caption
+        elif content_type == 'voice':
+            content['file_id'] = message.voice.file_id
         elif content_type == 'audio':
-            sent_to_author = await bot.send_audio(
-                user_id,
-                content['file_id'],
-                caption=caption,
-                reply_to_message_id=reply_to_message_id,
-                parse_mode="HTML"
-            )
-    elif content_type == 'sticker':
-        sent_to_author = await bot.send_sticker(
-            user_id,
-            content['file_id'],
-            reply_to_message_id=reply_to_message_id
-        )
-    elif content_type == 'video_note':
-        sent_to_author = await bot.send_video_note(
-            user_id,
-            content['file_id'],
-            reply_to_message_id=reply_to_message_id
-        )
+            content['file_id'] = message.audio.file_id
+            content['caption'] = message.caption
+        elif content_type == 'video_note':
+            content['file_id'] = message.video_note.file_id
 
-    # Сохраняем для ответов
-    if sent_to_author:
-        messages_storage[current_post_num]['author_message_id'] = sent_to_author.message_id
-        if current_post_num not in post_to_messages:
-            post_to_messages[current_post_num] = {}
-        post_to_messages[current_post_num][user_id] = sent_to_author.message_id
-        message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
-
-    # Отправляем только другим пользователям (исключая автора)
-    if recipients:
-        await message_queue.put({
-            'recipients': recipients,
+        # Инициализируем запись в хранилище перед отправкой
+        messages_storage[current_post_num] = {
+            'author_id': user_id,
+            'timestamp': datetime.now(MSK),
             'content': content,
-            'post_num': current_post_num,
-            'reply_info': reply_info if reply_info else None
-        })
+            'reply_to': reply_to_post,
+            'author_message_id': None  # Будет установлено после отправки
+        }
+
+        # Отправляем автору
+        reply_to_message_id = reply_info.get(user_id) if reply_info else None
+        sent_to_author = None
+
+        # Формируем текст для автора (без (You))
+        header_text = f"<i>{header}</i>"
+        reply_text = ""
+        if reply_to_post:
+            reply_text = f">>{reply_to_post}\n"
+
+        try:
+            if content_type == 'text':
+                full_text = f"{header_text}\n\n{reply_text}{content['text']}" if reply_text else f"{header_text}\n\n{content['text']}"
+                sent_to_author = await bot.send_message(
+                    user_id,
+                    full_text,
+                    reply_to_message_id=reply_to_message_id,
+                    parse_mode="HTML"
+                )
+            elif content_type in ['photo', 'video', 'animation', 'document', 'audio']:
+                caption = header_text
+                if content.get('caption'):
+                    caption += f"\n\n{escape_html(content['caption'])}"
+                if reply_to_post:
+                    caption = f"{header_text}\n\n{reply_text}{escape_html(content['caption']) if content.get('caption') else ''}"
+
+                if content_type == 'photo':
+                    sent_to_author = await bot.send_photo(
+                        user_id,
+                        content['file_id'],
+                        caption=caption,
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode="HTML"
+                    )
+                elif content_type == 'video':
+                    sent_to_author = await bot.send_video(
+                        user_id,
+                        content['file_id'],
+                        caption=caption,
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode="HTML"
+                    )
+                elif content_type == 'animation':
+                    sent_to_author = await bot.send_animation(
+                        user_id,
+                        content['file_id'],
+                        caption=caption,
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode="HTML"
+                    )
+                elif content_type == 'document':
+                    sent_to_author = await bot.send_document(
+                        user_id,
+                        content['file_id'],
+                        caption=caption,
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode="HTML"
+                    )
+                elif content_type == 'audio':
+                    sent_to_author = await bot.send_audio(
+                        user_id,
+                        content['file_id'],
+                        caption=caption,
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode="HTML"
+                    )
+            elif content_type == 'sticker':
+                sent_to_author = await bot.send_sticker(
+                    user_id,
+                    content['file_id'],
+                    reply_to_message_id=reply_to_message_id
+                )
+            elif content_type == 'video_note':
+                sent_to_author = await bot.send_video_note(
+                    user_id,
+                    content['file_id'],
+                    reply_to_message_id=reply_to_message_id
+                )
+
+            # Сохраняем для ответов
+            if sent_to_author:
+                messages_storage[current_post_num]['author_message_id'] = sent_to_author.message_id
+                if current_post_num not in post_to_messages:
+                    post_to_messages[current_post_num] = {}
+                post_to_messages[current_post_num][user_id] = sent_to_author.message_id
+                message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
+
+            # Отправляем только другим пользователям (исключая автора)
+            if recipients:
+                await message_queue.put({
+                    'recipients': recipients,
+                    'content': content,
+                    'post_num': current_post_num,
+                    'reply_info': reply_info if reply_info else None
+                })
+
+        except Exception as e:
+            print(f"Ошибка при обработке сообщения: {e}")
+            # Удаляем запись из хранилища, если не удалось отправить
+            if current_post_num in messages_storage:
+                del messages_storage[current_post_num]
+
+    except Exception as e:
+        print(f"Критическая ошибка в handle_message: {e}")
 
 # ============ СТАРТ БОТА (один loop, автоперезапуск polling) ============
 async def start_background_tasks():
