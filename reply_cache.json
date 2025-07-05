@@ -41857,7 +41857,7 @@
       "author_msg": 2885567
     },
     "19773": {
-      "author_id": null,
+      "author_id": "",
       "timestamp": "2025-07-04T11:48:41.292997+03:00",
       "author_msg": null
     },
@@ -42067,7 +42067,7 @@
       "author_msg": 2894528
     },
     "19815": {
-      "author_id": null,
+      "author_id": "",
       "timestamp": "2025-07-04T13:09:38.299640+03:00",
       "author_msg": null
     },
@@ -42342,7 +42342,7 @@
       "author_msg": 3165038
     },
     "21008": {
-      "author_id": null,
+      "author_id": "",
       "timestamp": "2025-07-06T01:40:31.179155+03:00",
       "author_msg": null
     },
