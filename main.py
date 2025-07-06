@@ -684,9 +684,28 @@ async def emergency_save():
     """Срочное сохранение перед выключением"""
     print("⚡ Экстренное сохранение state.json и reply_cache.json...")
     try:
-        await save_state()
+        # 1. Сохраняем основные данные
+        success = await save_state()
+        if not success:
+            print("⚠️ Не удалось сохранить state.json")
+        
+        # 2. Сохраняем кэш ответов
         save_reply_cache()
-        await git_commit_and_push()  # Пушим на GitHub
+        
+        # 3. Пушим в GitHub если есть изменения
+        if os.path.exists('/data'):
+            # Простая проверка изменений
+            changed = subprocess.run(
+                ['git', 'diff', '--quiet', 'state.json', 'reply_cache.json'],
+                cwd='/data'
+            ).returncode != 0
+            
+            if changed:
+                print("💾 Обнаружены изменения, пушим в GitHub...")
+                await git_commit_and_push()
+            else:
+                print("ℹ️ Нет изменений для коммита")
+        
         print("✅ Данные сохранены перед выключением")
     except Exception as e:
         print(f"❌ Ошибка при экстренном сохранении: {e}")
@@ -694,8 +713,11 @@ async def emergency_save():
 def handle_shutdown(signum, frame):
     """Перехватываем сигнал остановки"""
     print(f"🛑 Получен сигнал завершения ({signum}), сохраняем данные...")
-    asyncio.create_task(emergency_save())
-    time.sleep(3)  # Даем время на сохранение
+    # Создаем новый event loop для асинхронного сохранения
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(emergency_save())
+    time.sleep(1)  # Даем время на завершение операций
     exit(0)
 
 # Включить перехват сигналов (для Railway)
