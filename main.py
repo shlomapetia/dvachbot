@@ -53,6 +53,29 @@ message_queue = None
 # Отключаем стандартную обработку сигналов в aiogram
 os.environ["AIORGRAM_DISABLE_SIGNAL_HANDLERS"] = "1"
 
+import subprocess
+import shutil
+
+def restore_backup_on_start():
+    """Забирает свежий state.json и reply_cache.json из backup-репозитория при запуске"""
+    repo_url = "https://github.com/shlomapetia/dvachbot-backup.git"
+    backup_dir = "/tmp/backup"
+    try:
+        if os.path.exists(backup_dir):
+            shutil.rmtree(backup_dir)
+        subprocess.run(["git", "clone", repo_url, backup_dir], check=True)
+
+        for fname in ["state.json", "reply_cache.json"]:
+            src = os.path.join(backup_dir, fname)
+            dst = os.path.join(os.getcwd(), fname)
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+                print(f"Восстановлен {fname} из backup-репозитория")
+            else:
+                print(f"{fname} не найден в backup-репозитории")
+    except Exception as e:
+        print(f"Ошибка при восстановлении backup: {e}")
+
 async def healthcheck(request):
     """Для Railway Health Checks"""
     return web.Response(text="Bot is alive")
@@ -70,7 +93,7 @@ async def start_healthcheck():
     print(f"🟢 Healthcheck-сервер запущен на порту {port}")
     return site
     
-GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
+GITHUB_REPO = "https://github.com/shlomapetia/dvachbot-backup.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
 async def git_commit_and_push():
@@ -104,7 +127,7 @@ def sync_git_operations(token: str) -> bool:
     try:
         work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
-        repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
+        repo_url = f"https://{token}@github.com/shlomapetia/dvachbot-backup.git"
         
         if not os.path.exists(os.path.join(work_dir, ".git")):
             # Клонирование репозитория
@@ -3343,6 +3366,10 @@ async def start_background_tasks():
 async def supervisor():
     global is_shutting_down, bot
     loop = asyncio.get_running_loop()  # ДОБАВЬ ЭТУ СТРОЧКУ
+
+    # Вставь вот это до load_state:
+    restore_backup_on_start()
+    
     # Обработка сигналов для Linux/Mac
     if hasattr(signal, 'SIGTERM'):
         loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
