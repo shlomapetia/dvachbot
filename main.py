@@ -750,6 +750,17 @@ async def graceful_shutdown():
         
     is_shutting_down = True
     print("🛑 Получен сигнал shutdown, сохраняем данные...")
+
+    # 1. Экстренное сохранение данных
+    await emergency_save()
+
+    # 2. Фиксируем изменения в GitHub
+    print("🚀 Отправка изменений в GitHub...")
+    success = await git_commit_and_push()
+    if success:
+        print("✅ Данные успешно отправлены в GitHub")
+    else:
+        print("❌ Не удалось отправить данные в GitHub")
     
     try:
         # Останавливаем healthcheck сервер
@@ -766,18 +777,7 @@ async def graceful_shutdown():
             await dp.storage.close()
     except Exception as e:
         print(f"Error during shutdown: {e}")
-    
-    # 1. Экстренное сохранение данных
-    await emergency_save()
-    
-    # 2. Фиксируем изменения в GitHub
-    print("🚀 Отправка изменений в GitHub...")
-    success = await git_commit_and_push()
-    if success:
-        print("✅ Данные успешно отправлены в GitHub")
-    else:
-        print("❌ Не удалось отправить данные в GitHub")
-    
+
     # Закрываем сессию бота
     if 'bot' in globals() and bot.session:
         await bot.session.close()
@@ -789,7 +789,6 @@ async def graceful_shutdown():
     
     await asyncio.gather(*tasks, return_exceptions=True)
     print("✅ Все задачи остановлены, завершаем работу")
-
 async def emergency_save():
     """Срочное сохранение перед выключением"""
     print("⚡ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Запуск...")
