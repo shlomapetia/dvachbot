@@ -63,35 +63,30 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переме�
 async def git_commit_and_push():
     """Надежная функция бэкапа state и reply в GitHub"""
     try:
-        # Проверка переменных окружения
         token = os.getenv("GITHUB_TOKEN")
         if not token:
             print("❌ Нет GITHUB_TOKEN")
             return False
 
-        # Настройка Git - отключаем автообновление
-        subprocess.run(["git", "config", "--global", "user.name", "Backup Bot"], check=True)
-        subprocess.run(["git", "config", "--global", "user.email", "bot@example.com"], check=True)
-        subprocess.run(["git", "config", "--global", "pull.rebase", "false"], check=True)  # Добавлено
-
-        # Рабочая директория
+        repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
         work_dir = "/data"
+        
         if not os.path.exists(work_dir):
             os.makedirs(work_dir, exist_ok=True)
         
-        # Клонируем или обновляем репозиторий (только если нет .git)
+        # Клонируем или обновляем репозиторий
         git_dir = os.path.join(work_dir, ".git")
         if not os.path.exists(git_dir):
-            clone_cmd = ["git", "clone", f"https://{token}@github.com/shlomapetia/dvachbot.git", work_dir]
-            result = subprocess.run(clone_cmd, cwd=work_dir)
+            clone_cmd = ["git", "clone", repo_url, work_dir]
+            result = subprocess.run(clone_cmd, cwd=work_dir, capture_output=True, text=True)
             if result.returncode != 0:
-                print("❌ Ошибка клонирования репозитория")
+                print(f"❌ Ошибка клонирования: {result.stderr}")
                 return False
         else:
-            # Отключаем автообновление при пуше
-            subprocess.run(["git", "config", "--global", "receive.denyCurrentBranch", "ignore"], check=True)
+            pull_cmd = ["git", "pull"]
+            subprocess.run(pull_cmd, cwd=work_dir, stdout=subprocess.DEVNULL)
 
-        # Копируем файлы для бэкапа
+        # Копируем файлы
         files_to_backup = []
         for f in ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"):
             if os.path.exists(f):
@@ -103,41 +98,21 @@ async def git_commit_and_push():
             return False
 
         # Git операции
-        try:
-            # Добавляем файлы
-            subprocess.run(["git", "add"] + files_to_backup, cwd=work_dir, check=True)
-            
-            # Проверяем есть ли изменения для коммита
-            status_result = subprocess.run(["git", "status", "--porcelain"], cwd=work_dir, 
-                                         capture_output=True, text=True)
-            if not status_result.stdout.strip():
-                print("ℹ️ Нет изменений для коммита")
-                return True
-            
-            # Коммит
-            commit_msg = f"Backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            subprocess.run(["git", "commit", "-m", commit_msg], cwd=work_dir, check=True)
-            
-            # Push с повторными попытками при ошибках
-            max_retries = 3
-            for attempt in range(max_retries):
-                push_result = subprocess.run(["git", "push"], cwd=work_dir)
-                if push_result.returncode == 0:
-                    print(f"✅ Бекапы сохранены в GitHub: {', '.join(files_to_backup)}")
-                    return True
-                else:
-                    print(f"⚠️ Ошибка при push в GitHub (попытка {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(5)
-            
-            print("❌ Не удалось выполнить push после нескольких попыток")
-            return False
-                
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Ошибка git-операции: {e}")
-            return False
-
+        add_cmd = ["git", "add"] + files_to_backup
+        commit_cmd = ["git", "commit", "-m", f"Backup: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"]
+        push_cmd = ["git", "push"]
+        
+        for cmd in [add_cmd, commit_cmd, push_cmd]:
+            result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"❌ Ошибка команды {' '.join(cmd)}: {result.stderr}")
+                return False
+        
+        print(f"✅ Бекапы сохранены в GitHub: {', '.join(files_to_backup)}")
+        return True
+        
     except Exception as e:
-        print(f"⛔ Критическая ошибка в git_commit_and_push: {e}")
+        print(f"⛔ Критическая ошибка в git_commit_and_push: {str(e)[:200]}")
         return False
 
 dp = Dispatcher()
@@ -224,28 +199,29 @@ async def auto_backup():
         try:
             await asyncio.sleep(7200)  # 2 часа
             
-            # 1. Удаляем старые бэкапы (оставляем только 3 последних)
-            backup_files = sorted(glob.glob("backup_state_*.json"))
-            if len(backup_files) > 2:
-                for old_file in backup_files[:-2]:
-                    try:
-                        os.remove(old_file)
-                        print(f"🗑 Удален старый бэкап: {old_file}")
-                    except Exception as e:
-                        print(f"❌ Ошибка удаления {old_file}: {e}")
-
-            # 2. Создаем новый бэкап
-            backup_name = f"backup_state_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            # Создаем новый бэкап
+            backup_name = f"backup_state_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
             shutil.copy2("state.json", backup_name)
             
-            # 3. Пушим в GitHub
-            await git_commit_and_push()
+            # Пушим ВСЕ файлы
+            success = await git_commit_and_push()
+            
+            # Удаляем старые бэкапы только после успешного пуша
+            if success:
+                backup_files = sorted(glob.glob("backup_state_*.json"))
+                if len(backup_files) > 3:
+                    for old_file in backup_files[:-3]:
+                        try:
+                            os.remove(old_file)
+                            print(f"🗑 Удален старый бэкап: {old_file}")
+                        except Exception as e:
+                            print(f"❌ Ошибка удаления {old_file}: {e}")
             
             print(f"✅ Полный бэкап выполнен: {backup_name}")
             
         except Exception as e:
-            print(f"❌ Критическая ошибка в auto_backup: {e}")
-            await asyncio.sleep(600)  # Ждем 10 минут при ошибке
+            print(f"❌ Ошибка в auto_backup: {e}")
+            await asyncio.sleep(600)
 
 # Настройка сборщика мусора
 gc.set_threshold(
@@ -554,7 +530,7 @@ def is_admin(uid: int) -> bool:
 async def save_state():
     """Только сохранение state.json и push в GitHub"""
     try:
-        # 1. Сохраняем state.json
+        # Сохраняем state.json
         with open('state.json', 'w', encoding='utf-8') as f:
             json.dump({
                 'post_counter': state['post_counter'],
@@ -569,26 +545,14 @@ async def save_state():
                 }
             }, f, ensure_ascii=False, indent=2)
         
-        # 2. Пушим в GitHub если есть изменения
-        if os.path.exists('/data'):
-            # Простая проверка изменений через git diff
-            changed = subprocess.run(
-                ['git', 'diff', '--quiet', 'state.json'],
-                cwd='/data'
-            ).returncode != 0
-            
-            if changed:
-                print("💾 Обнаружены изменения в state.json, пушим в GitHub...")
-                await git_commit_and_push()
-            else:
-                print("ℹ️ state.json не изменился")
-        
-        return True
+        # Всегда пушим при изменении
+        print("💾 Обновление state.json, пушим в GitHub...")
+        return await git_commit_and_push()
         
     except Exception as e:
         print(f"⛔ Ошибка сохранения state: {e}")
         return False
-
+        
 def save_reply_cache():
     """Сохраняет кэш ответов только если есть изменения"""
     try:
