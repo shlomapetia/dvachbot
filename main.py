@@ -43,6 +43,8 @@ import os
 import signal
 from datetime import datetime, UTC  # Добавьте UTC в импорты
 
+message_queue = None  # Глобальная очередь сообщений
+
 # Глобальный семафор для Git-операций
 git_semaphore = asyncio.Semaphore(1)
 
@@ -94,13 +96,11 @@ async def git_commit_and_push():
             
 def sync_git_operations(token: str) -> bool:
     """Синхронные Git-операции для выполнения в отдельном потоке"""
-        # Проверяем, не завершен ли executor
-    if git_executor._shutdown:
-        print("⚠️ Git executor завершен, пропускаем операции")
-        return False
-        
     try:
-        # Остальной код функции остается без изменений
+        # Проверяем, не завершен ли executor
+        if git_executor._shutdown:
+            print("⚠️ Git executor завершен, пропускаем операции")
+            return False
         work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
@@ -249,12 +249,19 @@ async def shutdown():
     
     if 'bot' in globals() and bot.session:
         await bot.session.close()
+    
+    # Явно останавливаем все асинхронные задачи
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    print("All background tasks stopped")
         
 async def auto_backup():
     """Автоматическое сохранение бэкапов в GitHub каждые 6 часа"""
     while True:
         try:
-            await asyncio.sleep(21610)  # 6 часа
+            await asyncio.sleep(21600)  # 6 часа
             
             # Создаем новый бэкап
             backup_name = f"backup_state_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
@@ -2786,7 +2793,7 @@ async def memory_cleaner():
 # ========== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ==========
 async def process_complete_media_group(media_group_id: str):
     """Отправка собранного медиа-альбома без дублирования"""
-    if media_group_id not in current_media_groups or media_group_id in sent_media_groups:
+    if media_group_id not in current_media_groups:
         return
 
     media_group = current_media_groups[media_group_id]
@@ -2800,7 +2807,10 @@ async def process_complete_media_group(media_group_id: str):
         media_group['reply_to_post'] = None
 
     # Помечаем как отправленную
+    if media_group_id in sent_media_groups:
+        return
     sent_media_groups.add(media_group_id)
+
 
     post_num = media_group['post_num']
     user_id = media_group['author_id']
@@ -3308,8 +3318,6 @@ async def start_background_tasks():
     tasks = [
         asyncio.create_task(auto_save_state()),
         asyncio.create_task(message_broadcaster()),
-        asyncio.create_task(message_broadcaster()),
-        asyncio.create_task(message_broadcaster()),
         asyncio.create_task(conan_roaster()), 
         asyncio.create_task(start_healthcheck()),
         asyncio.create_task(motivation_broadcaster()), 
@@ -3339,26 +3347,27 @@ async def supervisor():
         max_restarts = 10
         restart_delay = 30
         
-        while restart_count < max_restarts:
+        while True:  # Бесконечный цикл перезапуска
             try:
                 print("▶️ Start polling...")
                 await dp.start_polling(
                     bot, 
                     allowed_updates=dp.resolve_used_update_types(), 
                     close_bot_session=False,
-                    handle_signals=True,  # Разрешаем aiogram обрабатывать сигналы
-                    skip_updates=True
+                    handle_signals=True,
+                    skip_updates=True,
+                    timeout=60
                 )
             except asyncio.CancelledError:
                 print("⚠️ Received cancellation signal")
                 break
-            except TelegramNetworkError as e:
-                restart_count += 1
-                print(f"⚠️ Network error: {e} (restarting in {restart_delay} seconds)")
-                await asyncio.sleep(restart_delay)
             except Exception as e:
                 restart_count += 1
-                print(f"⚠️ Unexpected error: {e} (restarting in {restart_delay} seconds)")
+                if restart_count >= max_restarts:
+                    print(f"🔴 Maximum restarts reached ({max_restarts}), exiting")
+                    break
+                    
+                print(f"⚠️ Restarting bot in {restart_delay}s (reason: {e})")
                 await asyncio.sleep(restart_delay)
             else:
                 print("⏹️ Polling finished normally")
