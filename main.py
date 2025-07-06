@@ -45,6 +45,9 @@ from datetime import datetime, UTC  # Добавьте UTC в импорты
 # Глобальный семафор для Git-операций
 git_semaphore = asyncio.Semaphore(1)
 
+# Глобальный executor для тяжелых операций
+executor = ThreadPoolExecutor(max_workers=2)  # Ограничиваем количество одновременно выполняемых Git-операций
+
 async def healthcheck(request):
     """Для Railway Health Checks"""
     return web.Response(text="Bot is alive")
@@ -63,7 +66,7 @@ GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
 async def git_commit_and_push():
-    """Надежная функция бэкапа в GitHub с улучшенной обработкой ошибок"""
+    """Надежная функция бэкапа в GitHub с использованием отдельного потока"""
     async with git_semaphore:
         try:
             token = os.getenv("GITHUB_TOKEN")
@@ -71,65 +74,77 @@ async def git_commit_and_push():
                 print("❌ Нет GITHUB_TOKEN")
                 return False
 
-            work_dir = "/tmp/git_backup"
-            os.makedirs(work_dir, exist_ok=True)
-            repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
-            
-            # Инициализация/обновление репозитория
-            if not os.path.exists(os.path.join(work_dir, ".git")):
-                clone_cmd = ["git", "clone", repo_url, work_dir]
-                result = subprocess.run(clone_cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    print(f"❌ Ошибка клонирования: {result.stderr}")
-                    return False
-                print("✅ Репозиторий клонирован")
-            else:
-                pull_cmd = ["git", "pull"]
-                result = subprocess.run(pull_cmd, cwd=work_dir, capture_output=True, text=True)
-                if result.returncode != 0:
-                    print(f"⚠️ Ошибка обновления: {result.stderr}")
-
-            # Копирование файлов
-            files = []
-            for fname in ["state.json", "reply_cache.json"]:
-                src = os.path.join(os.getcwd(), fname)
-                if os.path.exists(src):
-                    shutil.copy2(src, work_dir)
-                    files.append(fname)
-            
-            for fname in glob.glob("backup_state_*.json"):
-                shutil.copy2(fname, work_dir)
-                files.append(os.path.basename(fname))
-            
-            if not files:
-                print("⚠️ Нет файлов для бэкапа")
-                return False
-
-            # Настройка пользователя Git
-            subprocess.run(["git", "config", "user.name", "Backup Bot"], cwd=work_dir, check=True)
-            subprocess.run(["git", "config", "user.email", "backup@dvachbot.com"], cwd=work_dir, check=True)
-            
-            # Git команды
-            commands = [
-                ["git", "add", "."],
-                ["git", "commit", "-m", f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"],
-                ["git", "push", "-u", "origin", "main"]
-            ]
-            
-            for cmd in commands:
-                result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
-                if result.returncode != 0:
-                    print(f"❌ Ошибка команды {' '.join(cmd)}: {result.stderr}")
-                    return False
-            
-            print(f"✅ Бекапы сохранены в GitHub: {', '.join(files)}")
-            return True
+            # Запускаем в отдельном потоке
+            loop = asyncio.get_running_loop()
+            success = await loop.run_in_executor(executor, sync_git_operations, token)
+            return success
             
         except Exception as e:
             print(f"⛔ Критическая ошибка в git_commit_and_push: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
+
+def sync_git_operations(token: str) -> bool:
+    """Синхронные Git-операции для выполнения в отдельном потоке"""
+    try:
+        work_dir = "/tmp/git_backup"
+        os.makedirs(work_dir, exist_ok=True)
+        repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
+        
+        # Инициализация/обновление репозитория
+        if not os.path.exists(os.path.join(work_dir, ".git")):
+            clone_cmd = ["git", "clone", repo_url, work_dir]
+            result = subprocess.run(clone_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"❌ Ошибка клонирования: {result.stderr}")
+                return False
+            print("✅ Репозиторий клонирован")
+        else:
+            pull_cmd = ["git", "pull"]
+            result = subprocess.run(pull_cmd, cwd=work_dir, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"⚠️ Ошибка обновления: {result.stderr}")
+
+        # Копирование файлов
+        files = []
+        for fname in ["state.json", "reply_cache.json"]:
+            src = os.path.join(os.getcwd(), fname)
+            if os.path.exists(src):
+                shutil.copy2(src, work_dir)
+                files.append(fname)
+        
+        for fname in glob.glob("backup_state_*.json"):
+            shutil.copy2(fname, work_dir)
+            files.append(os.path.basename(fname))
+        
+        if not files:
+            print("⚠️ Нет файлов для бэкапа")
+            return False
+
+        # Настройка пользователя Git
+        subprocess.run(["git", "config", "user.name", "Backup Bot"], cwd=work_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "backup@dvachbot.com"], cwd=work_dir, check=True)
+        
+        # Git команды
+        commands = [
+            ["git", "add", "."],
+            ["git", "commit", "-m", f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"],
+            ["git", "push", "-u", "origin", "main"]
+        ]
+        
+        for cmd in commands:
+            result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"❌ Ошибка команды {' '.join(cmd)}: {result.stderr}")
+                return False
+        
+        print(f"✅ Бекапы сохранены в GitHub: {', '.join(files)}")
+        return True
+        
+    except Exception as e:
+        print(f"⛔ Синхронная Git ошибка: {str(e)}")
+        return False
         
 dp = Dispatcher()
 # Настройка логирования - только важные сообщения
@@ -209,6 +224,7 @@ async def shutdown():
     """Cleanup tasks before shutdown"""
     print("Shutting down...")
     try:
+        executor.shutdown(wait=False)  # Завершаем executor
         await dp.storage.close()
     except:
         pass
@@ -220,10 +236,10 @@ async def shutdown():
     await emergency_save()
 
 async def auto_backup():
-    """Автоматическое сохранение бэкапов в GitHub каждые 2 часа"""
+    """Автоматическое сохранение бэкапов в GitHub каждые 6 часа"""
     while True:
         try:
-            await asyncio.sleep(7200)  # 2 часа
+            await asyncio.sleep(21610)  # 6 часа
             
             # Создаем новый бэкап
             backup_name = f"backup_state_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
@@ -248,10 +264,13 @@ async def auto_backup():
             
             print(f"✅ Полный бэкап выполнен: {backup_name}")
             
+            # Даем event loop время обработать другие задачи
+            await asyncio.sleep(5)
+            
         except Exception as e:
             print(f"❌ Ошибка в auto_backup: {e}")
             await asyncio.sleep(600)
-
+            
 # Настройка сборщика мусора
 gc.set_threshold(
     700, 10, 10)  # Оптимальные настройки для баланса памяти/производительности
@@ -302,7 +321,7 @@ ADMINS = {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
 SPAM_LIMIT = 12
 SPAM_WINDOW = 15
 STATE_FILE = 'state.json'
-SAVE_INTERVAL = 180  # секунд
+SAVE_INTERVAL = 21600  # секунд
 STICKER_WINDOW = 10  # секунд
 STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
@@ -854,10 +873,10 @@ async def aiogram_memory_cleaner():
             )
 
 async def auto_save_state():
-    """Автоматическое сохранение состояния каждые 3 минуты"""
+    """Автоматическое сохранение состояния каждые 6"""
     while True:
         try:
-            await asyncio.sleep(180)  # 3 минуты
+            await asyncio.sleep(21600)  # 6 часов
             
             # Сохраняем кэш ответов
             save_reply_cache()
