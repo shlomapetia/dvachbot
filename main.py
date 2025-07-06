@@ -69,6 +69,11 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переме�
 
 async def git_commit_and_push():
     """Надежная функция бэкапа в GitHub с использованием отдельного потока"""
+    # Проверяем, не завершен ли уже executor
+    if git_executor._shutdown:
+        print("⚠️ Git executor уже завершен, пропускаем бэкап")
+        return False
+        
     async with git_semaphore:
         try:
             token = os.getenv("GITHUB_TOKEN")
@@ -89,11 +94,16 @@ async def git_commit_and_push():
             
 def sync_git_operations(token: str) -> bool:
     """Синхронные Git-операции для выполнения в отдельном потоке"""
+        # Проверяем, не завершен ли executor
+    if git_executor._shutdown:
+        print("⚠️ Git executor завершен, пропускаем операции")
+        return False
+        
     try:
+        # Остальной код функции остается без изменений
         work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
-        
         # Инициализация/обновление репозитория
         if not os.path.exists(os.path.join(work_dir, ".git")):
             clone_cmd = ["git", "clone", repo_url, work_dir]
@@ -226,7 +236,10 @@ async def shutdown():
     """Cleanup tasks before shutdown"""
     print("Shutting down...")
     try:
-        # Останавливаем executors в правильном порядке
+        # Вызываем экстренное сохранение ПЕРЕД остановкой executors
+        await emergency_save()
+        
+        # Останавливаем executors
         git_executor.shutdown(wait=True, cancel_futures=True)
         send_executor.shutdown(wait=True, cancel_futures=True)
         
@@ -236,9 +249,7 @@ async def shutdown():
     
     if 'bot' in globals() and bot.session:
         await bot.session.close()
-    
-    # Вызываем экстренное сохранение
-    await emergency_save()
+        
 async def auto_backup():
     """Автоматическое сохранение бэкапов в GitHub каждые 6 часа"""
     while True:
@@ -755,12 +766,15 @@ async def emergency_save():
         
         print("✅ Данные сохранены локально")
         
-        # 3. Пушим в GitHub
-        success = await git_commit_and_push()
-        if success:
-            print("✅ Экстренные данные отправлены в GitHub")
+        # 3. Пушим в GitHub (только если executor еще активен)
+        if not git_executor._shutdown:
+            success = await git_commit_and_push()
+            if success:
+                print("✅ Экстренные данные отправлены в GitHub")
+            else:
+                print("❌ Ошибка при отправке экстренных данных в GitHub")
         else:
-            print("❌ Ошибка при отправке экстренных данных в GitHub")
+            print("⚠️ Git executor завершен, пропускаем пушинг в GitHub")
         
     except Exception as e:
         print(f"❌ Ошибка при экстренном сохранении: {e}")
