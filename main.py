@@ -13,11 +13,9 @@ import secrets
 import pickle
 import gzip
 from aiogram import types
-import gc
 import weakref
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
 from typing import Tuple
 import aiohttp
 from aiohttp import web
@@ -39,9 +37,8 @@ from aiogram.types import (
     InlineKeyboardMarkup,
 )
 import subprocess
-import os
 import signal
-from datetime import datetime, UTC  # Добавьте UTC в импорты
+from datetime import datetime, timedelta, timezone, UTC
 
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
@@ -49,12 +46,17 @@ git_executor = ThreadPoolExecutor(max_workers=1)
 send_executor = ThreadPoolExecutor(max_workers=100)
 git_semaphore = asyncio.Semaphore(1)
 message_queue = None
+zaputin_mode = False
+slavaukraine_mode = False
+suka_blyat_mode = False
+last_suka_blyat = None
+suka_blyat_counter = 0
+last_mode_activation = None
+MODE_COOLDOWN = 3600  # 1 час в секундах
+
 
 # Отключаем стандартную обработку сигналов в aiogram
 os.environ["AIORGRAM_DISABLE_SIGNAL_HANDLERS"] = "1"
-
-import subprocess
-import shutil
 
 def restore_backup_on_start():
     """Забирает свежий state.json и reply_cache.json из backup-репозитория при запуске"""
@@ -92,19 +94,19 @@ async def start_healthcheck():
     await site.start()  # Важно: ожидаем запуска
     print(f"🟢 Healthcheck-сервер запущен на порту {port}")
     return site
-    
+
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot-backup.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
 async def git_commit_and_push():
     """Надежная функция бэкапа в GitHub"""
     global is_shutting_down
-    
+
     # Разрешаем выполнение при shutdown
     if git_executor._shutdown and not is_shutting_down:
         print("⚠️ Git executor завершен, пропускаем бэкап")
         return False
-        
+
     async with git_semaphore:
         try:
             token = os.getenv("GITHUB_TOKEN")
@@ -128,7 +130,7 @@ def sync_git_operations(token: str) -> bool:
         work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot-backup.git"
-        
+
         if not os.path.exists(os.path.join(work_dir, ".git")):
             # Клонирование репозитория
             clone_cmd = ["git", "clone", repo_url, work_dir]
@@ -147,13 +149,13 @@ def sync_git_operations(token: str) -> bool:
         # Копирование файлов
         files_to_copy = ["state.json", "reply_cache.json"]
         copied_files = []
-        
+
         for fname in files_to_copy:
             src = os.path.join(os.getcwd(), fname)
             if os.path.exists(src):
                 shutil.copy2(src, work_dir)
                 copied_files.append(fname)
-        
+
         if not copied_files:
             print("⚠️ Нет файлов для бэкапа")
             return False
@@ -161,26 +163,26 @@ def sync_git_operations(token: str) -> bool:
         # Git операции
         subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True)
         subprocess.run(["git", "-C", work_dir, "config", "user.email", "backup@dvachbot.com"], check=True)
-        
+
         subprocess.run(["git", "-C", work_dir, "add", "."], check=True)
-        
+
         commit_msg = f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
         subprocess.run(["git", "-C", work_dir, "commit", "-m", commit_msg], check=True)
-        
+
         push_cmd = ["git", "-C", work_dir, "push", "-u", "origin", "main"]
         result = subprocess.run(push_cmd, capture_output=True, text=True)
-        
+
         if result.returncode != 0:
             print(f"❌ Ошибка пуша: {result.stderr}")
             return False
-        
+
         print(f"✅ Бекапы сохранены в GitHub: {', '.join(copied_files)}")
         return True
-        
+
     except Exception as e:
         print(f"⛔ Синхронная Git ошибка: {str(e)}")
         return False
-        
+
 dp = Dispatcher()
 # Настройка логирования - только важные сообщения
 logging.basicConfig(
@@ -237,26 +239,26 @@ async def shutdown():
         if 'healthcheck_site' in globals():
             await healthcheck_site.stop()
             print("🛑 Healthcheck server stopped")
-            
+
         # Останавливаем executors корректно
         git_executor.shutdown(wait=True, cancel_futures=True)
         send_executor.shutdown(wait=True, cancel_futures=True)
-        
+
         # Закрываем хранилище диспетчера
         if hasattr(dp, 'storage') and dp.storage:
             await dp.storage.close()
     except Exception as e:
         print(f"Error during shutdown: {e}")
-    
+
     # Закрываем сессию бота
     if 'bot' in globals() and bot.session:
         await bot.session.close()
-    
+
     # Отменяем все фоновые задачи
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     for task in tasks:
         task.cancel()
-    
+
     # Ждем завершения задач с таймаутом
     await asyncio.wait_for(
         asyncio.gather(*tasks, return_exceptions=True),
@@ -264,19 +266,19 @@ async def shutdown():
     )
     print("All background tasks stopped")
 
-        
+
 async def auto_backup():
     """Автоматическое сохранение каждые 10 минут"""
     while True:
         try:
             await asyncio.sleep(600)  # 10 минут
-            
+
             if is_shutting_down:
                 break
 
             # Сохраняем reply_cache
             save_reply_cache()
-            
+
             # Сохраняем state.json
             with open('state.json', 'w', encoding='utf-8') as f:
                 json.dump({
@@ -291,7 +293,7 @@ async def auto_backup():
                         str(k): v for k, v in list(post_to_messages.items())[-500:]
                     }
                 }, f, ensure_ascii=False, indent=2)
-            
+
             # Пуш в GitHub
             print("💾 Обновление state.json и reply_cache.json, пушим в GitHub...")
             success = await git_commit_and_push()
@@ -299,12 +301,12 @@ async def auto_backup():
                 print("✅ Бэкап успешно отправлен")
             else:
                 print("❌ Не удалось отправить данные в GitHub")
-            
+
         except Exception as e:
             print(f"❌ Ошибка в auto_backup: {e}")
             # Ждем 1 минуту перед повторной попыткой
             await asyncio.sleep(60)
-            
+
 # Настройка сборщика мусора
 gc.set_threshold(
     700, 10, 10)  # Оптимальные настройки для баланса памяти/производительности
@@ -348,7 +350,7 @@ async def cleanup_old_messages():
             print(f"Очищено {len(old_posts)} старых постов")
         except Exception as e:
             print(f"Ошибка очистки: {e}")
-            
+
 # для проверки одинаковых / коротких сообщений
 last_texts: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=5))
 
@@ -426,6 +428,44 @@ INVITE_TEXTS = [
     "Добро пожаловать. Снова. @dvach_chatbot",
     "Привет, анон. Ты не один. Зови друзей. @dvach_chatbot",
     "Тгач - двач в телеге @dvach_chatbot",
+]
+
+# Для /slavaukraine
+UKRAINIAN_PHRASES = [
+    "СЛАВА УКРАЇНІ! ГЕРОЯМ СЛАВА!",
+    "ПУТИН ХУЙЛО!",
+    "РОССИЯНСКИЙ ВОЕННЫЙ КОРАБЛЬ, ИДИ НАХУЙ!",
+    "УКРАИНА ПРЕВЫШЕ ВСЕГО!",
+    "КРЫМ ЭТО УКРАИНА!",
+    "ДОНБАСС НАШ! СЛАВА УКРАИНЕ!",
+    "СМЕРТЬ РАШИНСКИМ ОККУПАНТАМ!",
+    "БАНДЕРОВЦЫ ГЕРОИ!",
+    "СВОБОДА НАРОДУ!",
+    "МОСКАЛЯКУ НА ГИЛЯКУ!",
+    "УКРАИНА НЕ СДАСТСЯ!",
+    "ЗА ПОБЕДУ! ЗА УКРАИНУ!",
+    "ПУТИНСКИЕ ОРКИ В АДУ!",
+    "ТЕРРОРИСТИЧЕСКАЯ РФ ДОЛЖНА ПАСТЬ!",
+    "БОЙКОТ РУССКОМУ ГАЗУ!",
+    "ХАЙ ЖИВЕ ЗЕЛЕНЫЙ КЛИН!",
+    "УКРАИНА ЕВРОПЕЙСКАЯ ДЕРЖАВА!",
+    "НЕТ ВОЙНЕ!",
+    "ГЕНОЦИД РОССИЯН ПРЕКРАТИТЬ!",
+    "СЛАВА НАЦИИ! СМЕРТЬ ВРАГАМ!",
+    "УКРАИНА ЦЕ ЕВРОПА!",
+    "БЕЛЫЙ ГРОМ ПРИЙДЕТ!",
+    "ДЕОККУПАЦИЯ И ДЕКОЛОНИЗАЦИЯ!",
+    "БАНДЕРА - ГЕРОЙ!",
+    "МОСКОВИЯ - ТЮРЬМА НАРОДОВ!",
+    "БУКОВЕЛЬ ЛУЧШИЙ КУРОРТ!",
+    "УКРАИНСКИЙ ДУХ НЕ СЛОМИТЬ!",
+    "ПАТРИОТЫ ПОБЕДЯТ!",
+    "РОССИЯ БУДЕТ УНИЧТОЖЕНА!",
+    "СЛАВА ЗСУ! СЛАВА АЗОВУ!",
+    "УКРАИНА - ЛУЧШАЯ СТРАНА!",
+    "СЛАВА УКРАИНЕ!",
+    "УКРАИНА - НАША РОДИНА!",
+    "РАЗРУШИМ РАШКУ!"
 ]
 
 # ─── КОНАН-СЛОВАРИ ─────────────────────────────────────────────
@@ -512,6 +552,104 @@ TEMPLATES = [
     "Тухлый форс от тебя, ебаный {ins}!", "Не вывез веса? {ins} ебаный",
     "В палату вернись, ебаный {ins}", "Я король мужских членов"
 ]
+
+# Для /deanon
+DEANON_NAMES = ["Валера", "Геннадий", "Дмитрий", "Аркадий", "Николай", "Женя", 
+                "Сергей", "Александр", "Владимир", "Борис", "Евгений", "Михаил",
+                "Олег", "Павел", "Константин", "Виктор", "Юрий", "Тимофей", "Глеб", "Роман"
+                "Эдик", "Гена", "Андрей", "Иван", "Данил", "Саня", "Лёша", "Коля", "Ваня", "Петя", "Саша", "Миша"
+                "Матвей", "Руслан", "Артем", "Илья", "Денис", "Егор", "Максим", "Кирилл", "Тимур", "Артём", "Даниил"]
+DEANON_SURNAMES = ["Андреев", "Борисов", "Васильев", "Григорьев", "Дмитриев", "Егоров",
+                   "Захаров", "Иванов", "Константинов", "Леонидов", "Михайлов", "Николаев"
+                   "Путин", "Орлов", "Петров", "Романов", "Смирнов", "Титов", "Ульянов", "Федоров",
+                   "Харитонов", "Царев", "Чернов", "Шапошников",
+                   "Курбатов", "Ерохин", "Сычев",
+                   "Хуйкин", "Чехов", "Шевцов", "Щербаков", "Юрьев", "Яковлев", "Яшин", "Пиздюков",
+                   "Пидарасов", "Пидоров", "Пидоровский", "Ленковец",
+                   "Гитлер", "Хуйланский", "Жейков", "Филатов", "Кукушин", "Перов", "Козлов", "Соболев",
+                   "Петухов", "Хуев", "Дрочилов", "Пидарасов", "Мудаков", "Говнюков",
+                   "Залупин", "Мудозвонов", "Херович", "Песков", "Шизанутов", "Кончалов",
+                   "Минетов", "Спермов", "Членов", "Вагин", "Сосунков", "Педиков", "Гомиков", "Аналов"]
+DEANON_CITIES = ["Магнитогорск", "Челябинск", "Тюмень", "Уфа", "Омск", "Кемерово",
+                 "Братск", "Норильск", "Воркута", "Ухта", "Нижний Тагил", "Череповец",
+                 "Липецк", "Тольятти", "Набережные Челны", "Магадан", "Петропавловск-Камчатский",
+                 "Новокузнецк", "Красноярск", "Иркутск", "Кемерово", "Новосибирск", "Красноярск",
+                 "Ижевск", "Сургут", "Сыктывкар", "Вологда", "Владивосток", "Москва", "Самара", 
+                 "Саратов", "Казань", "Пенза", "Киев", "Минск", "Вильнюс", "Рига", "Таллин", 
+                 "Хельсинки", "Стокгольм", "Осло", "Копенгаген", "Берлин"]
+DEANON_PROFESSIONS = ["сантехник", "грузчик", "охранник", "менеджер по продажам", 
+                      "электрик", "безработный", "дворник", "алкаш", "наркодилер", 
+                      "вор в законе", "охотник на педофилов", "разнорабочий", 
+                      "грузчик-хуесос", "уборщик сортиров", "торговец героином", 
+                      "смотритель помойки", "сборщик бутылок", "попрошайка", "сутенер",
+                      "психолог", "психиатр", "врач", "врач-нарколог", "врач-сексолог", "врач-терапевт", "врач-хирург",
+                      "гей шлюха", "трансгендер", "аниматор", "диджей", "бармен", "бармен-пидор", "бариста", "анимешник", "художник"]
+DEANON_FETISHES = ["ножки школьниц", "трусики бабушек", "потные носки", "испражнения в банке", 
+                   "трупы голубей", "просроченный майонез", "порно 80-х", 
+                   "запах метро", "гнойные прыщи", "обрезки ногтей", 
+                   "использованные тампоны", "плесень в подвале", "засохшая сперма", "потные носки",
+                   "зоофилия", "негры", "девочки", "мамки", "детское порно", "боллбастинг", "пожилые", 
+                   "анальный секс", "классический секс", "мигранты", "азиаты", "евреи", "афроамериканцы",
+                   "латиноамериканцы", "индийцы", "китайцы", "японцы", "корейцы", "школьницы на коленках", "моногатари", 
+                   "хентай", "фурри", "негры", "девочки", "мамки", "детское порно", "боллбастинг",
+                   "пожилые", "анальный секс", "классический", "уринация", "бдсм", "свинг", "соло",
+                   "групп секс", "оргизм", "минет", "фелацио", "кунилингус", "анальный секс", "оргазм"]
+DEANON_DETAILS = [
+    "скрывает криминальное прошлое", "сосет у работодателя", "мочится в раковину",
+    "ебется с детьми", "боится темноты", "коллекционирует дилдаки",
+    "имеет 5 судимостей", "просрочил паспорт", "не моется 2 недели",
+    "ворует в Пятерочке", "пьет одеколон", "снимает квартиру у педофила",
+    "спит на помойке", "мечтает стать хохлом", "боится женщин",
+    "мастурбирует на советские мультики", "носит трусы сестры",
+    "платит за секс с бабушками", "покупает поддельные кроссовки",
+    "участвует в собачьих боях", "пьет мочу из банки",
+    "обоссался в метро", "пидор", "донатил в казино", 
+    "сидит на бутылке", "сын шлюхи",
+    "инвалид по дурке", "член 10 см", 
+    "мечтает изнасиловать школьницу", 
+    "латентный пидор"
+]
+
+# Для /zaputin
+PATRIOTIC_PHRASES = [
+    "СЛАВА РОССИИ!",
+    "ПУТИН - НАШ ПРЕЗИДЕНТ!",
+    "КРЫМ НАШ!",
+    "ДОНБАСС С НАМИ!",
+    "ЗА РОДИНУ! ЗА ПУТИНА!",
+    "НАШ ОТВЕТ САНКЦИЯМ!",
+    "РОССИЯ ВПЕРЕД!",
+    "ПОБЕДА БУДЕТ ЗА НАМИ!",
+    "СМЕРТЬ УКРОФАШИСТАМ!",
+    "ВСПОМНИМ АВИАНОСЕЦ КУЗНЕЦОВА!",
+    "НАШИ ПАРНИ ГЕРОИ!",
+    "СИРИЯ, КРЫМ, ВАЙНАХ - ВЕЗДЕ ПОБЕДА!",
+    "ПАТРИОТЫ НЕ СДАЮТСЯ!",
+    "ЗАПАД СГНИЕТ!",
+    "СУВОРОВ С НАМИ!",
+    "ЖИДОБАНДЕРОВЦЫ ЗАПЛАТЯТ!",
+    "НОВОРОССИЯ ВОССТАНИТ!",
+    "СМЕРТЬ ПРЕДАТЕЛЯМ!",
+    "ВЕРИМ В ЦАРЯ-БАТЮШКУ!",
+    "ПРАВОСЛАВИЕ ИЛИ СМЕРТЬ!",
+    "НА МОСКВУ НЕ ХОДИ!",
+    "ПОТОПИМ КОРАБЛИ НАТО!",
+    "СБЕРБАНК ЛУЧШИЙ!",
+    "ГАЗПРОМ НАШЕ ВСЕ!",
+    "РОССИЙСКИЙ ДУХ НЕ СЛОМИТЬ!",
+    "ВАГНЕР ГЕРОИ!",
+    "СОЧИ - ЛУЧШИЙ КУРОРТ!",
+    "МАТЬ РОССИЯ НЕ ПРОСТИТ!",
+    "ПЕСНИ ШАМАНА В ДУШЕ!",
+    "РОССИЯ - ЛУЧШАЯ СТРАНА!",
+    "СЛАВА УКРАИНЕ!",
+    "УКРАИНА - НАША РОДИНА!",
+    "Разрушим НАТО!",
+    "Ебать НАТО!"
+]
+
+# Для /suka_blyat
+MAT_WORDS = ["сука", "блядь", "пиздец", "ебать", "нах", "пизда", "хуйня", "ебал", "отъебись", "ебаный", "еблан", "ХУЙ", "ПИЗДА"]
 
 def conan_phrase(username: str = "Приятель"):
     tpl = secrets.choice(TEMPLATES)
@@ -646,15 +784,15 @@ async def save_state():
                     str(k): v for k, v in list(post_to_messages.items())[-500:]
                 }
             }, f, ensure_ascii=False, indent=2)
-        
+
         # Всегда пушим при изменении
         print("💾 Обновление state.json, пушим в GitHub...")
         return await git_commit_and_push()
-        
+
     except Exception as e:
         print(f"⛔ Ошибка сохранения state: {e}")
         return False
-        
+
 def save_reply_cache():
     """Сохраняет кэш ответов только если есть изменения"""
     try:
@@ -933,12 +1071,12 @@ async def auto_save_state():
     while True:
         try:
             await asyncio.sleep(600)
-            
+
             if is_shutting_down:
                 break
-                
+
             save_reply_cache()
-            
+
             with open('state.json', 'w', encoding='utf-8') as f:
                 json.dump({
                     'post_counter': state['post_counter'],
@@ -952,10 +1090,10 @@ async def auto_save_state():
                         str(k): v for k, v in list(post_to_messages.items())[-500:]
                     }
                 }, f, ensure_ascii=False, indent=2)
-            
+
             print("✅ Состояние сохранено")
             await git_commit_and_push()
-            
+
         except Exception as e:
             print(f"❌ Ошибка в auto_save_state: {e}")
             await asyncio.sleep(60)
@@ -1114,9 +1252,23 @@ async def apply_penalty(user_id: int, msg_type: str):
         print(f"Ошибка отправки уведомления о муте: {e}")
 
 def format_header() -> Tuple[str, int]:
-    """Форматирование заголовка в стиле двача со случайными префиксами"""
+    """Форматирование заголовка с учетом режимов"""
     state['post_counter'] += 1
+    post_num = state['post_counter']
 
+    # Режим /slavaukraine
+    if slavaukraine_mode:
+        return f"💙💛 Пост №{post_num}", post_num
+        
+    # Режим /zaputin
+    if zaputin_mode:
+        return f"🇷🇺 Пост №{post_num}", post_num
+        
+    # Режим /suka_blyat
+    if suka_blyat_mode:
+        return f"💢 Пост №{post_num}", post_num
+        
+    # Обычный режим
     rand = random.random()
     if rand < 0.003:
         circle = "🔴 "
@@ -1125,27 +1277,26 @@ def format_header() -> Tuple[str, int]:
     else:
         circle = ""
 
-    # Добавляем специальные префиксы с разной вероятностью
     prefix = ""
     rand_prefix = random.random()
     if rand_prefix < 0.005:  # 0.5%
         prefix = "### АДМИН ### "
-    elif rand_prefix < 0.008:  # 0.3% (0.5% + 0.3% = 0.8%)
+    elif rand_prefix < 0.008:  # 0.3%
         prefix = "Абу - "
-    elif rand_prefix < 0.01:   # 0.2% (0.8% + 0.2% = 1.0%)
+    elif rand_prefix < 0.01:   # 0.2%
         prefix = "Пидор - "
     elif rand_prefix < 0.012:  # 0.2%
         prefix = "### ДЖУЛУП ###"
-    elif rand_prefix < 0.014:   # 0.2% 
+    elif rand_prefix < 0.014:   # 0.2%
         prefix = "### Хуесос ### "
-    elif rand_prefix < 0.01:   # 0.2% (0.8% + 0.2% = 1.0%)
+    elif rand_prefix < 0.016:   # 0.2%
         prefix = "Пыня - "
-    elif rand_prefix < 0.012:  # 0.2%
+    elif rand_prefix < 0.018:   # 0.2%
         prefix = "Нариман Намазов - "
 
-    # Убрали HTML-теги из текста, оставили только текст
-    header_text = f"{circle}{prefix}Пост №{state['post_counter']}"
-    return header_text, state['post_counter']
+    # Формируем итоговый заголовок
+    header_text = f"{circle}{prefix}Пост №{post_num}"
+    return header_text, post_num
 
 async def delete_user_posts(user_id: int, time_period_minutes: int):
     """Удаляет все посты пользователя за указанный период времени (в минутах)"""
@@ -1449,21 +1600,64 @@ async def send_message_to_users(
     reply_info: dict | None = None,
     user_id: int | None = None,
 ) -> list:
-    """Оптимизированная рассылка сообщений пользователям"""
+    """Оптимизированная рассылка сообщений пользователям с поддержкой режимов"""
     if not recipients and user_id is None:
         return []
 
     if not content or 'type' not in content:
         return []
 
-    if user_id is not None:
-        recipients.add(user_id)
+    # Создаем копию контента для модификаций
+    modified_content = content.copy()
+    
+    # Применяем модификации режимов
+    if zaputin_mode:
+        # Добавляем патриотические фразы к 30% сообщений
+        if random.random() < 0.3:
+            if modified_content.get('text'):
+                modified_content['text'] += "\n\n" + random.choice(PATRIOTIC_PHRASES)
+            elif modified_content.get('caption'):
+                modified_content['caption'] += "\n\n" + random.choice(PATRIOTIC_PHRASES)
+                
+    elif slavaukraine_mode:
+        # Добавляем украинские фразы к 30% сообщений
+        if random.random() < 0.3:
+            if modified_content.get('text'):
+                modified_content['text'] += "\n\n" + random.choice(UKRAINIAN_PHRASES)
+            elif modified_content.get('caption'):
+                modified_content['caption'] += "\n\n" + random.choice(UKRAINIAN_PHRASES)
+                
+    elif suka_blyat_mode:
+        # Матерные замены для текста
+        if modified_content.get('text'):
+            words = modified_content['text'].split()
+            for i in range(len(words)):
+                if random.random() < 0.3:
+                    words[i] = random.choice(MAT_WORDS)
+            modified_content['text'] = ' '.join(words)
+            
+            # Добавляем "... СУКА БЛЯТЬ!" к каждому 3-му сообщению
+            global suka_blyat_counter
+            suka_blyat_counter += 1
+            if suka_blyat_counter % 3 == 0:
+                modified_content['text'] += " ... СУКА БЛЯТЬ!"
+                
+        # Матерные замены для подписей
+        elif modified_content.get('caption'):
+            words = modified_content['caption'].split()
+            for i in range(len(words)):
+                if random.random() < 0.3:
+                    words[i] = random.choice(MAT_WORDS)
+            modified_content['caption'] = ' '.join(words)
+            
+            suka_blyat_counter += 1
+            if suka_blyat_counter % 3 == 0:
+                modified_content['caption'] += " ... СУКА БЛЯТЬ!"
 
     # Удаляем заблокировавших бота пользователей из активных
     blocked_users = set()
     active_recipients = set()
 
-    # Быстрая проверка активных пользователей
     for uid in recipients:
         if uid in state['users_data']['banned']:
             continue
@@ -1475,11 +1669,11 @@ async def send_message_to_users(
     async def really_send(uid: int, reply_to: int | None):
         """Отправка с обработкой ошибок"""
         try:
-            ct = content["type"]
-            header_text = content['header']
+            ct = modified_content["type"]
+            header_text = modified_content['header']
             head = f"<i>{header_text}</i>"
 
-            reply_to_post = content.get('reply_to_post')
+            reply_to_post = modified_content.get('reply_to_post')
             original_author = None
             if reply_to_post and reply_to_post in messages_storage:
                 original_author = messages_storage[reply_to_post].get('author_id')
@@ -1495,13 +1689,14 @@ async def send_message_to_users(
                     reply_text = f">>{reply_to_post}\n"
 
             main_text = ""
-            if content.get('text'):
-                main_text = add_you_to_my_posts(content['text'], original_author)
-            elif content.get('caption'):
-                main_text = add_you_to_my_posts(content['caption'], original_author)
+            if modified_content.get('text'):
+                main_text = add_you_to_my_posts(modified_content['text'], original_author)
+            elif modified_content.get('caption'):
+                main_text = add_you_to_my_posts(modified_content['caption'], original_author)
 
             full_text = f"{head}\n\n{reply_text}{main_text}" if reply_text else f"{head}\n\n{main_text}"
 
+            # Отправка основного контента
             if ct == "text":
                 return await bot.send_message(
                     uid,
@@ -1515,7 +1710,7 @@ async def send_message_to_users(
                     full_text = full_text[:1021] + "..."
                 return await bot.send_photo(
                     uid,
-                    content["file_id"],
+                    modified_content["file_id"],
                     caption=full_text,
                     reply_to_message_id=reply_to,
                     parse_mode="HTML",
@@ -1645,7 +1840,7 @@ async def send_message_to_users(
             return None
 
     # Настройки параллелизма
-    max_concurrent = 100  # Максимальное количество одновременных отправок
+    max_concurrent = 100
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def send_with_semaphore(uid):
@@ -1653,7 +1848,6 @@ async def send_message_to_users(
             reply_to = reply_info.get(uid) if reply_info else None
             return await really_send(uid, reply_to)
 
-    # Запускаем все задачи параллельно
     tasks = [send_with_semaphore(uid) for uid in active_recipients]
     results = await asyncio.gather(*tasks)
 
@@ -1662,20 +1856,24 @@ async def send_message_to_users(
         post_num = content['post_num']
         for uid, msg in zip(active_recipients, results):
             if msg:
-                if isinstance(msg, list):  # Для медиа-групп
+                if isinstance(msg, list):
                     if post_num not in post_to_messages:
                         post_to_messages[post_num] = {}
                     post_to_messages[post_num][uid] = msg[0].message_id
                     for m in msg:
                         message_to_post[(uid, m.message_id)] = post_num
-                else:  # Для одиночных сообщений
+                else:
                     if post_num not in post_to_messages:
                         post_to_messages[post_num] = {}
                     post_to_messages[post_num][uid] = msg.message_id
                     message_to_post[(uid, msg.message_id)] = post_num
 
+    # Обновляем активных пользователей
+    for uid in blocked_users:
+        state['users_data']['active'].discard(uid)
+
     return list(zip(active_recipients, results))
-    
+
 async def message_broadcaster():
     """Обработчик очереди сообщений с многопоточной обработкой"""
     # Создаем несколько worker'ов для параллельной обработки
@@ -1721,13 +1919,13 @@ async def message_worker(worker_name: str):
                     reply_info,
                     msg_data.get('user_id')
                 )
-                
+
                 # Логируем результат
                 success_count = sum(1 for _, msg in results if msg is not None)
                 print(f"{worker_name} | ✅ Пост #{post_num} отправлен: {success_count}/{len(active_recipients)}")
-                
+
                 await process_successful_messages(post_num, results)
-                
+
             except Exception as e:
                 print(f"{worker_name} | ❌ Ошибка отправки #{post_num}: {str(e)[:200]}")
 
@@ -2147,6 +2345,34 @@ async def motivation_broadcaster():
             print(f"Ошибка в motivation_broadcaster: {e}")
             await asyncio.sleep(60)  # Ждем минуту при ошибке
 
+async def check_cooldown(message: Message) -> bool:
+    """Проверяет кулдаун на активацию режимов для всех пользователей"""
+    global last_mode_activation
+    
+    if last_mode_activation is None:
+        return True
+        
+    elapsed = (datetime.now(UTC) - last_mode_activation).total_seconds()
+    if elapsed < MODE_COOLDOWN:
+        time_left = MODE_COOLDOWN - elapsed
+        minutes = int(time_left // 60)
+        seconds = int(time_left % 60)
+        
+        try:
+            await message.answer(
+                f"⏳ Эй пидор, не спеши! Режимы можно включать раз в час.\n"
+                f"Жди еще: {minutes} минут {seconds} секунд\n\n"
+                f"А пока посиди в углу и подумай о своем поведении",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"Ошибка отправки кулдауна: {e}")
+            
+        await message.delete()
+        return False
+        
+    return True
+
 # ========== КОМАНДЫ ==========
 
 @dp.message(Command("start"))
@@ -2164,7 +2390,8 @@ async def cmd_start(message: types.Message):
         "- Анонимность\n"
         "- Без CP\n"
         "- Не спамить\n\n"
-        "Просто пиши сообщения, они будут отправлены всем анонимно. Всем от всех.")
+        "Просто пиши сообщения, они будут отправлены всем анонимно. Всем от всех."
+        "Команды: \n /roll \n /stats \n /face \n /deanon \n /help \n /invite \n /zaputin \n /slavaukraine \n /suka_blyat \n /deanon")
     await message.delete()
 
 
@@ -2202,6 +2429,11 @@ async def cmd_help(message: types.Message):
                          "/stats - статистика\n"
                          "/face \n"
                          "/roll – ролл 0-100 или /roll N\n"
+                         "/invite - получить текст для приглашения анонов\n"
+                         "/deanon - случайный деанон\n"
+                         "/zaputin - активировать режим zaputin\n"
+                         "/slavaukraine - активировать режим slavaukraine\n"
+                         "/suka_blyat - активировать режим suka_blyat\n"
                          "Все сообщения анонимны!")
     await message.delete()
 
@@ -2223,6 +2455,86 @@ async def cmd_roll(message: types.Message):
 
     await message.delete()
 
+@dp.message(Command("slavaukraine"))
+async def cmd_slavaukraine(message: types.Message):
+    global slavaukraine_mode, last_mode_activation, zaputin_mode, suka_blyat_mode
+    
+    # Проверка кулдауна
+    if not await check_cooldown(message):
+        return
+        
+    # Активация режима и деактивация других
+    slavaukraine_mode = True
+    last_mode_activation = datetime.now(UTC)
+    zaputin_mode = False
+    suka_blyat_mode = False
+
+    # Отправляем сообщение активации
+    header, pnum = format_header()
+    header = "### Админ ###"
+
+    # Более двачевый текст активации
+    activation_text = (
+        "УВАГА! АКТИВОВАНО УКРАЇНСЬКИЙ РЕЖИМ!\n\n"
+        "💙💛 СЛАВА УКРАЇНІ! 💛💙\n"
+        "ГЕРОЯМ СЛАВА!\n\n"
+        "Хто не скаже 'Путін хуйло' - той москаль і підар!"
+    )
+
+    await message_queue.put({
+        "recipients": state['users_data']['active'],
+        "content": {
+            "type": "text",
+            "header": header,
+            "text": activation_text
+        },
+        "post_num": pnum,
+    })
+
+    # Таймер отключения
+    asyncio.create_task(disable_slavaukraine_mode(300))  # 5 минут
+
+    await message.delete()
+
+async def disable_slavaukraine_mode(delay: int):
+    await asyncio.sleep(delay)
+    global slavaukraine_mode
+    slavaukraine_mode = False
+    
+    header, pnum = format_header()
+    header = "### Админ ###"
+    
+    end_text = (
+        "💀 Визг хохлов закончен!\n\n"
+        "Украинский режим отключен. Возвращаемся к обычному трёпу."
+    )
+    
+    await message_queue.put({
+        "recipients": state['users_data']['active'],
+        "content": {
+            "type": "text",
+            "header": header,
+            "text": end_text
+        },
+        "post_num": pnum,
+    })
+
+@dp.message(Command("stop"))
+async def cmd_stop(message: types.Message):
+    """Остановка любых активных режимов без уведомления"""
+    global zaputin_mode, suka_blyat_mode, slavaukraine_mode
+
+    if not is_admin(message.from_user.id):
+        await message.delete()
+        return
+
+    # Сбрасываем все режимы
+    zaputin_mode = False
+    suka_blyat_mode = False
+    slavaukraine_mode = False
+
+    await message.answer("Все активные режимы остановлены")
+    await message.delete()
 
 @dp.message(Command("invite"))
 async def cmd_invite(message: types.Message):
@@ -2260,7 +2572,200 @@ async def cmd_stats(message: types.Message):
 
     await message.delete()
 
+# ====== ДОБАВЛЯЕМ КОМАНДЫ ======
+@dp.message(Command("deanon"))
+async def cmd_deanon(message: types.Message):
+    """Случайный деанон пользователя с ответом на сообщение"""
+    if not is_admin(message.from_user.id):
+        await message.delete()
+        return
 
+    # Проверяем, что команда вызвана ответом на сообщение
+    if not message.reply_to_message:
+        await message.answer("⚠️ Ответь на сообщение для деанона!")
+        await message.delete()
+        return
+        
+    # Определяем цель деанона
+    reply_key = (message.from_user.id, message.reply_to_message.message_id)
+    target_post = message_to_post.get(reply_key)
+    
+    if not target_post or target_post not in messages_storage:
+        await message.answer("🚫 Не удалось найти пост для деанона!")
+        await message.delete()
+        return
+        
+    target_id = messages_storage[target_post].get("author_id")
+    
+    # Генерируем фейковые данные
+    name = random.choice(DEANON_NAMES)
+    surname = random.choice(DEANON_SURNAMES)
+    city = random.choice(DEANON_CITIES)
+    profession = random.choice(DEANON_PROFESSIONS)
+    fetish = random.choice(DEANON_FETISHES)
+    ip = f"{random.randint(10,250)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
+    age = random.randint(18, 45)
+    detail = random.choice(DEANON_DETAILS)
+
+    # Формируем текст деанона
+    deanon_text = (
+        f"\n Этого анона зовут: {name} {surname}\n"
+        f"Возраст: {age}\n"
+        f"Город проживания: {city}\n"
+        f"Профессия: {profession}\n"
+        f"Фетиш: {fetish}\n"
+        f"IP: {ip}\n"
+        f"Дополнительно: {detail}"
+    )
+
+    # Получаем информацию о сообщении для ответа
+    reply_info = post_to_messages.get(target_post, {})
+    
+    # Отправляем как ответ на сообщение
+    header = "### ДЕАНОН ###"
+    state['post_counter'] += 1
+    pnum = state['post_counter']
+
+    await message_queue.put({
+        "recipients": state['users_data']['active'],
+        "content": {
+            "type": "text",
+            "header": header,
+            "text": deanon_text,
+            "reply_to_post": target_post  # Важно: указываем пост, на который отвечаем
+        },
+        "post_num": pnum,
+        "reply_info": reply_info  # Передаем информацию для ответа
+    })
+
+    await message.delete()
+
+# ====== ZAPUTIN ======
+@dp.message(Command("zaputin"))
+async def cmd_zaputin(message: types.Message):
+    global zaputin_mode, last_mode_activation, suka_blyat_mode, slavaukraine_mode
+    
+    # Проверка кулдауна
+    if not await check_cooldown(message):
+        return
+        
+    # Активируем режим и выключаем другие
+    zaputin_mode = True
+    suka_blyat_mode = False
+    slavaukraine_mode = False
+    last_mode_activation = datetime.now(UTC)
+
+    # Отправляем сообщение активации
+    header = "### Админ ###"
+    state['post_counter'] += 1
+    pnum = state['post_counter']
+
+    activation_text = (
+        "🇷🇺 СЛАВА РОССИИ! ПУТИН - НАШ ПРЕЗИДЕНТ! 🇷🇺\n\n"
+        "Активирован режим кремлеботов! Все несогласные будут приравнены к пидорасам и укронацистам!"
+    )
+
+    await message_queue.put({
+        "recipients": state['users_data']['active'],
+        "content": {
+            "type": "text",
+            "header": header,
+            "text": activation_text
+        },
+        "post_num": pnum,
+    })
+
+    # Таймер отключения
+    asyncio.create_task(disable_zaputin_mode(300))  # 5 минут
+
+    await message.delete()
+
+async def disable_zaputin_mode(delay: int):
+    """Отключает режим zaputin через указанное время"""
+    await asyncio.sleep(delay)
+    global zaputin_mode
+    zaputin_mode = False
+    
+    # Отправляем сообщение об окончании
+    header = "### Админ ###"
+    state['post_counter'] += 1
+    pnum = state['post_counter']
+    
+    end_text = "💀 Бунт кремлеботов окончился. Всем спасибо, все свободны."
+    
+    await message_queue.put({
+        "recipients": state['users_data']['active'],
+        "content": {
+            "type": "text",
+            "header": header,
+            "text": end_text
+        },
+        "post_num": pnum,
+    })
+
+# ====== SUKA_BLYAT ======
+@dp.message(Command("suka_blyat"))
+async def cmd_suka_blyat(message: types.Message):
+    global suka_blyat_mode, last_mode_activation, zaputin_mode, slavaukraine_mode
+ 
+    # Проверка кулдауна
+    if not await check_cooldown(message):
+        return
+        
+    # Активируем режим и выключаем другие
+    suka_blyat_mode = True
+    zaputin_mode = False
+    slavaukraine_mode = False
+    last_mode_activation = datetime.now(UTC)
+
+    # Отправляем сообщение активации
+    header = "### Админ ###"
+    state['post_counter'] += 1
+    pnum = state['post_counter']
+
+    activation_text = (
+        "💢💢💢 Активирован режим СУКА БЛЯТЬ! 💢💢💢\n\n"
+        "Всех нахуй разъебало!"
+    )
+
+    await message_queue.put({
+        "recipients": state['users_data']['active'],
+        "content": {
+            "type": "text",
+            "header": header,
+            "text": activation_text
+        },
+        "post_num": pnum,
+    })
+
+    # Таймер отключения
+    asyncio.create_task(disable_suka_blyat_mode(300))  # 5 минут
+
+    await message.delete()
+
+async def disable_suka_blyat_mode(delay: int):
+    """Отключает режим suka_blyat через указанное время"""
+    await asyncio.sleep(delay)
+    global suka_blyat_mode
+    suka_blyat_mode = False
+    
+    # Отправляем сообщение об окончании
+    header = "### Админ ###"
+    state['post_counter'] += 1
+    pnum = state['post_counter']
+    
+    end_text = "💀 СУКА БЛЯТЬ КОНЧИЛОСЬ. Теперь можно и помолчать."
+    
+    await message_queue.put({
+        "recipients": state['users_data']['active'],
+        "content": {
+            "type": "text",
+            "header": header,
+            "text": end_text
+        },
+        "post_num": pnum,
+    })
+    
 # ========== АДМИН КОМАНДЫ ==========
 
 
@@ -3084,7 +3589,7 @@ async def handle_message(message: Message):
         return
 
     user_id = message.from_user.id
-    
+
     try:
         # 1. Проверка мута (должна быть ПЕРВОЙ)
         until = mutes.get(user_id)
@@ -3338,27 +3843,27 @@ async def supervisor():
 
     # Вставь вот это до load_state:
     restore_backup_on_start()
-    
+
     # Обработка сигналов для Linux/Mac
     if hasattr(signal, 'SIGTERM'):
         loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
     if hasattr(signal, 'SIGINT'):
         loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown()))
-    
+
     try:
         load_state()
         healthcheck_site = await start_healthcheck()
         bot = Bot(token=BOT_TOKEN)
-        
+
         global message_queue
         message_queue = asyncio.Queue(maxsize=5000)
-        
+
         # Запуск фоновых задач
         tasks = await start_background_tasks()  # Используем существующую функцию
-        
+
         print("✅ Фоновые задачи запущены")
         await dp.start_polling(bot, skip_updates=True)
-        
+
     except Exception as e:
         print(f"🔥 Critical error: {e}")
     finally:
