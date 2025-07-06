@@ -185,21 +185,30 @@ async def run_bot():
             await dp.start_polling(
                 bot,
                 skip_updates=True,
-                close_bot_session=False,  # Не закрываем сессию при рестарте
-                handle_signals=False,     # Игнорируем сигналы ОС (чтобы Railway не убивал процесс)
-                timeout=60,               # Увеличиваем таймаут для стабильности
+                close_bot_session=False,
+                handle_signals=True,  # Разрешаем aiogram обрабатывать сигналы
+                timeout=60,
             )
+        except asyncio.CancelledError:
+            print("⚠️ Polling cancelled, exiting...")
+            break
         except Exception as e:
             logging.error(f"Bot crashed: {e}, restarting in 10 seconds...")
             await asyncio.sleep(10)
 
-
 async def shutdown():
     """Cleanup tasks before shutdown"""
     print("Shutting down...")
-    await dp.storage.close()
-    await dp.storage.wait_closed()
-    await bot.session.close()
+    try:
+        await dp.storage.close()
+    except:
+        pass
+    
+    if 'bot' in globals() and bot.session:
+        await bot.session.close()
+    
+    # Вызываем экстренное сохранение
+    await emergency_save()
 
 async def auto_backup():
     """Автоматическое сохранение бэкапов в GitHub каждые 2 часа"""
@@ -211,7 +220,10 @@ async def auto_backup():
             backup_name = f"backup_state_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
             shutil.copy2("state.json", backup_name)
             
-            # Пушим ВСЕ файлы
+            # Сохраняем текущее состояние
+            save_reply_cache()
+            
+            # Пушим в GitHub
             success = await git_commit_and_push()
             
             # Удаляем старые бэкапы только после успешного пуша
@@ -692,32 +704,31 @@ async def emergency_save():
     """Срочное сохранение перед выключением"""
     print("⚡ Экстренное сохранение state.json и reply_cache.json...")
     try:
-        # 1. Сохраняем основные данные
-        success = await save_state()
-        if not success:
-            print("⚠️ Не удалось сохранить state.json")
-        
-        # 2. Сохраняем кэш ответов
+        # 1. Сохраняем кэш ответов
         save_reply_cache()
         
-        # 3. Пушим в GitHub если есть изменения
-        if os.path.exists('/data'):
-            # Простая проверка изменений
-            changed = subprocess.run(
-                ['git', 'diff', '--quiet', 'state.json', 'reply_cache.json'],
-                cwd='/data'
-            ).returncode != 0
-            
-            if changed:
-                print("💾 Обнаружены изменения, пушим в GitHub...")
-                await git_commit_and_push()
-            else:
-                print("ℹ️ Нет изменений для коммита")
+        # 2. Сохраняем основные данные
+        with open('state.json', 'w', encoding='utf-8') as f:
+            json.dump({
+                'post_counter': state['post_counter'],
+                'users_data': {
+                    'active': list(state['users_data']['active']),
+                    'banned': list(state['users_data']['banned']),
+                },
+                'message_counter': state['message_counter'],
+                'settings': state['settings'],
+                'recent_post_mappings': {
+                    str(k): v for k, v in list(post_to_messages.items())[-500:]
+                }
+            }, f, ensure_ascii=False, indent=2)
+        
+        # 3. Пушим в GitHub
+        await git_commit_and_push()
         
         print("✅ Данные сохранены перед выключением")
     except Exception as e:
         print(f"❌ Ошибка при экстренном сохранении: {e}")
-
+        
 def handle_shutdown(signum, frame):
     """Перехватываем сигнал остановки"""
     print(f"🛑 Получен сигнал завершения ({signum}), сохраняем данные...")
@@ -834,21 +845,29 @@ async def auto_save_state():
         try:
             await asyncio.sleep(180)  # 3 минуты
             
-            # 1. Сохраняем основные данные
-            success = await save_state()
-            if not success:
-                print("⚠️ Не удалось сохранить state.json")
-                await asyncio.sleep(60)  # Ждем минуту при ошибке
-                continue
-                
-            # 2. Сохраняем кэш ответов
+            # Сохраняем кэш ответов
             save_reply_cache()
+            
+            # Сохраняем основные данные
+            with open('state.json', 'w', encoding='utf-8') as f:
+                json.dump({
+                    'post_counter': state['post_counter'],
+                    'users_data': {
+                        'active': list(state['users_data']['active']),
+                        'banned': list(state['users_data']['banned']),
+                    },
+                    'message_counter': state['message_counter'],
+                    'settings': state['settings'],
+                    'recent_post_mappings': {
+                        str(k): v for k, v in list(post_to_messages.items())[-500:]
+                    }
+                }, f, ensure_ascii=False, indent=2)
             
             print("✅ Состояние сохранено")
             
         except Exception as e:
             print(f"❌ Ошибка в auto_save_state: {e}")
-            await asyncio.sleep(60)  # Ждем минуту при ошибке
+            await asyncio.sleep(60)
 
 SPAM_RULES = {
     'text': {
@@ -3275,9 +3294,12 @@ async def supervisor():
                     bot, 
                     allowed_updates=dp.resolve_used_update_types(), 
                     close_bot_session=False,
-                    handle_signals=False,
-                    skip_updates=True  # Пропускаем обновления при перезапуске
+                    handle_signals=True,  # Разрешаем aiogram обрабатывать сигналы
+                    skip_updates=True
                 )
+            except asyncio.CancelledError:
+                print("⚠️ Received cancellation signal")
+                break
             except TelegramNetworkError as e:
                 restart_count += 1
                 print(f"⚠️ Network error: {e} (restarting in {restart_delay} seconds)")
@@ -3298,10 +3320,6 @@ async def supervisor():
         # Корректное завершение
         print("🛑 Shutting down...")
         await shutdown()
-        if 'bot' in globals():
-            await bot.session.close()
-        if 'connector' in globals():
-            await connector.close()
         print("✅ Clean shutdown completed")
         
 async def shutdown():
@@ -3314,6 +3332,7 @@ async def shutdown():
         print(f"Error during storage shutdown: {e}")
 
 
+# В конце файла, перед запуском бота:
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
