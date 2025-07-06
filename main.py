@@ -63,6 +63,7 @@ async def healthcheck(request):
     """Для Railway Health Checks"""
     return web.Response(text="Bot is alive")
 
+# Заменяем функцию start_healthcheck
 async def start_healthcheck():
     """Для Railway Health Checks"""
     port = int(os.environ.get('PORT', 8080))
@@ -71,10 +72,10 @@ async def start_healthcheck():
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
-    # Запускаем сайт без ожидания
-    asyncio.create_task(site.start())
+    await site.start()  # Важно: ожидаем запуска
     print(f"🟢 Healthcheck-сервер запущен на порту {port}")
     return site
+    
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
@@ -777,19 +778,18 @@ async def emergency_save():
     except Exception as e:
         print(f"❌ Ошибка при экстренном сохранении: {e}")
         
+# Заменяем handle_shutdown
 def handle_shutdown(signum, frame):
-    """Перехватываем сигнал остановки"""
     global is_shutting_down
     if is_shutting_down:
         return
         
     is_shutting_down = True
-    print(f"🛑 Получен сигнал завершения ({signum}), сохраняем данные...")
-    # Создаем новый event loop для асинхронного сохранения
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    print(f"🛑 Получен сигнал {signum}, сохраняем данные...")
+    
+    loop = asyncio.get_event_loop()
     loop.run_until_complete(emergency_save())
-    time.sleep(1)
+    print("✅ Данные сохранены, завершаем работу")
     exit(0)
 
 # Включить перехват сигналов (для Railway)
@@ -3322,44 +3322,35 @@ async def start_background_tasks():
     return tasks 
 
 async def supervisor():
-    """One event-loop: background tasks live forever, polling runs once."""
-    global bot, connector
-
+    global is_shutting_down, bot, connector
+    
     load_state()
     
-    try:        
-        # Запускаем healthcheck первым делом
+    try:
         healthcheck_site = await start_healthcheck()
-        
-        # Запускаем фоновые задачи
         bg_tasks = await start_background_tasks()
-
-        # Инициализация бота
         connector = aiohttp.TCPConnector(limit=10, force_close=True)
         bot = Bot(token=BOT_TOKEN, connector=connector)
 
-        # Основной цикл работы бота
         print("▶️ Start polling...")
-        await dp.start_polling(
-            bot, 
-            allowed_updates=dp.resolve_used_update_types(), 
-            close_bot_session=False,
-            handle_signals=True,
-            skip_updates=True,
-            timeout=60
-        )
-
-    except asyncio.CancelledError:
-        print("⚠️ Received cancellation signal")
+        while not is_shutting_down:
+            try:
+                await dp.start_polling(
+                    bot,
+                    allowed_updates=dp.resolve_used_update_types(),
+                    close_bot_session=False,
+                    handle_signals=True,
+                    skip_updates=True,
+                    timeout=60
+                )
+            except Exception as e:
+                print(f"⚠️ Restarting polling due to: {str(e)[:200]}")
+                await asyncio.sleep(5)
     except Exception as e:
-        print(f"🔥 Critical error in supervisor: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"🔥 Critical error: {e}")
     finally:
-        # Корректное завершение
-        print("🛑 Shutting down...")
-        await shutdown()
-        print("✅ Clean shutdown completed")
+        if not is_shutting_down:
+            await shutdown()
 
 if __name__ == "__main__":
     asyncio.run(supervisor())
