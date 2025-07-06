@@ -58,6 +58,19 @@ MODE_COOLDOWN = 3600  # 1 час в секундах
 # Отключаем стандартную обработку сигналов в aiogram
 os.environ["AIORGRAM_DISABLE_SIGNAL_HANDLERS"] = "1"
 
+def suka_blyatify_text(text: str) -> str:
+    if not text:
+        return text
+    global suka_blyat_counter
+    words = text.split()
+    for i in range(len(words)):
+        if random.random() < 0.3:
+            words[i] = random.choice(MAT_WORDS)
+    suka_blyat_counter += 1
+    if suka_blyat_counter % 3 == 0:
+        words.append("... СУКА БЛЯТЬ!")
+    return ' '.join(words)
+
 def restore_backup_on_start():
     """Забирает свежий state.json и reply_cache.json из backup-репозитория при запуске"""
     repo_url = "https://github.com/shlomapetia/dvachbot-backup.git"
@@ -3683,26 +3696,41 @@ async def handle_message(message: Message):
                 text_content = message.html_text
             else:
                 text_content = escape_html(message.text)
+            # ---- Добавь сюда ----
+            if suka_blyat_mode:
+                text_content = suka_blyatify_text(text_content)
             content['text'] = text_content
         elif content_type == 'photo':
             content['file_id'] = message.photo[-1].file_id
-            content['caption'] = message.caption
+            caption = message.caption
+            # ---- Добавь сюда ----
+            if suka_blyat_mode and caption:
+                caption = suka_blyatify_text(caption)
+            content['caption'] = caption
         elif content_type == 'video':
             content['file_id'] = message.video.file_id
-            content['caption'] = message.caption
-        elif content_type == 'sticker':
-            content['file_id'] = message.sticker.file_id
+            caption = message.caption
+            if suka_blyat_mode and caption:
+                caption = suka_blyatify_text(caption)
+            content['caption'] = caption
         elif content_type == 'animation':
             content['file_id'] = message.animation.file_id
-            content['caption'] = message.caption
+            caption = message.caption
+            if suka_blyat_mode and caption:
+                caption = suka_blyatify_text(caption)
+            content['caption'] = caption
         elif content_type == 'document':
             content['file_id'] = message.document.file_id
-            content['caption'] = message.caption
-        elif content_type == 'voice':
-            content['file_id'] = message.voice.file_id
+            caption = message.caption
+            if suka_blyat_mode and caption:
+                caption = suka_blyatify_text(caption)
+            content['caption'] = caption
         elif content_type == 'audio':
             content['file_id'] = message.audio.file_id
-            content['caption'] = message.caption
+            caption = message.caption
+            if suka_blyat_mode and caption:
+                caption = suka_blyatify_text(caption)
+            content['caption'] = caption
         elif content_type == 'video_note':
             content['file_id'] = message.video_note.file_id
 
