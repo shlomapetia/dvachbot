@@ -12,6 +12,7 @@ import random
 import secrets
 import pickle
 import gzip
+from aiogram import types
 import gc
 import weakref
 from collections import deque, defaultdict
@@ -40,6 +41,21 @@ from aiogram.types import (
 import subprocess
 import os
 from datetime import datetime, UTC  # Добавьте UTC в импорты
+
+
+async def healthcheck(request):
+    """Для Railway Health Checks"""
+    return web.Response(text="Bot is alive")
+
+async def start_healthcheck():
+    """Запускаем мини-сервер для проверки работоспособности"""
+    app = web.Application()
+    app.router.add_get("/", healthcheck)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8080)  # Порт для Railway
+    await site.start()
+    print("🟢 Healthcheck-сервер запущен на порту 8080")
 
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
@@ -174,17 +190,25 @@ async def run_bot():
     global bot, connector
     connector = aiohttp.TCPConnector(limit=10, force_close=True)
     bot = Bot(token=BOT_TOKEN, connector=connector)
+    
+    # Закрываем старую сессию, если есть
+    try:
+        await bot.session.close()
+    except:
+        pass
+    
     while True:
         try:
             await dp.start_polling(
                 bot,
-                skip_updates=True,  # Пропускать обновления при старте
-                close_bot_session=False,
-                handle_signals=False
+                skip_updates=True,
+                close_bot_session=False,  # Не закрываем сессию при рестарте
+                handle_signals=False,     # Игнорируем сигналы ОС (чтобы Railway не убивал процесс)
+                timeout=60,               # Увеличиваем таймаут для стабильности
             )
         except Exception as e:
             logging.error(f"Bot crashed: {e}, restarting in 10 seconds...")
-            await asyncio.sleep(10)  # Увеличиваем задержку перед перезапуском
+            await asyncio.sleep(10)
 
 
 async def shutdown():
@@ -690,6 +714,29 @@ def load_reply_cache():
     print(f"Reply-cache: постов {len(post_to_messages)}, "
           f"сообщений {len(message_to_post)}")
 
+import signal
+
+async def emergency_save():
+    """Срочное сохранение перед выключением"""
+    print("⚡ Экстренное сохранение state.json и reply_cache.json...")
+    try:
+        await save_state()
+        save_reply_cache()
+        await git_commit_and_push()  # Пушим на GitHub
+        print("✅ Данные сохранены перед выключением")
+    except Exception as e:
+        print(f"❌ Ошибка при экстренном сохранении: {e}")
+
+def handle_shutdown(signum, frame):
+    """Перехватываем сигнал остановки"""
+    print(f"🛑 Получен сигнал завершения ({signum}), сохраняем данные...")
+    asyncio.create_task(emergency_save())
+    time.sleep(3)  # Даем время на сохранение
+    exit(0)
+
+# Включить перехват сигналов (для Railway)
+signal.signal(signal.SIGTERM, handle_shutdown)  # Сигнал остановки контейнера
+signal.signal(signal.SIGINT, handle_shutdown)   # Ctrl+C
 
 async def auto_memory_cleaner():
     """Единственная функция очистки памяти - каждые 5 минут"""
@@ -3199,6 +3246,7 @@ async def start_background_tasks():
         asyncio.create_task(message_broadcaster()),
         asyncio.create_task(message_broadcaster()),
         asyncio.create_task(conan_roaster()), 
+        asyncio.create_task(start_healthcheck()),
         asyncio.create_task(motivation_broadcaster()), 
         asyncio.create_task(auto_memory_cleaner()),
         asyncio.create_task(auto_backup()), 
