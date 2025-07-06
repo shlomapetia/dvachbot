@@ -52,6 +52,13 @@ git_semaphore = asyncio.Semaphore(1)
 git_executor = ThreadPoolExecutor(max_workers=1)  # Для Git-операций
 send_executor = ThreadPoolExecutor(max_workers=100)  # Для отправки сообщений
 
+# Отключаем стандартную обработку сигналов в aiogram
+os.environ["AIORGRAM_DISABLE_SIGNAL_HANDLERS"] = "1"
+
+# Глобальный флаг для graceful shutdown
+is_shutting_down = False
+
+
 async def healthcheck(request):
     """Для Railway Health Checks"""
     return web.Response(text="Bot is alive")
@@ -71,6 +78,11 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переме�
 
 async def git_commit_and_push():
     """Надежная функция бэкапа в GitHub с использованием отдельного потока"""
+    # Проверяем что бот активен
+    if not bot or bot.session.closed:
+        print("⚠️ Bot not active, skipping git push")
+        return False
+        
     # Проверяем, не завершен ли уже executor
     if git_executor._shutdown:
         print("⚠️ Git executor уже завершен, пропускаем бэкап")
@@ -239,30 +251,45 @@ async def shutdown():
         # Вызываем экстренное сохранение ПЕРЕД остановкой executors
         await emergency_save()
         
-        # Останавливаем executors
-        git_executor.shutdown(wait=True, cancel_futures=True)
-        send_executor.shutdown(wait=True, cancel_futures=True)
+        # Останавливаем executors корректно
+        if not git_executor._shutdown:
+            git_executor.shutdown(wait=True, cancel_futures=True)
+        if not send_executor._shutdown:
+            send_executor.shutdown(wait=True, cancel_futures=True)
         
-        await dp.storage.close()
+        # Закрываем хранилище диспетчера
+        if hasattr(dp, 'storage') and dp.storage:
+            await dp.storage.close()
     except Exception as e:
         print(f"Error during shutdown: {e}")
     
+    # Закрываем сессию бота
     if 'bot' in globals() and bot.session:
         await bot.session.close()
     
-    # Явно останавливаем все асинхронные задачи
+    # Отменяем все фоновые задачи
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     for task in tasks:
         task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Ждем завершения задач с таймаутом
+    await asyncio.wait_for(
+        asyncio.gather(*tasks, return_exceptions=True),
+        timeout=5.0
+    )
     print("All background tasks stopped")
         
 async def auto_backup():
-    """Автоматическое сохранение бэкапов в GitHub каждые 6 часа"""
+    """Автоматическое сохранение бэкапов в GitHub каждые 6 часов"""
     while True:
         try:
-            await asyncio.sleep(21600)  # 6 часа
+            await asyncio.sleep(21600)  # 6 часов
             
+            # Проверяем что бот активен
+            if not bot or bot.session.closed:
+                print("⚠️ Bot not active, skipping backup")
+                continue
+                
             # Создаем новый бэкап
             backup_name = f"backup_state_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
             shutil.copy2("state.json", backup_name)
@@ -285,9 +312,6 @@ async def auto_backup():
                             print(f"❌ Ошибка удаления {old_file}: {e}")
             
             print(f"✅ Полный бэкап выполнен: {backup_name}")
-            
-            # Даем event loop время обработать другие задачи
-            await asyncio.sleep(5)
             
         except Exception as e:
             print(f"❌ Ошибка в auto_backup: {e}")
@@ -754,7 +778,8 @@ async def emergency_save():
     print("⚡ Экстренное сохранение state.json и reply_cache.json...")
     try:
         # 1. Сохраняем кэш ответов
-        save_reply_cache()
+        if not os.path.exists(REPLY_FILE):
+            save_reply_cache()
         
         # 2. Сохраняем основные данные
         with open('state.json', 'w', encoding='utf-8') as f:
@@ -788,12 +813,17 @@ async def emergency_save():
         
 def handle_shutdown(signum, frame):
     """Перехватываем сигнал остановки"""
+    global is_shutting_down
+    if is_shutting_down:
+        return
+        
+    is_shutting_down = True
     print(f"🛑 Получен сигнал завершения ({signum}), сохраняем данные...")
     # Создаем новый event loop для асинхронного сохранения
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(emergency_save())
-    time.sleep(1)  # Даем время на завершение операций
+    time.sleep(1)
     exit(0)
 
 # Включить перехват сигналов (для Railway)
@@ -3329,7 +3359,7 @@ async def start_background_tasks():
     return tasks 
 
 async def supervisor():
-    """One event-loop: background tasks live forever, polling restarts."""
+    """One event-loop: background tasks live forever, polling runs once."""
     global bot, connector
 
     load_state()
@@ -3342,55 +3372,26 @@ async def supervisor():
         connector = aiohttp.TCPConnector(limit=10, force_close=True)
         bot = Bot(token=BOT_TOKEN, connector=connector)
 
-        # Основной цикл работы бота
-        restart_count = 0
-        max_restarts = 10
-        restart_delay = 30
-        
-        while True:  # Бесконечный цикл перезапуска
-            try:
-                print("▶️ Start polling...")
-                await dp.start_polling(
-                    bot, 
-                    allowed_updates=dp.resolve_used_update_types(), 
-                    close_bot_session=False,
-                    handle_signals=True,
-                    skip_updates=True,
-                    timeout=60
-                )
-            except asyncio.CancelledError:
-                print("⚠️ Received cancellation signal")
-                break
-            except Exception as e:
-                restart_count += 1
-                if restart_count >= max_restarts:
-                    print(f"🔴 Maximum restarts reached ({max_restarts}), exiting")
-                    break
-                    
-                print(f"⚠️ Restarting bot in {restart_delay}s (reason: {e})")
-                await asyncio.sleep(restart_delay)
-            else:
-                print("⏹️ Polling finished normally")
-                break
+        # Основной цикл работы бота - БЕЗ ПЕРЕЗАПУСКА
+        print("▶️ Start polling...")
+        await dp.start_polling(
+            bot, 
+            allowed_updates=dp.resolve_used_update_types(), 
+            close_bot_session=False,
+            handle_signals=True,
+            skip_updates=True,
+            timeout=60
+        )
 
     except asyncio.CancelledError:
         print("⚠️ Received cancellation signal")
     except Exception as e:
         print(f"🔥 Critical error in supervisor: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         # Корректное завершение
         print("🛑 Shutting down...")
         await shutdown()
         print("✅ Clean shutdown completed")
         
-# В конце файла, перед запуском бота:
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
-    
-    try:
-        asyncio.run(supervisor())
-    except KeyboardInterrupt:
-        print("✖️  Bot stopped by Ctrl-C")
