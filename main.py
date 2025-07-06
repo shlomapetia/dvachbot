@@ -81,7 +81,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переме�
 async def git_commit_and_push():
     """Надежная функция бэкапа в GitHub с использованием отдельного потока"""
     # Проверяем что бот активен
-    if not bot or bot.session.closed:
+    if not bot or getattr(bot.session, 'closed', True):
         print("⚠️ Bot not active, skipping git push")
         return False
         
@@ -225,7 +225,7 @@ async def shutdown():
     print("Shutting down...")
     try:
         # Вызываем экстренное сохранение ПЕРЕД остановкой executors
-        await emergency_save()
+        await emergency_save()  # <-- Перенесено в самое начало
         
         # Останавливаем executors корректно
         git_executor.shutdown(wait=True, cancel_futures=True)
@@ -752,8 +752,7 @@ async def emergency_save():
     print("⚡ Экстренное сохранение state.json и reply_cache.json...")
     try:
         # 1. Сохраняем кэш ответов
-        if not os.path.exists(REPLY_FILE):
-            save_reply_cache()
+        save_reply_cache()
         
         # 2. Сохраняем основные данные
         with open('state.json', 'w', encoding='utf-8') as f:
