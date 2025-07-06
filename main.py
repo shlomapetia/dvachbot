@@ -43,21 +43,15 @@ import os
 import signal
 from datetime import datetime, UTC  # Добавьте UTC в импорты
 
-message_queue = None  # Глобальная очередь сообщений
-
-# Глобальный семафор для Git-операций
+# ========== Глобальные переменные и настройки ==========
+is_shutting_down = False
+git_executor = ThreadPoolExecutor(max_workers=1)
+send_executor = ThreadPoolExecutor(max_workers=100)
 git_semaphore = asyncio.Semaphore(1)
-
-# Глобальные executors
-git_executor = ThreadPoolExecutor(max_workers=1)  # Для Git-операций
-send_executor = ThreadPoolExecutor(max_workers=100)  # Для отправки сообщений
+message_queue = None
 
 # Отключаем стандартную обработку сигналов в aiogram
 os.environ["AIORGRAM_DISABLE_SIGNAL_HANDLERS"] = "1"
-
-# Глобальный флаг для graceful shutdown
-is_shutting_down = False
-
 
 async def healthcheck(request):
     """Для Railway Health Checks"""
@@ -80,11 +74,9 @@ GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
 async def git_commit_and_push():
-    """Надежная функция бэкапа в GitHub с использованием отдельного потока"""
-        
-    # Проверяем, не завершен ли уже executor
+    """Надежная функция бэкапа в GitHub"""
     if git_executor._shutdown:
-        print("⚠️ Git executor уже завершен, пропускаем бэкап")
+        print("⚠️ Git executor завершен, пропускаем бэкап")
         return False
         
     async with git_semaphore:
@@ -94,26 +86,25 @@ async def git_commit_and_push():
                 print("❌ Нет GITHUB_TOKEN")
                 return False
 
-            # Запускаем в отдельном потоке
             loop = asyncio.get_running_loop()
-            success = await loop.run_in_executor(git_executor, sync_git_operations, token)
-            return success
-            
+            return await loop.run_in_executor(
+                git_executor, 
+                sync_git_operations, 
+                token
+            )
         except Exception as e:
-            print(f"⛔ Критическая ошибка в git_commit_and_push: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"⛔ Ошибка в git_commit_and_push: {str(e)}")
             return False
-            
+
 def sync_git_operations(token: str) -> bool:
-    """Синхронные Git-операции для выполнения в отдельном потоке"""
+    """Синхронные Git-операции"""
     try:
         work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
         
-        # Инициализация/обновление репозитория
         if not os.path.exists(os.path.join(work_dir, ".git")):
+            # Клонирование репозитория
             clone_cmd = ["git", "clone", repo_url, work_dir]
             result = subprocess.run(clone_cmd, capture_output=True, text=True)
             if result.returncode != 0:
@@ -121,45 +112,43 @@ def sync_git_operations(token: str) -> bool:
                 return False
             print("✅ Репозиторий клонирован")
         else:
-            pull_cmd = ["git", "pull"]
-            result = subprocess.run(pull_cmd, cwd=work_dir, capture_output=True, text=True)
+            # Обновление репозитория
+            pull_cmd = ["git", "-C", work_dir, "pull"]
+            result = subprocess.run(pull_cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"⚠️ Ошибка обновления: {result.stderr}")
 
         # Копирование файлов
-        files = []
-        for fname in ["state.json", "reply_cache.json"]:
+        files_to_copy = ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json")
+        copied_files = []
+        
+        for fname in files_to_copy:
             src = os.path.join(os.getcwd(), fname)
             if os.path.exists(src):
                 shutil.copy2(src, work_dir)
-                files.append(fname)
+                copied_files.append(fname)
         
-        for fname in glob.glob("backup_state_*.json"):
-            shutil.copy2(fname, work_dir)
-            files.append(os.path.basename(fname))
-        
-        if not files:
+        if not copied_files:
             print("⚠️ Нет файлов для бэкапа")
             return False
 
-        # Настройка пользователя Git
-        subprocess.run(["git", "config", "user.name", "Backup Bot"], cwd=work_dir, check=True)
-        subprocess.run(["git", "config", "user.email", "backup@dvachbot.com"], cwd=work_dir, check=True)
+        # Git операции
+        subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True)
+        subprocess.run(["git", "-C", work_dir, "config", "user.email", "backup@dvachbot.com"], check=True)
         
-        # Git команды
-        commands = [
-            ["git", "add", "."],
-            ["git", "commit", "-m", f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"],
-            ["git", "push", "-u", "origin", "main"]
-        ]
+        subprocess.run(["git", "-C", work_dir, "add", "."], check=True)
         
-        for cmd in commands:
-            result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"❌ Ошибка команды {' '.join(cmd)}: {result.stderr}")
-                return False
+        commit_msg = f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
+        subprocess.run(["git", "-C", work_dir, "commit", "-m", commit_msg], check=True)
         
-        print(f"✅ Бекапы сохранены в GitHub: {', '.join(files)}")
+        push_cmd = ["git", "-C", work_dir, "push", "-u", "origin", "main"]
+        result = subprocess.run(push_cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            print(f"❌ Ошибка пуша: {result.stderr}")
+            return False
+        
+        print(f"✅ Бекапы сохранены в GitHub: {', '.join(copied_files)}")
         return True
         
     except Exception as e:
@@ -251,37 +240,27 @@ async def shutdown():
 
         
 async def auto_backup():
-    """Автоматическое сохранение бэкапов в GitHub каждые 6 часов"""
+    """Автоматическое сохранение каждые 6 часов"""
     while True:
         try:
             await asyncio.sleep(21600)  # 6 часов
             
+            if is_shutting_down:
+                break
+                
             # Создаем новый бэкап
             backup_name = f"backup_state_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
             shutil.copy2("state.json", backup_name)
             
-            # Сохраняем текущее состояние
             save_reply_cache()
-            
-            # Пушим в GitHub
-            success = await git_commit_and_push()
-            
-            # Удаляем старые бэкапы только после успешного пуша
-            if success:
-                backup_files = sorted(glob.glob("backup_state_*.json"))
-                if len(backup_files) > 3:
-                    for old_file in backup_files[:-3]:
-                        try:
-                            os.remove(old_file)
-                            print(f"🗑 Удален старый бэкап: {old_file}")
-                        except Exception as e:
-                            print(f"❌ Ошибка удаления {old_file}: {e}")
+            await git_commit_and_push()
             
             print(f"✅ Полный бэкап выполнен: {backup_name}")
             
         except Exception as e:
             print(f"❌ Ошибка в auto_backup: {e}")
             await asyncio.sleep(600)
+
             
 # Настройка сборщика мусора
 gc.set_threshold(
@@ -740,7 +719,7 @@ def load_reply_cache():
           f"сообщений {len(message_to_post)}")
 
 async def graceful_shutdown():
-    """Обработчик graceful shutdown для Railway"""
+    """Обработчик graceful shutdown"""
     global is_shutting_down
     if is_shutting_down:
         return
@@ -751,23 +730,29 @@ async def graceful_shutdown():
     # 1. Экстренное сохранение данных
     await emergency_save()
     
-    # 2. Остановка бота и очистка ресурсов
-    await shutdown()
+    # 2. Остановка executors
+    git_executor.shutdown(wait=True)
+    send_executor.shutdown(wait=True)
     
-    print("✅ Данные сохранены, завершаем работу")
-    exit(0)
-
+    # 3. Закрытие сессий и отмена задач
+    if 'bot' in globals() and bot.session:
+        await bot.session.close()
+    
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    
+    await asyncio.gather(*tasks, return_exceptions=True)
+    print("✅ Все задачи остановлены, завершаем работу")
 
 async def emergency_save():
-    """Срочное сохранение перед выключением (улучшенная версия)"""
+    """Срочное сохранение перед выключением"""
     print("⚡ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Запуск...")
     start_time = time.time()
     
     try:
-        # 1. Сохраняем кэш ответов
         save_reply_cache()
         
-        # 2. Сохраняем основные данные
         with open('state.json', 'w', encoding='utf-8') as f:
             json.dump({
                 'post_counter': state['post_counter'],
@@ -783,23 +768,14 @@ async def emergency_save():
             }, f, ensure_ascii=False, indent=2)
         
         print("✅ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Данные сохранены локально")
-        
-        # 3. Пытаемся запушить в GitHub независимо от состояния
-        try:
-            success = await git_commit_and_push()
-            if success:
-                print("✅ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Данные отправлены в GitHub")
-            else:
-                print("❌ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Ошибка при отправке в GitHub")
-        except Exception as e:
-            print(f"❌ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Ошибка git push: {e}")
+        return True
         
     except Exception as e:
         print(f"❌ КРИТИЧЕСКАЯ ОШИБКА ПРИ СОХРАНЕНИИ: {e}")
+        return False
     finally:
         elapsed = time.time() - start_time
         print(f"⚡ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Завершено за {elapsed:.2f} сек")
-
 
 async def auto_memory_cleaner():
     """Единственная функция очистки памяти - каждые 5 минут"""
@@ -898,15 +874,16 @@ async def aiogram_memory_cleaner():
             )
 
 async def auto_save_state():
-    """Автоматическое сохранение состояния каждые 6"""
+    """Автоматическое сохранение состояния каждые 6 часов"""
     while True:
         try:
-            await asyncio.sleep(21600)  # 6 часов
+            await asyncio.sleep(21600)
             
-            # Сохраняем кэш ответов
+            if is_shutting_down:
+                break
+                
             save_reply_cache()
             
-            # Сохраняем основные данные
             with open('state.json', 'w', encoding='utf-8') as f:
                 json.dump({
                     'post_counter': state['post_counter'],
@@ -922,13 +899,7 @@ async def auto_save_state():
                 }, f, ensure_ascii=False, indent=2)
             
             print("✅ Состояние сохранено")
-            
-            # Пушим в GitHub
-            success = await git_commit_and_push()
-            if success:
-                print("✅ Изменения отправлены в GitHub")
-            else:
-                print("❌ Ошибка при отправке в GitHub")
+            await git_commit_and_push()
             
         except Exception as e:
             print(f"❌ Ошибка в auto_save_state: {e}")
@@ -3327,52 +3298,42 @@ async def start_background_tasks():
     return tasks 
 
 async def supervisor():
-    global is_shutting_down, bot, connector
+    global is_shutting_down, bot
     
-    load_state()
-    
-    try:
-        healthcheck_site = await start_healthcheck()
-        bg_tasks = await start_background_tasks()
-        connector = aiohttp.TCPConnector(limit=10, force_close=True)
-        bot = Bot(token=BOT_TOKEN, connector=connector)
-
-        print("▶️ Start polling...")
-        while not is_shutting_down:
-            try:
-                await dp.start_polling(
-                    bot,
-                    allowed_updates=dp.resolve_used_update_types(),
-                    close_bot_session=False,
-                    handle_signals=True,
-                    skip_updates=True,
-                    timeout=60
-                )
-            except Exception as e:
-                print(f"⚠️ Restarting polling due to: {str(e)[:200]}")
-                await asyncio.sleep(5)
-    except Exception as e:
-        print(f"🔥 Critical error: {e}")
-    finally:
-        if not is_shutting_down:
-            await shutdown()
-
-if __name__ == "__main__":
-    # Устанавливаем асинхронные обработчики сигналов
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     # Для Linux/Mac
     if hasattr(signal, 'SIGTERM'):
         loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
     if hasattr(signal, 'SIGINT'):
         loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown()))
-
+    
     try:
-        loop.run_until_complete(supervisor())
-    except KeyboardInterrupt:
-        loop.run_until_complete(graceful_shutdown())
+        load_state()
+        healthcheck_site = await start_healthcheck()
+        bot = Bot(token=BOT_TOKEN)
+        
+        global message_queue
+        message_queue = asyncio.Queue(maxsize=5000)
+        
+        tasks = [
+            asyncio.create_task(auto_backup()),
+            asyncio.create_task(auto_save_state()),
+            asyncio.create_task(message_broadcaster()),
+            asyncio.create_task(conan_roaster()),
+            asyncio.create_task(motivation_broadcaster()),
+            asyncio.create_task(auto_memory_cleaner()),
+            asyncio.create_task(cleanup_old_messages()),
+        ]
+        
+        print("✅ Фоновые задачи запущены")
+        await dp.start_polling(bot, skip_updates=True)
+        
+    except Exception as e:
+        print(f"🔥 Critical error: {e}")
     finally:
         if not is_shutting_down:
-            loop.run_until_complete(graceful_shutdown())
-        loop.close()
+            await graceful_shutdown()
+
+if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(supervisor())
