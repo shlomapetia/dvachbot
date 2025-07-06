@@ -70,11 +70,9 @@ async def git_commit_and_push():
 
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
         work_dir = "/data"
+        os.makedirs(work_dir, exist_ok=True)
         
-        if not os.path.exists(work_dir):
-            os.makedirs(work_dir, exist_ok=True)
-        
-        # Клонируем или обновляем репозиторий
+        # Инициализация/обновление репозитория
         git_dir = os.path.join(work_dir, ".git")
         if not os.path.exists(git_dir):
             clone_cmd = ["git", "clone", repo_url, work_dir]
@@ -83,38 +81,48 @@ async def git_commit_and_push():
                 print(f"❌ Ошибка клонирования: {result.stderr}")
                 return False
         else:
-            pull_cmd = ["git", "pull"]
-            subprocess.run(pull_cmd, cwd=work_dir, stdout=subprocess.DEVNULL)
-
-        # Копируем файлы
-        files_to_backup = []
-        for f in ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"):
-            if os.path.exists(f):
-                shutil.copy2(f, work_dir)
-                files_to_backup.append(os.path.basename(f))
+            # Подавляем вывод pull (чтобы не засорять логи)
+            subprocess.run(["git", "pull"], cwd=work_dir, 
+                          stdout=subprocess.DEVNULL, 
+                          stderr=subprocess.DEVNULL)
         
-        if not files_to_backup:
+        # ГАРАНТИЯ: Всегда устанавливаем пользователя
+        subprocess.run(["git", "config", "user.name", "Backup Bot"], 
+                      cwd=work_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "backup@dvachbot.com"], 
+                      cwd=work_dir, check=True)
+        
+        # Копирование файлов
+        files = []
+        for fname in ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"):
+            if os.path.exists(fname):
+                shutil.copy2(fname, work_dir)
+                files.append(os.path.basename(fname))
+        
+        if not files:
             print("⚠️ Нет файлов для бэкапа")
             return False
 
-        # Git операции
-        add_cmd = ["git", "add"] + files_to_backup
-        commit_cmd = ["git", "commit", "-m", f"Backup: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"]
-        push_cmd = ["git", "push"]
+        # Последовательное выполнение Git команд
+        commands = [
+            ["git", "add", "."],
+            ["git", "commit", "-m", f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"],
+            ["git", "push"]
+        ]
         
-        for cmd in [add_cmd, commit_cmd, push_cmd]:
+        for cmd in commands:
             result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"❌ Ошибка команды {' '.join(cmd)}: {result.stderr}")
                 return False
         
-        print(f"✅ Бекапы сохранены в GitHub: {', '.join(files_to_backup)}")
+        print(f"✅ Бекапы сохранены в GitHub: {', '.join(files)}")
         return True
         
     except Exception as e:
         print(f"⛔ Критическая ошибка в git_commit_and_push: {str(e)[:200]}")
         return False
-
+        
 dp = Dispatcher()
 # Настройка логирования - только важные сообщения
 logging.basicConfig(
@@ -200,7 +208,7 @@ async def auto_backup():
             await asyncio.sleep(7200)  # 2 часа
             
             # Создаем новый бэкап
-            backup_name = f"backup_state_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+            backup_name = f"backup_state_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
             shutil.copy2("state.json", backup_name)
             
             # Пушим ВСЕ файлы
