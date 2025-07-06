@@ -5,3 +5,4 @@ aiohttp
 Pillow
 future
 python-dotenv
+gitpython
