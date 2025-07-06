@@ -610,32 +610,6 @@ def save_reply_cache():
         print(f"⛔ Ошибка сохранения reply_cache: {str(e)[:200]}")
         return False
 
-def check_restart_needed():
-    """Проверяет, нужно ли перезапускать бота (только при изменении main.py)"""
-    try:
-        # Получаем хэш текущего файла
-        current_hash = subprocess.run(
-            ["git", "hash-object", "main.py"],
-            capture_output=True, text=True
-        ).stdout.strip()
-        
-        # Получаем хэш из последнего коммита
-        last_commit_hash = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True
-        ).stdout.strip()
-        
-        # Получаем хэш main.py в последнем коммите
-        file_hash = subprocess.run(
-            ["git", "ls-tree", last_commit_hash, "main.py"],
-            capture_output=True, text=True
-        ).stdout.split()[2] if last_commit_hash else ""
-        
-        return current_hash != file_hash
-    except Exception as e:
-        print(f"⚠️ Ошибка при проверке необходимости перезапуска: {e}")
-        return False
-
 def load_state():
     if not os.path.exists('state.json'):
         return
