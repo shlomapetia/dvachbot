@@ -80,10 +80,6 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переме�
 
 async def git_commit_and_push():
     """Надежная функция бэкапа в GitHub с использованием отдельного потока"""
-    # Проверяем что бот активен
-    if not bot or getattr(bot.session, 'closed', True):
-        print("⚠️ Bot not active, skipping git push")
-        return False
         
     # Проверяем, не завершен ли уже executor
     if git_executor._shutdown:
@@ -111,13 +107,10 @@ async def git_commit_and_push():
 def sync_git_operations(token: str) -> bool:
     """Синхронные Git-операции для выполнения в отдельном потоке"""
     try:
-        # Проверяем, не завершен ли executor
-        if git_executor._shutdown:
-            print("⚠️ Git executor завершен, пропускаем операции")
-            return False
         work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
+        
         # Инициализация/обновление репозитория
         if not os.path.exists(os.path.join(work_dir, ".git")):
             clone_cmd = ["git", "clone", repo_url, work_dir]
@@ -225,8 +218,13 @@ async def shutdown():
     print("Shutting down...")
     try:
         # Вызываем экстренное сохранение ПЕРЕД остановкой executors
-        await emergency_save()  # <-- Перенесено в самое начало
+        await emergency_save()
         
+        # Останавливаем healthcheck сервер
+        if 'healthcheck_site' in globals():
+            await healthcheck_site.stop()
+            print("🛑 Healthcheck server stopped")
+            
         # Останавливаем executors корректно
         git_executor.shutdown(wait=True, cancel_futures=True)
         send_executor.shutdown(wait=True, cancel_futures=True)
@@ -259,11 +257,6 @@ async def auto_backup():
         try:
             await asyncio.sleep(21600)  # 6 часов
             
-            # Проверяем что бот активен
-            if not bot or bot.session.closed:
-                print("⚠️ Bot not active, skipping backup")
-                continue
-                
             # Создаем новый бэкап
             backup_name = f"backup_state_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
             shutil.copy2("state.json", backup_name)
@@ -771,15 +764,15 @@ async def emergency_save():
         
         print("✅ Данные сохранены локально")
         
-        # 3. Пушим в GitHub (только если executor еще активен)
-        if not git_executor._shutdown:
+        # 3. Пытаемся запушить в GitHub независимо от состояния
+        try:
             success = await git_commit_and_push()
             if success:
                 print("✅ Экстренные данные отправлены в GitHub")
             else:
                 print("❌ Ошибка при отправке экстренных данных в GitHub")
-        else:
-            print("⚠️ Git executor завершен, пропускаем пушинг в GitHub")
+        except Exception as e:
+            print(f"❌ Ошибка git push при экстренном сохранении: {e}")
         
     except Exception as e:
         print(f"❌ Ошибка при экстренном сохранении: {e}")
