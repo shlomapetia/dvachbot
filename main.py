@@ -290,7 +290,7 @@ gc.set_threshold(
 async def cleanup_old_messages():
     """Очистка постов старше 7 дней"""
     while True:
-        await asyncio.sleep(3600)  # Каждые 1 час
+        await asyncio.sleep(7200)  # Каждые 1 час
         try:
             current_time = datetime.now(UTC)  # Используем UTC вместо MSK
             old_posts = [
