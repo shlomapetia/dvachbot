@@ -145,7 +145,7 @@ def sync_git_operations(token: str) -> bool:
                 print(f"⚠️ Ошибка обновления: {result.stderr}")
 
         # Копирование файлов
-        files_to_copy = ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json")
+        files_to_copy = ["state.json", "reply_cache.json"]
         copied_files = []
         
         for fname in files_to_copy:
@@ -266,14 +266,14 @@ async def shutdown():
 
         
 async def auto_backup():
-    """Автоматическое сохранение каждые 6 часов"""
+    """Автоматическое сохранение каждые 10 минут"""
     while True:
         try:
-            await asyncio.sleep(21600)  # 6 часов
+            await asyncio.sleep(600)  # 10 минут
             
             if is_shutting_down:
                 break
-                
+
             # Сохраняем reply_cache
             save_reply_cache()
             
@@ -292,26 +292,45 @@ async def auto_backup():
                     }
                 }, f, ensure_ascii=False, indent=2)
             
-            # Создаем новый бэкап
-            backup_name = f"backup_state_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
-            shutil.copy2("state.json", backup_name)
-            
             # Пуш в GitHub
             print("💾 Обновление state.json и reply_cache.json, пушим в GitHub...")
             success = await git_commit_and_push()
             if success:
-                print(f"✅ Полный бэкап выполнен: {backup_name}")
+                print("✅ Бэкап успешно отправлен")
             else:
                 print("❌ Не удалось отправить данные в GitHub")
             
         except Exception as e:
             print(f"❌ Ошибка в auto_backup: {e}")
-            # Ждем 1 час перед повторной попыткой
-            await asyncio.sleep(3600)
+            # Ждем 1 минуту перед повторной попыткой
+            await asyncio.sleep(60)
             
 # Настройка сборщика мусора
 gc.set_threshold(
     700, 10, 10)  # Оптимальные настройки для баланса памяти/производительности
+
+async def save_state_and_backup():
+    """Сохраняет state.json и reply_cache.json, пушит в GitHub"""
+    try:
+        with open('state.json', 'w', encoding='utf-8') as f:
+            json.dump({
+                'post_counter': state['post_counter'],
+                'users_data': {
+                    'active': list(state['users_data']['active']),
+                    'banned': list(state['users_data']['banned']),
+                },
+                'message_counter': state['message_counter'],
+                'settings': state['settings'],
+                'recent_post_mappings': {
+                    str(k): v for k, v in list(post_to_messages.items())[-500:]
+                }
+            }, f, ensure_ascii=False, indent=2)
+        save_reply_cache()
+        print("💾 Обновление state.json и reply_cache.json, пушим в GitHub...")
+        return await git_commit_and_push()
+    except Exception as e:
+        print(f"⛔ Ошибка сохранения state: {e}")
+        return False
 
 async def cleanup_old_messages():
     """Очистка постов старше 7 дней"""
@@ -359,7 +378,7 @@ ADMINS = {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
 SPAM_LIMIT = 14
 SPAM_WINDOW = 15
 STATE_FILE = 'state.json'
-SAVE_INTERVAL = 21600  # секунд
+SAVE_INTERVAL = 600  # секунд
 STICKER_WINDOW = 10  # секунд
 STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
@@ -766,83 +785,52 @@ def load_reply_cache():
           f"сообщений {len(message_to_post)}")
 
 async def graceful_shutdown():
-    """Обработчик graceful shutdown"""
+    """Обработчик graceful shutdown (корректное сохранение перед остановкой)"""
     global is_shutting_down
     if is_shutting_down:
         return
-        
+
     is_shutting_down = True
     print("🛑 Получен сигнал shutdown, сохраняем данные...")
 
-    # 1. Экстренное сохранение данных
-    await emergency_save()
-
-    # 2. Фиксируем изменения в GitHub
-    print("🚀 Отправка изменений в GitHub...")
-    success = await git_commit_and_push()
-    if success:
-        print("✅ Данные успешно отправлены в GitHub")
-    else:
-        print("❌ Не удалось отправить данные в GitHub")
-    
+    # 1. Остановить polling чтобы не принимались новые сообщения
     try:
-        # Останавливаем healthcheck сервер
+        await dp.stop_polling()
+        print("⏸ Polling остановлен для shutdown")
+    except Exception as e:
+        print(f"⚠️ Не удалось остановить polling: {e}")
+
+    # 2. Ждать пока очередь сообщений опустеет (макс 10 сек)
+    for _ in range(10):
+        if message_queue and message_queue.empty():
+            break
+        await asyncio.sleep(1)
+
+    # 3. Сохраняем и пушим данные
+    await save_state_and_backup()
+
+    # 4. Останавливаем всё остальное как было
+    try:
         if 'healthcheck_site' in globals():
             await healthcheck_site.stop()
             print("🛑 Healthcheck server stopped")
-            
-        # Останавливаем executors корректно
+
         git_executor.shutdown(wait=True, cancel_futures=True)
         send_executor.shutdown(wait=True, cancel_futures=True)
-        
-        # Закрываем хранилище диспетчера
+
         if hasattr(dp, 'storage') and dp.storage:
             await dp.storage.close()
     except Exception as e:
         print(f"Error during shutdown: {e}")
 
-    # Закрываем сессию бота
     if 'bot' in globals() and bot.session:
         await bot.session.close()
-    
-    # Отменяем все фоновые задачи
+
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     for task in tasks:
         task.cancel()
-    
     await asyncio.gather(*tasks, return_exceptions=True)
     print("✅ Все задачи остановлены, завершаем работу")
-async def emergency_save():
-    """Срочное сохранение перед выключением"""
-    print("⚡ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Запуск...")
-    start_time = time.time()
-    
-    try:
-        save_reply_cache()
-        
-        with open('state.json', 'w', encoding='utf-8') as f:
-            json.dump({
-                'post_counter': state['post_counter'],
-                'users_data': {
-                    'active': list(state['users_data']['active']),
-                    'banned': list(state['users_data']['banned']),
-                },
-                'message_counter': state['message_counter'],
-                'settings': state['settings'],
-                'recent_post_mappings': {
-                    str(k): v for k, v in list(post_to_messages.items())[-500:]
-                }
-            }, f, ensure_ascii=False, indent=2)
-        
-        print("✅ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Данные сохранены локально")
-        return True
-        
-    except Exception as e:
-        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА ПРИ СОХРАНЕНИИ: {e}")
-        return False
-    finally:
-        elapsed = time.time() - start_time
-        print(f"⚡ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Завершено за {elapsed:.2f} сек")
 
 async def auto_memory_cleaner():
     """Единственная функция очистки памяти - каждые 5 минут"""
@@ -941,10 +929,10 @@ async def aiogram_memory_cleaner():
             )
 
 async def auto_save_state():
-    """Автоматическое сохранение состояния каждые 6 часов"""
+    """Автоматическое сохранение состояния каждые 10 мин"""
     while True:
         try:
-            await asyncio.sleep(21600)
+            await asyncio.sleep(600)
             
             if is_shutting_down:
                 break
@@ -2184,25 +2172,6 @@ AHE_EYES = ['😵', '🤤', '😫', '😩', '😳', '😖', '🥵']
 AHE_TONGUE = ['👅', '💦', '😛', '🤪', '😝']
 AHE_EXTRA = ['💕', '💗', '✨', '🥴', '']
 
-
-@dp.message(Command("restore_backup"))
-async def cmd_restore_backup(message: types.Message):
-    """Восстановить из последнего бэкапа"""
-    if not is_admin(message.from_user.id):
-        return
-
-    # Ищем последний бэкап
-    backups = sorted(glob.glob('backup_state_*.json'))
-    if not backups:
-        await message.answer("❌ Нет бэкапов")
-        return
-
-    latest = backups[-1]
-    shutil.copy(latest, 'state.json')
-    await message.answer(f"✅ Восстановлено из {latest}")
-
-    # Перезагружаем
-    load_state()
 
 @dp.message(Command("face"))
 async def cmd_face(message: types.Message):
