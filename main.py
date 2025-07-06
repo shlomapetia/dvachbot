@@ -3598,9 +3598,11 @@ async def handle_media_group_init(message: Message):
 async def handle_message(message: Message):
     """Основной обработчик сообщений"""
     # Пропускаем сообщения, которые являются частью медиа-группы
+    
     if message.media_group_id:
         return
-
+    if message.media_group_id or message.sticker:
+        return
     user_id = message.from_user.id
 
     try:
@@ -3733,6 +3735,8 @@ async def handle_message(message: Message):
             content['caption'] = caption
         elif content_type == 'video_note':
             content['file_id'] = message.video_note.file_id
+        elif content_type == 'sticker':
+            content['file_id'] = message.sticker.file_id 
 
         # Инициализируем запись в хранилище перед отправкой
         messages_storage[current_post_num] = {
@@ -3812,7 +3816,7 @@ async def handle_message(message: Message):
             elif content_type == 'sticker':
                 sent_to_author = await bot.send_sticker(
                     user_id,
-                    content['file_id'],
+                    content['file_id'] = message.sticker.file_id  ,
                     reply_to_message_id=reply_to_message_id
                 )
             elif content_type == 'video_note':
