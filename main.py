@@ -65,13 +65,15 @@ async def healthcheck(request):
 
 async def start_healthcheck():
     """Запускаем мини-сервер для проверки работоспособности"""
+    port = int(os.environ.get('PORT', 8080))  # Получаем порт из переменных окружения
+    
     app = web.Application()
     app.router.add_get("/", healthcheck)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)  # Порт для Railway
+    site = web.TCPSite(runner, "0.0.0.0", port)  # Используем порт из переменной окружения
     await site.start()
-    print("🟢 Healthcheck-сервер запущен на порту 8080")
+    print(f"🟢 Healthcheck-сервер запущен на порту {port}")
 
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
@@ -3341,15 +3343,12 @@ async def handle_message(message: Message):
 async def start_background_tasks():
     """Поднимаем все фоновые корутины ОДИН раз за весь runtime"""
     global message_queue
-    message_queue = asyncio.Queue(
-        maxsize=5000)  # очередь, привязана к текущему loop
-
+    message_queue = asyncio.Queue(maxsize=5000)
 
     tasks = [
         asyncio.create_task(auto_save_state()),
         asyncio.create_task(message_broadcaster()),
         asyncio.create_task(conan_roaster()), 
-        asyncio.create_task(start_healthcheck()),
         asyncio.create_task(motivation_broadcaster()), 
         asyncio.create_task(auto_memory_cleaner()),
         asyncio.create_task(auto_backup()), 
@@ -3365,6 +3364,9 @@ async def supervisor():
     load_state()
     
     try:        
+        # Запускаем healthcheck первым делом
+        await start_healthcheck()
+        
         # Запускаем фоновые задачи
         bg_tasks = await start_background_tasks()
 
@@ -3372,7 +3374,7 @@ async def supervisor():
         connector = aiohttp.TCPConnector(limit=10, force_close=True)
         bot = Bot(token=BOT_TOKEN, connector=connector)
 
-        # Основной цикл работы бота - БЕЗ ПЕРЕЗАПУСКА
+        # Основной цикл работы бота
         print("▶️ Start polling...")
         await dp.start_polling(
             bot, 
