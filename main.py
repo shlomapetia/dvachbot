@@ -75,7 +75,10 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переме�
 
 async def git_commit_and_push():
     """Надежная функция бэкапа в GitHub"""
-    if git_executor._shutdown:
+    global is_shutting_down
+    
+    # Разрешаем выполнение при shutdown
+    if git_executor._shutdown and not is_shutting_down:
         print("⚠️ Git executor завершен, пропускаем бэкап")
         return False
         
@@ -730,11 +733,19 @@ async def graceful_shutdown():
     # 1. Экстренное сохранение данных
     await emergency_save()
     
-    # 2. Остановка executors
+    # 2. Фиксируем изменения в GitHub
+    print("🚀 Отправка изменений в GitHub...")
+    success = await git_commit_and_push()
+    if success:
+        print("✅ Данные успешно отправлены в GitHub")
+    else:
+        print("❌ Не удалось отправить данные в GitHub")
+    
+    # 3. Останавливаем executors
     git_executor.shutdown(wait=True)
     send_executor.shutdown(wait=True)
     
-    # 3. Закрытие сессий и отмена задач
+    # 4. Закрываем сессии и отменяем задачи
     if 'bot' in globals() and bot.session:
         await bot.session.close()
     
@@ -3300,7 +3311,7 @@ async def start_background_tasks():
 async def supervisor():
     global is_shutting_down, bot
     
-    # Для Linux/Mac
+    # Обработка сигналов для Linux/Mac
     if hasattr(signal, 'SIGTERM'):
         loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
     if hasattr(signal, 'SIGINT'):
@@ -3314,6 +3325,7 @@ async def supervisor():
         global message_queue
         message_queue = asyncio.Queue(maxsize=5000)
         
+        # Запуск фоновых задач
         tasks = [
             asyncio.create_task(auto_backup()),
             asyncio.create_task(auto_save_state()),
