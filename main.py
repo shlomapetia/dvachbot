@@ -61,18 +61,19 @@ GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
 async def git_commit_and_push():
-    """Надежная функция бэкапа state и reply в GitHub"""
+    """Надежная функция бэкапа state и reply в GitHub без триггера пересборки"""
     try:
         token = os.getenv("GITHUB_TOKEN")
         if not token:
             print("❌ Нет GITHUB_TOKEN")
             return False
 
-        repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
-        work_dir = "/data"
+        # Используем временную директорию вне рабочего каталога
+        work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
         
-        # Инициализация/обновление репозитория
+        # Инициализация/обновление репозитория во временной директории
+        repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
         git_dir = os.path.join(work_dir, ".git")
         if not os.path.exists(git_dir):
             clone_cmd = ["git", "clone", repo_url, work_dir]
@@ -81,7 +82,7 @@ async def git_commit_and_push():
                 print(f"❌ Ошибка клонирования: {result.stderr}")
                 return False
         else:
-            # Подавляем вывод pull (чтобы не засорять логи)
+            # Подавляем вывод pull
             subprocess.run(["git", "pull"], cwd=work_dir, 
                           stdout=subprocess.DEVNULL, 
                           stderr=subprocess.DEVNULL)
@@ -92,7 +93,7 @@ async def git_commit_and_push():
         subprocess.run(["git", "config", "user.email", "backup@dvachbot.com"], 
                       cwd=work_dir, check=True)
         
-        # Копирование файлов
+        # Копирование файлов из рабочей директории во временный репозиторий
         files = []
         for fname in ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"):
             if os.path.exists(fname):
