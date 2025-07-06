@@ -46,8 +46,9 @@ from datetime import datetime, UTC  # Добавьте UTC в импорты
 # Глобальный семафор для Git-операций
 git_semaphore = asyncio.Semaphore(1)
 
-# Глобальный executor для тяжелых операций
-executor = ThreadPoolExecutor(max_workers=2)  # Ограничиваем количество одновременно выполняемых Git-операций
+# Глобальные executors
+git_executor = ThreadPoolExecutor(max_workers=1)  # Для Git-операций
+send_executor = ThreadPoolExecutor(max_workers=100)  # Для отправки сообщений
 
 async def healthcheck(request):
     """Для Railway Health Checks"""
@@ -77,7 +78,7 @@ async def git_commit_and_push():
 
             # Запускаем в отдельном потоке
             loop = asyncio.get_running_loop()
-            success = await loop.run_in_executor(executor, sync_git_operations, token)
+            success = await loop.run_in_executor(git_executor, sync_git_operations, token)
             return success
             
         except Exception as e:
@@ -85,7 +86,7 @@ async def git_commit_and_push():
             import traceback
             traceback.print_exc()
             return False
-
+            
 def sync_git_operations(token: str) -> bool:
     """Синхронные Git-операции для выполнения в отдельном потоке"""
     try:
@@ -225,8 +226,11 @@ async def shutdown():
     """Cleanup tasks before shutdown"""
     print("Shutting down...")
     try:
-        executor.shutdown(wait=False)  # Завершаем executor
-        await dp.storage.close()  # Только close, без wait_closed
+        # Останавливаем executors в правильном порядке
+        git_executor.shutdown(wait=True, cancel_futures=True)
+        send_executor.shutdown(wait=True, cancel_futures=True)
+        
+        await dp.storage.close()
     except Exception as e:
         print(f"Error during shutdown: {e}")
     
@@ -235,7 +239,6 @@ async def shutdown():
     
     # Вызываем экстренное сохранение
     await emergency_save()
-
 async def auto_backup():
     """Автоматическое сохранение бэкапов в GitHub каждые 6 часа"""
     while True:
@@ -532,9 +535,6 @@ async def global_error_handler(event: types.ErrorEvent) -> bool:
             print(f"Update: {update.model_dump_json(exclude_none=True)}")
         await asyncio.sleep(10)  # Задержка перед повторной попыткой
         return False
-
-# Глобальный executor для параллельной отправки
-executor = ThreadPoolExecutor(max_workers=100)
 
 # Хранилище данных
 state = {
@@ -1035,9 +1035,6 @@ async def apply_penalty(user_id: int, msg_type: str):
     mute_seconds = rules['penalty'][level] if rules.get('penalty') else 30  # По умолчанию 30 сек
     mutes[user_id] = datetime.now(UTC) + timedelta(seconds=mute_seconds)
 
-    # Удаляем посты пользователя за последние 5 минут
-    deleted_posts = await delete_user_posts(user_id, 5)
-
     # Определяем тип нарушения
     violation_type = ""
     if msg_type == 'text':
@@ -1060,12 +1057,11 @@ async def apply_penalty(user_id: int, msg_type: str):
         await bot.send_message(
             user_id,
             f"🚫 Эй пидор ты в муте на {time_str} за {violation_type}\n"
-            f"Удалено твоих последних постов: {deleted_posts}\n"
             f"Спамишь дальше - получишь бан",
             parse_mode="HTML")
 
         # Отправляем уведомление в чат
-        await send_moderation_notice(user_id, "mute", time_str, deleted_posts)
+        await send_moderation_notice(user_id, "mute", time_str, 0)
     except Exception as e:
         print(f"Ошибка отправки уведомления о муте: {e}")
 
@@ -1370,11 +1366,9 @@ async def send_moderation_notice(user_id: int, action: str, duration: str = None
     header = header.replace("Пост", "### АДМИН ###")
 
     if action == "ban":
-        text = (f"🚨 Хуесос был забанен за спам. "
-               f"Удалено его постов за последний час: {deleted_posts}. Помянем.")
+        text = (f"🚨 Хуесос был забанен за спам. Помянем.")
     elif action == "mute":
         text = (f"🔇 Ебаного пидораса замутили на {duration}. "
-               f"Удалено его постов за последние 15 минут: {deleted_posts}. "
                "Хорош спамить, хуйло ебаное!")
     else:
         return
@@ -1604,7 +1598,7 @@ async def send_message_to_users(
 
     # Настройки параллелизма
     max_concurrent = 100  # Максимальное количество одновременных отправок
-    semaphore = asyncio.Semaphore(100)  # Вместо 100
+    semaphore = asyncio.Semaphore(max_concurrent)
 
     async def send_with_semaphore(uid):
         async with semaphore:
@@ -1617,22 +1611,23 @@ async def send_message_to_users(
 
     # Сохраняем связи сообщений для ответов
     if content.get('post_num'):
+        post_num = content['post_num']
         for uid, msg in zip(active_recipients, results):
             if msg:
                 if isinstance(msg, list):  # Для медиа-групп
-                    if content['post_num'] not in post_to_messages:
-                        post_to_messages[content['post_num']] = {}
-                    post_to_messages[content['post_num']][uid] = msg[0].message_id
+                    if post_num not in post_to_messages:
+                        post_to_messages[post_num] = {}
+                    post_to_messages[post_num][uid] = msg[0].message_id
                     for m in msg:
-                        message_to_post[(uid, m.message_id)] = content['post_num']
+                        message_to_post[(uid, m.message_id)] = post_num
                 else:  # Для одиночных сообщений
-                    if content['post_num'] not in post_to_messages:
-                        post_to_messages[content['post_num']] = {}
-                    post_to_messages[content['post_num']][uid] = msg.message_id
-                    message_to_post[(uid, msg.message_id)] = content['post_num']
+                    if post_num not in post_to_messages:
+                        post_to_messages[post_num] = {}
+                    post_to_messages[post_num][uid] = msg.message_id
+                    message_to_post[(uid, msg.message_id)] = post_num
 
     return list(zip(active_recipients, results))
-
+    
 async def message_broadcaster():
     """Обработчик очереди сообщений с многопоточной обработкой"""
     # Создаем несколько worker'ов для параллельной обработки
