@@ -64,17 +64,17 @@ async def healthcheck(request):
     return web.Response(text="Bot is alive")
 
 async def start_healthcheck():
-    """Запускаем мини-сервер для проверки работоспособности"""
-    port = int(os.environ.get('PORT', 8080))  # Получаем порт из переменных окружения
-    
+    """Для Railway Health Checks"""
+    port = int(os.environ.get('PORT', 8080))
     app = web.Application()
     app.router.add_get("/", healthcheck)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)  # Используем порт из переменной окружения
-    await site.start()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    # Запускаем сайт без ожидания
+    asyncio.create_task(site.start())
     print(f"🟢 Healthcheck-сервер запущен на порту {port}")
-
+    return site
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
@@ -219,32 +219,6 @@ def add_you_to_my_posts(text: str, user_id: int) -> str:
 
     return text
 
-async def run_bot():
-    global bot, connector
-    connector = aiohttp.TCPConnector(limit=10, force_close=True)
-    bot = Bot(token=BOT_TOKEN, connector=connector)
-    
-    # Закрываем старую сессию, если есть
-    try:
-        await bot.session.close()
-    except:
-        pass
-    
-    while True:
-        try:
-            await dp.start_polling(
-                bot,
-                skip_updates=True,
-                close_bot_session=False,
-                handle_signals=True,  # Разрешаем aiogram обрабатывать сигналы
-                timeout=60,
-            )
-        except asyncio.CancelledError:
-            print("⚠️ Polling cancelled, exiting...")
-            break
-        except Exception as e:
-            logging.error(f"Bot crashed: {e}, restarting in 10 seconds...")
-            await asyncio.sleep(10)
 
 async def shutdown():
     """Cleanup tasks before shutdown"""
@@ -254,10 +228,8 @@ async def shutdown():
         await emergency_save()
         
         # Останавливаем executors корректно
-        if not git_executor._shutdown:
-            git_executor.shutdown(wait=True, cancel_futures=True)
-        if not send_executor._shutdown:
-            send_executor.shutdown(wait=True, cancel_futures=True)
+        git_executor.shutdown(wait=True, cancel_futures=True)
+        send_executor.shutdown(wait=True, cancel_futures=True)
         
         # Закрываем хранилище диспетчера
         if hasattr(dp, 'storage') and dp.storage:
@@ -3365,7 +3337,7 @@ async def supervisor():
     
     try:        
         # Запускаем healthcheck первым делом
-        await start_healthcheck()
+        healthcheck_site = await start_healthcheck()
         
         # Запускаем фоновые задачи
         bg_tasks = await start_background_tasks()
@@ -3396,4 +3368,7 @@ async def supervisor():
         print("🛑 Shutting down...")
         await shutdown()
         print("✅ Clean shutdown completed")
-        
+
+if __name__ == "__main__":
+    asyncio.run(supervisor())
+
