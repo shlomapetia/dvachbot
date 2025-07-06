@@ -42,6 +42,8 @@ import subprocess
 import os
 from datetime import datetime, UTC  # Добавьте UTC в импорты
 
+# Глобальный семафор для Git-операций
+git_semaphore = asyncio.Semaphore(1)
 
 async def healthcheck(request):
     """Для Railway Health Checks"""
@@ -61,68 +63,73 @@ GITHUB_REPO = "https://github.com/shlomapetia/dvachbot.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
 async def git_commit_and_push():
-    """Надежная функция бэкапа state и reply в GitHub без триггера пересборки"""
-    try:
-        token = os.getenv("GITHUB_TOKEN")
-        if not token:
-            print("❌ Нет GITHUB_TOKEN")
-            return False
-
-        # Используем временную директорию вне рабочего каталога
-        work_dir = "/tmp/git_backup"
-        os.makedirs(work_dir, exist_ok=True)
-        
-        # Инициализация/обновление репозитория во временной директории
-        repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
-        git_dir = os.path.join(work_dir, ".git")
-        if not os.path.exists(git_dir):
-            clone_cmd = ["git", "clone", repo_url, work_dir]
-            result = subprocess.run(clone_cmd, cwd=work_dir, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"❌ Ошибка клонирования: {result.stderr}")
+    """Надежная функция бэкапа в GitHub с улучшенной обработкой ошибок"""
+    async with git_semaphore:
+        try:
+            token = os.getenv("GITHUB_TOKEN")
+            if not token:
+                print("❌ Нет GITHUB_TOKEN")
                 return False
-        else:
-            # Подавляем вывод pull
-            subprocess.run(["git", "pull"], cwd=work_dir, 
-                          stdout=subprocess.DEVNULL, 
-                          stderr=subprocess.DEVNULL)
-        
-        # ГАРАНТИЯ: Всегда устанавливаем пользователя
-        subprocess.run(["git", "config", "user.name", "Backup Bot"], 
-                      cwd=work_dir, check=True)
-        subprocess.run(["git", "config", "user.email", "backup@dvachbot.com"], 
-                      cwd=work_dir, check=True)
-        
-        # Копирование файлов из рабочей директории во временный репозиторий
-        files = []
-        for fname in ["state.json", "reply_cache.json"] + glob.glob("backup_state_*.json"):
-            if os.path.exists(fname):
+
+            work_dir = "/tmp/git_backup"
+            os.makedirs(work_dir, exist_ok=True)
+            repo_url = f"https://{token}@github.com/shlomapetia/dvachbot.git"
+            
+            # Инициализация/обновление репозитория
+            if not os.path.exists(os.path.join(work_dir, ".git")):
+                clone_cmd = ["git", "clone", repo_url, work_dir]
+                result = subprocess.run(clone_cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"❌ Ошибка клонирования: {result.stderr}")
+                    return False
+                print("✅ Репозиторий клонирован")
+            else:
+                pull_cmd = ["git", "pull"]
+                result = subprocess.run(pull_cmd, cwd=work_dir, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"⚠️ Ошибка обновления: {result.stderr}")
+
+            # Копирование файлов
+            files = []
+            for fname in ["state.json", "reply_cache.json"]:
+                src = os.path.join(os.getcwd(), fname)
+                if os.path.exists(src):
+                    shutil.copy2(src, work_dir)
+                    files.append(fname)
+            
+            for fname in glob.glob("backup_state_*.json"):
                 shutil.copy2(fname, work_dir)
                 files.append(os.path.basename(fname))
-        
-        if not files:
-            print("⚠️ Нет файлов для бэкапа")
-            return False
-
-        # Последовательное выполнение Git команд
-        commands = [
-            ["git", "add", "."],
-            ["git", "commit", "-m", f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"],
-            ["git", "push"]
-        ]
-        
-        for cmd in commands:
-            result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"❌ Ошибка команды {' '.join(cmd)}: {result.stderr}")
+            
+            if not files:
+                print("⚠️ Нет файлов для бэкапа")
                 return False
-        
-        print(f"✅ Бекапы сохранены в GitHub: {', '.join(files)}")
-        return True
-        
-    except Exception as e:
-        print(f"⛔ Критическая ошибка в git_commit_and_push: {str(e)[:200]}")
-        return False
+
+            # Настройка пользователя Git
+            subprocess.run(["git", "config", "user.name", "Backup Bot"], cwd=work_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "backup@dvachbot.com"], cwd=work_dir, check=True)
+            
+            # Git команды
+            commands = [
+                ["git", "add", "."],
+                ["git", "commit", "-m", f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"],
+                ["git", "push", "-u", "origin", "master"]
+            ]
+            
+            for cmd in commands:
+                result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"❌ Ошибка команды {' '.join(cmd)}: {result.stderr}")
+                    return False
+            
+            print(f"✅ Бекапы сохранены в GitHub: {', '.join(files)}")
+            return True
+            
+        except Exception as e:
+            print(f"⛔ Критическая ошибка в git_commit_and_push: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
         
 dp = Dispatcher()
 # Настройка логирования - только важные сообщения
@@ -137,6 +144,7 @@ aiohttp_log.setLevel(logging.CRITICAL)  # Только критические о
 # Отключаем логирование для aiogram (бот)
 aiogram_log = logging.getLogger('aiogram')
 aiogram_log.setLevel(logging.WARNING)  # Только предупреждения
+
 
 def clean_html_tags(text: str) -> str:
     """Удаляет HTML-теги из текста, оставляя только содержимое"""
@@ -723,10 +731,15 @@ async def emergency_save():
                 }
             }, f, ensure_ascii=False, indent=2)
         
-        # 3. Пушим в GitHub
-        await git_commit_and_push()
+        print("✅ Данные сохранены локально")
         
-        print("✅ Данные сохранены перед выключением")
+        # 3. Пушим в GitHub
+        success = await git_commit_and_push()
+        if success:
+            print("✅ Экстренные данные отправлены в GitHub")
+        else:
+            print("❌ Ошибка при отправке экстренных данных в GitHub")
+        
     except Exception as e:
         print(f"❌ Ошибка при экстренном сохранении: {e}")
         
@@ -865,6 +878,13 @@ async def auto_save_state():
                 }, f, ensure_ascii=False, indent=2)
             
             print("✅ Состояние сохранено")
+            
+            # Пушим в GitHub
+            success = await git_commit_and_push()
+            if success:
+                print("✅ Изменения отправлены в GitHub")
+            else:
+                print("❌ Ошибка при отправке в GitHub")
             
         except Exception as e:
             print(f"❌ Ошибка в auto_save_state: {e}")
