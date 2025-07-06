@@ -41,14 +41,7 @@ from aiogram.types import (
 import subprocess
 import os
 import signal
-import threading
-import time
-import sys
 from datetime import datetime, UTC  # Добавьте UTC в импорты
-
-git_lock = threading.Lock()
-last_backup_time = 0
-BACKUP_INTERVAL = 6 * 60 * 60  # 6 часов в секундах
 
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
@@ -249,32 +242,49 @@ async def shutdown():
     print("All background tasks stopped")
 
         
-def auto_backup():
-    def backup_task():
-        global last_backup_time
-        while True:
-            now = time.time()
-            # Ждем, чтобы раз в 6 часов делать бэкап
-            if now - last_backup_time >= BACKUP_INTERVAL:
-                if git_lock.acquire(blocking=False):
-                    try:
-                        print("[auto_backup] Start backup")
-                        # Сохраняем state и reply_cache (НЕ МЕНЯТЬ)
-                        save_state()
-                        save_reply_cache()
-                        # Git commit & push (НЕ МЕНЯТЬ)
-                        git_commit_and_push()
-                        last_backup_time = time.time()
-                        print("[auto_backup] Backup completed")
-                    finally:
-                        git_lock.release()
-                else:
-                    print("[auto_backup] Git operation in progress, skip this cycle")
-            time.sleep(60)  # Проверяем раз в минуту
-
-    t = threading.Thread(target=backup_task, daemon=True)
-    t.start()
-
+async def auto_backup():
+    """Автоматическое сохранение каждые 6 часов"""
+    while True:
+        try:
+            await asyncio.sleep(21600)  # 6 часов
+            
+            if is_shutting_down:
+                break
+                
+            # Сохраняем reply_cache
+            save_reply_cache()
+            
+            # Сохраняем state.json
+            with open('state.json', 'w', encoding='utf-8') as f:
+                json.dump({
+                    'post_counter': state['post_counter'],
+                    'users_data': {
+                        'active': list(state['users_data']['active']),
+                        'banned': list(state['users_data']['banned']),
+                    },
+                    'message_counter': state['message_counter'],
+                    'settings': state['settings'],
+                    'recent_post_mappings': {
+                        str(k): v for k, v in list(post_to_messages.items())[-500:]
+                    }
+                }, f, ensure_ascii=False, indent=2)
+            
+            # Создаем новый бэкап
+            backup_name = f"backup_state_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+            shutil.copy2("state.json", backup_name)
+            
+            # Пуш в GitHub
+            print("💾 Обновление state.json и reply_cache.json, пушим в GitHub...")
+            success = await git_commit_and_push()
+            if success:
+                print(f"✅ Полный бэкап выполнен: {backup_name}")
+            else:
+                print("❌ Не удалось отправить данные в GitHub")
+            
+        except Exception as e:
+            print(f"❌ Ошибка в auto_backup: {e}")
+            # Ждем 1 час перед повторной попыткой
+            await asyncio.sleep(3600)
             
 # Настройка сборщика мусора
 gc.set_threshold(
@@ -732,26 +742,53 @@ def load_reply_cache():
     print(f"Reply-cache: постов {len(post_to_messages)}, "
           f"сообщений {len(message_to_post)}")
 
-def graceful_shutdown(signum=None, frame=None):
-    print("[graceful_shutdown] Called with signal", signum)
-    # Блокируем параллельные git-операции
-    with git_lock:
-        try:
-            print("[graceful_shutdown] Saving state and reply_cache")
-            # Сохраняем state и reply_cache (НЕ МЕНЯТЬ)
-            save_state()
-            save_reply_cache()
-            print("[graceful_shutdown] Pushing to git")
-            # Git commit & push (НЕ МЕНЯТЬ)
-            git_commit_and_push()
-        except Exception as e:
-            print("[graceful_shutdown] Exception during shutdown:", e)
-    print("[graceful_shutdown] Exiting...")
-    sys.exit(0)
-
-# Подключение graceful shutdown к сигналам (если ещё не подключено)
-signal.signal(signal.SIGTERM, graceful_shutdown)
-signal.signal(signal.SIGINT, graceful_shutdown)
+async def graceful_shutdown():
+    """Обработчик graceful shutdown"""
+    global is_shutting_down
+    if is_shutting_down:
+        return
+        
+    is_shutting_down = True
+    print("🛑 Получен сигнал shutdown, сохраняем данные...")
+    
+    try:
+        # Останавливаем healthcheck сервер
+        if 'healthcheck_site' in globals():
+            await healthcheck_site.stop()
+            print("🛑 Healthcheck server stopped")
+            
+        # Останавливаем executors корректно
+        git_executor.shutdown(wait=True, cancel_futures=True)
+        send_executor.shutdown(wait=True, cancel_futures=True)
+        
+        # Закрываем хранилище диспетчера
+        if hasattr(dp, 'storage') and dp.storage:
+            await dp.storage.close()
+    except Exception as e:
+        print(f"Error during shutdown: {e}")
+    
+    # 1. Экстренное сохранение данных
+    await emergency_save()
+    
+    # 2. Фиксируем изменения в GitHub
+    print("🚀 Отправка изменений в GitHub...")
+    success = await git_commit_and_push()
+    if success:
+        print("✅ Данные успешно отправлены в GitHub")
+    else:
+        print("❌ Не удалось отправить данные в GitHub")
+    
+    # Закрываем сессию бота
+    if 'bot' in globals() and bot.session:
+        await bot.session.close()
+    
+    # Отменяем все фоновые задачи
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    
+    await asyncio.gather(*tasks, return_exceptions=True)
+    print("✅ Все задачи остановлены, завершаем работу")
 
 async def emergency_save():
     """Срочное сохранение перед выключением"""
@@ -3294,12 +3331,11 @@ async def start_background_tasks():
     message_queue = asyncio.Queue(maxsize=5000)
 
     tasks = [
-        asyncio.create_task(auto_save_state()),
+        asyncio.create_task(auto_backup()),
         asyncio.create_task(message_broadcaster()),
-        asyncio.create_task(conan_roaster()), 
-        asyncio.create_task(motivation_broadcaster()), 
+        asyncio.create_task(conan_roaster()),
+        asyncio.create_task(motivation_broadcaster()),
         asyncio.create_task(auto_memory_cleaner()),
-        asyncio.create_task(auto_backup()), 
         asyncio.create_task(cleanup_old_messages()),
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
@@ -3323,15 +3359,7 @@ async def supervisor():
         message_queue = asyncio.Queue(maxsize=5000)
         
         # Запуск фоновых задач
-        tasks = [
-            asyncio.create_task(auto_backup()),
-            asyncio.create_task(auto_save_state()),
-            asyncio.create_task(message_broadcaster()),
-            asyncio.create_task(conan_roaster()),
-            asyncio.create_task(motivation_broadcaster()),
-            asyncio.create_task(auto_memory_cleaner()),
-            asyncio.create_task(cleanup_old_messages()),
-        ]
+        tasks = await start_background_tasks()  # Используем существующую функцию
         
         print("✅ Фоновые задачи запущены")
         await dp.start_polling(bot, skip_updates=True)
