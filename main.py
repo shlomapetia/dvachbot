@@ -356,7 +356,7 @@ spam_violations = defaultdict(int)  # user_id -> количество наруш
 # Конфиг
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMINS = {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
-SPAM_LIMIT = 13
+SPAM_LIMIT = 14
 SPAM_WINDOW = 15
 STATE_FILE = 'state.json'
 SAVE_INTERVAL = 21600  # секунд
