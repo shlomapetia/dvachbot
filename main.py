@@ -53,16 +53,17 @@ async def git_commit_and_push():
             print("❌ Нет GITHUB_TOKEN")
             return False
 
-        # Настройка Git
+        # Настройка Git - отключаем автообновление
         subprocess.run(["git", "config", "--global", "user.name", "Backup Bot"], check=True)
         subprocess.run(["git", "config", "--global", "user.email", "bot@example.com"], check=True)
+        subprocess.run(["git", "config", "--global", "pull.rebase", "false"], check=True)  # Добавлено
 
         # Рабочая директория
         work_dir = "/data"
         if not os.path.exists(work_dir):
             os.makedirs(work_dir, exist_ok=True)
         
-        # Клонируем или обновляем репозиторий
+        # Клонируем или обновляем репозиторий (только если нет .git)
         git_dir = os.path.join(work_dir, ".git")
         if not os.path.exists(git_dir):
             clone_cmd = ["git", "clone", f"https://{token}@github.com/shlomapetia/dvachbot.git", work_dir]
@@ -71,8 +72,8 @@ async def git_commit_and_push():
                 print("❌ Ошибка клонирования репозитория")
                 return False
         else:
-            subprocess.run(["git", "fetch", "origin"], cwd=work_dir, check=True)
-            subprocess.run(["git", "reset", "--hard", "origin/main"], cwd=work_dir, check=True)
+            # Отключаем автообновление при пуше
+            subprocess.run(["git", "config", "--global", "receive.denyCurrentBranch", "ignore"], check=True)
 
         # Копируем файлы для бэкапа
         files_to_backup = []
@@ -110,7 +111,7 @@ async def git_commit_and_push():
                     return True
                 else:
                     print(f"⚠️ Ошибка при push в GitHub (попытка {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(5)  # Теперь это внутри async функции
+                    await asyncio.sleep(5)
             
             print("❌ Не удалось выполнить push после нескольких попыток")
             return False
@@ -194,24 +195,29 @@ async def shutdown():
     await bot.session.close()
 
 async def auto_backup():
-    """Автоматическое сохранение состояния в GitHub каждые 2 часа"""
+    """Автоматическое сохранение бэкапов в GitHub каждые 2 часа"""
     while True:
         try:
-            await asyncio.sleep(7200)  # Точные 2 часа между бэкапами
+            await asyncio.sleep(7200)  # 2 часа
             
-            # 1. Сохраняем основные данные
-            success = await save_state()
-            if not success:
-                print("⚠️ Не удалось сохранить state.json")
-                continue
-                
-            # 2. Сохраняем кэш ответов
-            save_reply_cache()
+            # 1. Удаляем старые бэкапы (оставляем только 3 последних)
+            backup_files = sorted(glob.glob("backup_state_*.json"))
+            if len(backup_files) > 2:
+                for old_file in backup_files[:-2]:
+                    try:
+                        os.remove(old_file)
+                        print(f"🗑 Удален старый бэкап: {old_file}")
+                    except Exception as e:
+                        print(f"❌ Ошибка удаления {old_file}: {e}")
+
+            # 2. Создаем новый бэкап
+            backup_name = f"backup_state_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            shutil.copy2("state.json", backup_name)
             
-            # 3. Коммитим и пушим в GitHub
+            # 3. Пушим в GitHub
             await git_commit_and_push()
             
-            print("✅ Полный бэкап выполнен успешно")
+            print(f"✅ Полный бэкап выполнен: {backup_name}")
             
         except Exception as e:
             print(f"❌ Критическая ошибка в auto_backup: {e}")
@@ -782,10 +788,26 @@ async def aiogram_memory_cleaner():
             )
 
 async def auto_save_state():
-    """Автоматическое сохранение состояния"""
+    """Автоматическое сохранение состояния каждые 3 минуты"""
     while True:
-        await asyncio.sleep(SAVE_INTERVAL)
-        await save_state()
+        try:
+            await asyncio.sleep(180)  # 3 минуты
+            
+            # 1. Сохраняем основные данные
+            success = await save_state()
+            if not success:
+                print("⚠️ Не удалось сохранить state.json")
+                await asyncio.sleep(60)  # Ждем минуту при ошибке
+                continue
+                
+            # 2. Сохраняем кэш ответов
+            save_reply_cache()
+            
+            print("✅ Состояние сохранено")
+            
+        except Exception as e:
+            print(f"❌ Ошибка в auto_save_state: {e}")
+            await asyncio.sleep(60)  # Ждем минуту при ошибке
 
 SPAM_RULES = {
     'text': {
@@ -3201,8 +3223,8 @@ async def supervisor():
 
         # Основной цикл работы бота
         restart_count = 0
-        max_restarts = 10  # Максимальное количество перезапусков
-        restart_delay = 30  # Задержка между перезапусками в секундах
+        max_restarts = 10
+        restart_delay = 30
         
         while restart_count < max_restarts:
             try:
@@ -3211,7 +3233,8 @@ async def supervisor():
                     bot, 
                     allowed_updates=dp.resolve_used_update_types(), 
                     close_bot_session=False,
-                    handle_signals=False
+                    handle_signals=False,
+                    skip_updates=True  # Пропускаем обновления при перезапуске
                 )
             except TelegramNetworkError as e:
                 restart_count += 1
@@ -3225,11 +3248,6 @@ async def supervisor():
                 print("⏹️ Polling finished normally")
                 break
 
-            # Проверяем нужно ли перезапускать из-за изменений в main.py
-            if check_restart_needed():
-                print("🔄 Обнаружены изменения в main.py - требуется перезапуск")
-                break
-
     except asyncio.CancelledError:
         print("⚠️ Received cancellation signal")
     except Exception as e:
@@ -3238,8 +3256,6 @@ async def supervisor():
         # Корректное завершение
         print("🛑 Shutting down...")
         await shutdown()
-        if 'runner' in locals():
-            await runner.cleanup()
         if 'bot' in globals():
             await bot.session.close()
         if 'connector' in globals():
