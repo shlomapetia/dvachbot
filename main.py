@@ -41,7 +41,14 @@ from aiogram.types import (
 import subprocess
 import os
 import signal
+import threading
+import time
+import sys
 from datetime import datetime, UTC  # Добавьте UTC в импорты
+
+git_lock = threading.Lock()
+last_backup_time = 0
+BACKUP_INTERVAL = 6 * 60 * 60  # 6 часов в секундах
 
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
@@ -242,27 +249,31 @@ async def shutdown():
     print("All background tasks stopped")
 
         
-async def auto_backup():
-    """Автоматическое сохранение каждые 6 часов"""
-    while True:
-        try:
-            await asyncio.sleep(21600)  # 6 часов
-            
-            if is_shutting_down:
-                break
-                
-            # Создаем новый бэкап
-            backup_name = f"backup_state_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
-            shutil.copy2("state.json", backup_name)
-            
-            save_reply_cache()
-            await git_commit_and_push()
-            
-            print(f"✅ Полный бэкап выполнен: {backup_name}")
-            
-        except Exception as e:
-            print(f"❌ Ошибка в auto_backup: {e}")
-            await asyncio.sleep(600)
+def auto_backup():
+    def backup_task():
+        global last_backup_time
+        while True:
+            now = time.time()
+            # Ждем, чтобы раз в 6 часов делать бэкап
+            if now - last_backup_time >= BACKUP_INTERVAL:
+                if git_lock.acquire(blocking=False):
+                    try:
+                        print("[auto_backup] Start backup")
+                        # Сохраняем state и reply_cache (НЕ МЕНЯТЬ)
+                        save_state()
+                        save_reply_cache()
+                        # Git commit & push (НЕ МЕНЯТЬ)
+                        git_commit_and_push()
+                        last_backup_time = time.time()
+                        print("[auto_backup] Backup completed")
+                    finally:
+                        git_lock.release()
+                else:
+                    print("[auto_backup] Git operation in progress, skip this cycle")
+            time.sleep(60)  # Проверяем раз в минуту
+
+    t = threading.Thread(target=backup_task, daemon=True)
+    t.start()
 
             
 # Настройка сборщика мусора
@@ -721,40 +732,26 @@ def load_reply_cache():
     print(f"Reply-cache: постов {len(post_to_messages)}, "
           f"сообщений {len(message_to_post)}")
 
-async def graceful_shutdown():
-    """Обработчик graceful shutdown"""
-    global is_shutting_down
-    if is_shutting_down:
-        return
-        
-    is_shutting_down = True
-    print("🛑 Получен сигнал shutdown, сохраняем данные...")
-    
-    # 1. Экстренное сохранение данных
-    await emergency_save()
-    
-    # 2. Фиксируем изменения в GitHub
-    print("🚀 Отправка изменений в GitHub...")
-    success = await git_commit_and_push()
-    if success:
-        print("✅ Данные успешно отправлены в GitHub")
-    else:
-        print("❌ Не удалось отправить данные в GitHub")
-    
-    # 3. Останавливаем executors
-    git_executor.shutdown(wait=True)
-    send_executor.shutdown(wait=True)
-    
-    # 4. Закрываем сессии и отменяем задачи
-    if 'bot' in globals() and bot.session:
-        await bot.session.close()
-    
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    for task in tasks:
-        task.cancel()
-    
-    await asyncio.gather(*tasks, return_exceptions=True)
-    print("✅ Все задачи остановлены, завершаем работу")
+def graceful_shutdown(signum=None, frame=None):
+    print("[graceful_shutdown] Called with signal", signum)
+    # Блокируем параллельные git-операции
+    with git_lock:
+        try:
+            print("[graceful_shutdown] Saving state and reply_cache")
+            # Сохраняем state и reply_cache (НЕ МЕНЯТЬ)
+            save_state()
+            save_reply_cache()
+            print("[graceful_shutdown] Pushing to git")
+            # Git commit & push (НЕ МЕНЯТЬ)
+            git_commit_and_push()
+        except Exception as e:
+            print("[graceful_shutdown] Exception during shutdown:", e)
+    print("[graceful_shutdown] Exiting...")
+    sys.exit(0)
+
+# Подключение graceful shutdown к сигналам (если ещё не подключено)
+signal.signal(signal.SIGTERM, graceful_shutdown)
+signal.signal(signal.SIGINT, graceful_shutdown)
 
 async def emergency_save():
     """Срочное сохранение перед выключением"""
