@@ -113,7 +113,7 @@ async def git_commit_and_push():
             commands = [
                 ["git", "add", "."],
                 ["git", "commit", "-m", f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"],
-                ["git", "push", "-u", "origin", "master"]
+                ["git", "push", "-u", "origin", "main"]
             ]
             
             for cmd in commands:
