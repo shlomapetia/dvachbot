@@ -40,6 +40,7 @@ from aiogram.types import (
 )
 import subprocess
 import os
+import signal
 from datetime import datetime, UTC  # Добавьте UTC в импорты
 
 # Глобальный семафор для Git-операций
@@ -225,9 +226,9 @@ async def shutdown():
     print("Shutting down...")
     try:
         executor.shutdown(wait=False)  # Завершаем executor
-        await dp.storage.close()
-    except:
-        pass
+        await dp.storage.close()  # Только close, без wait_closed
+    except Exception as e:
+        print(f"Error during shutdown: {e}")
     
     if 'bot' in globals() and bot.session:
         await bot.session.close()
@@ -280,11 +281,10 @@ async def cleanup_old_messages():
     while True:
         await asyncio.sleep(3600)  # Каждые 1 час
         try:
-            current_time = datetime.now(MSK)  # Используем MSK timezone
+            current_time = datetime.now(UTC)  # Используем UTC вместо MSK
             old_posts = [
                 pnum for pnum, data in messages_storage.items()
-                if (current_time -
-                    data.get('timestamp', current_time)).days > 7
+                if (current_time - data.get('timestamp', current_time)).days > 7
             ]
             for pnum in old_posts:
                 messages_storage.pop(pnum, None)
@@ -292,6 +292,7 @@ async def cleanup_old_messages():
             print(f"Очищено {len(old_posts)} старых постов")
         except Exception as e:
             print(f"Ошибка очистки: {e}")
+            
 # для проверки одинаковых / коротких сообщений
 last_texts: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=5))
 
@@ -688,7 +689,6 @@ def load_reply_cache():
     if not os.path.exists(REPLY_FILE):
         return
 
-    # файл есть, но может быть пустой или битый
     try:
         if os.path.getsize(REPLY_FILE) == 0:
             return
@@ -697,7 +697,7 @@ def load_reply_cache():
     except (json.JSONDecodeError, OSError) as e:
         print(f"reply_cache.json повреждён ({e}), игнорирую")
         return
-    # ---------- восстановление словарей ----------
+
     message_to_post.clear()
     for key, post_num in data.get("message_to_post", {}).items():
         uid, mid = map(int, key.split("_"))
@@ -710,23 +710,26 @@ def load_reply_cache():
             for uid, mid in mapping.items()
         }
 
+    # Восстановление временных меток в UTC
     for p_str, meta in data.get("messages_storage_meta", {}).items():
         p = int(p_str)
-        messages_storage[p] = {
-            "author_id": meta["author_id"],
-            "timestamp": datetime.fromisoformat(meta["timestamp"]),
-            "author_message_id": meta.get("author_msg"),
-        }
+        # Преобразуем строку в datetime с указанием UTC
+        if 'timestamp' in meta:
+            dt = datetime.fromisoformat(meta['timestamp'])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)  # Добавляем UTC если нет зоны
+            messages_storage[p] = {
+                "author_id": meta["author_id"],
+                "timestamp": dt,
+                "author_message_id": meta.get("author_msg"),
+            }
 
     print(f"reply-cache загружен: {len(post_to_messages)} постов")
-    # ─── итоговая статистика ─────────────────────────
     print(f"State: пост-счётчик = {state['post_counter']}, "
           f"активных = {len(state['users_data']['active'])}, "
           f"забаненных = {len(state['users_data']['banned'])}")
     print(f"Reply-cache: постов {len(post_to_messages)}, "
           f"сообщений {len(message_to_post)}")
-
-import signal
 
 async def emergency_save():
     """Срочное сохранение перед выключением"""
@@ -807,11 +810,11 @@ async def auto_memory_cleaner():
             state['message_counter'] = dict(top_users)
 
         # Чистим spam_tracker от старых записей
-        now = datetime.now()
+        now = datetime.now(UTC)  # Используем UTC вместо наивного времени
         for user_id in list(spam_tracker.keys()):
             spam_tracker[user_id] = [
                 t for t in spam_tracker[user_id]
-                if (now - t).seconds < SPAM_WINDOW
+                if (now - t).total_seconds() < SPAM_WINDOW  # Используем total_seconds
             ]
             if not spam_tracker[user_id]:
                 del spam_tracker[user_id]
@@ -3174,7 +3177,7 @@ async def handle_message(message: Message):
         # Инициализируем запись в хранилище перед отправкой
         messages_storage[current_post_num] = {
             'author_id': user_id,
-            'timestamp': datetime.now(MSK),
+            'timestamp': datetime.now(UTC),
             'content': content,
             'reply_to': reply_to_post,
             'author_message_id': None  # Будет установлено после отправки
@@ -3362,16 +3365,6 @@ async def supervisor():
         await shutdown()
         print("✅ Clean shutdown completed")
         
-async def shutdown():
-    """Cleanup tasks before shutdown"""
-    print("Shutting down services...")
-    try:
-        await dp.storage.close()
-        await dp.storage.wait_closed()
-    except Exception as e:
-        print(f"Error during storage shutdown: {e}")
-
-
 # В конце файла, перед запуском бота:
 if __name__ == "__main__":
     logging.basicConfig(
