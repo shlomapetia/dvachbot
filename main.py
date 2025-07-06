@@ -3343,7 +3343,7 @@ async def start_background_tasks():
 
 async def supervisor():
     global is_shutting_down, bot
-    
+    loop = asyncio.get_running_loop()  # ДОБАВЬ ЭТУ СТРОЧКУ
     # Обработка сигналов для Linux/Mac
     if hasattr(signal, 'SIGTERM'):
         loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
