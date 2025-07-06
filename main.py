@@ -218,9 +218,6 @@ async def shutdown():
     """Cleanup tasks before shutdown"""
     print("Shutting down...")
     try:
-        # Вызываем экстренное сохранение ПЕРЕД остановкой executors
-        await emergency_save()
-        
         # Останавливаем healthcheck сервер
         if 'healthcheck_site' in globals():
             await healthcheck_site.stop()
@@ -251,6 +248,7 @@ async def shutdown():
         timeout=5.0
     )
     print("All background tasks stopped")
+
         
 async def auto_backup():
     """Автоматическое сохранение бэкапов в GitHub каждые 6 часов"""
@@ -741,9 +739,30 @@ def load_reply_cache():
     print(f"Reply-cache: постов {len(post_to_messages)}, "
           f"сообщений {len(message_to_post)}")
 
+async def graceful_shutdown():
+    """Обработчик graceful shutdown для Railway"""
+    global is_shutting_down
+    if is_shutting_down:
+        return
+        
+    is_shutting_down = True
+    print("🛑 Получен сигнал shutdown, сохраняем данные...")
+    
+    # 1. Экстренное сохранение данных
+    await emergency_save()
+    
+    # 2. Остановка бота и очистка ресурсов
+    await shutdown()
+    
+    print("✅ Данные сохранены, завершаем работу")
+    exit(0)
+
+
 async def emergency_save():
-    """Срочное сохранение перед выключением"""
-    print("⚡ Экстренное сохранение state.json и reply_cache.json...")
+    """Срочное сохранение перед выключением (улучшенная версия)"""
+    print("⚡ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Запуск...")
+    start_time = time.time()
+    
     try:
         # 1. Сохраняем кэш ответов
         save_reply_cache()
@@ -763,38 +782,24 @@ async def emergency_save():
                 }
             }, f, ensure_ascii=False, indent=2)
         
-        print("✅ Данные сохранены локально")
+        print("✅ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Данные сохранены локально")
         
         # 3. Пытаемся запушить в GitHub независимо от состояния
         try:
             success = await git_commit_and_push()
             if success:
-                print("✅ Экстренные данные отправлены в GitHub")
+                print("✅ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Данные отправлены в GitHub")
             else:
-                print("❌ Ошибка при отправке экстренных данных в GitHub")
+                print("❌ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Ошибка при отправке в GitHub")
         except Exception as e:
-            print(f"❌ Ошибка git push при экстренном сохранении: {e}")
+            print(f"❌ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Ошибка git push: {e}")
         
     except Exception as e:
-        print(f"❌ Ошибка при экстренном сохранении: {e}")
-        
-# Заменяем handle_shutdown
-def handle_shutdown(signum, frame):
-    global is_shutting_down
-    if is_shutting_down:
-        return
-        
-    is_shutting_down = True
-    print(f"🛑 Получен сигнал {signum}, сохраняем данные...")
-    
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(emergency_save())
-    print("✅ Данные сохранены, завершаем работу")
-    exit(0)
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА ПРИ СОХРАНЕНИИ: {e}")
+    finally:
+        elapsed = time.time() - start_time
+        print(f"⚡ ЭКСТРЕННОЕ СОХРАНЕНИЕ: Завершено за {elapsed:.2f} сек")
 
-# Включить перехват сигналов (для Railway)
-signal.signal(signal.SIGTERM, handle_shutdown)  # Сигнал остановки контейнера
-signal.signal(signal.SIGINT, handle_shutdown)   # Ctrl+C
 
 async def auto_memory_cleaner():
     """Единственная функция очистки памяти - каждые 5 минут"""
@@ -3353,5 +3358,21 @@ async def supervisor():
             await shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(supervisor())
+    # Устанавливаем асинхронные обработчики сигналов
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
+    # Для Linux/Mac
+    if hasattr(signal, 'SIGTERM'):
+        loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
+    if hasattr(signal, 'SIGINT'):
+        loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown()))
+
+    try:
+        loop.run_until_complete(supervisor())
+    except KeyboardInterrupt:
+        loop.run_until_complete(graceful_shutdown())
+    finally:
+        if not is_shutting_down:
+            loop.run_until_complete(graceful_shutdown())
+        loop.close()
