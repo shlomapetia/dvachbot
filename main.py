@@ -39,6 +39,7 @@ from aiogram.types import (
 import subprocess
 import signal
 from datetime import datetime, timedelta, timezone, UTC
+from japanese_translator import anime_transform
 
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
@@ -46,6 +47,7 @@ git_executor = ThreadPoolExecutor(max_workers=1)
 send_executor = ThreadPoolExecutor(max_workers=100)
 git_semaphore = asyncio.Semaphore(1)
 message_queue = None
+anime_mode = False
 zaputin_mode = False
 slavaukraine_mode = False
 suka_blyat_mode = False
@@ -731,10 +733,10 @@ TEMPLATES = [
 ]
 
 # Для /deanon
-DEANON_NAMES = ["Валера", "Геннадий", "Дмитрий", "Аркадий", "Николай", "Женя", 
-                "Сергей", "Александр", "Владимир", "Борис", "Евгений", "Михаил",
-                "Олег", "Павел", "Константин", "Виктор", "Юрий", "Тимофей", "Глеб", "Роман"
-                "Эдик", "Гена", "Андрей", "Иван", "Данил", "Саня", "Лёша", "Коля", "Ваня", "Петя", "Саша", "Миша"
+DEANON_NAMES = ["Валера", "Геннадий", "Дмитрий", "Аркадий", "Николай", "Женя", "Чмоня", "Арестарх", 
+                "Сергей", "Александр", "Владимир", "Борис", "Евгений", "Михаил", "Хуйло", "Вазген", "Нариман", "Абу", 
+                "Олег", "Павел", "Константин", "Виктор", "Юрий", "Тимофей", "Глеб", "Роман", "Эдик", "Гена", 
+                "Андрей", "Иван", "Данил", "Саня", "Лёша", "Коля", "Ваня", "Петя", "Саша", "Миша"
                 "Матвей", "Руслан", "Артем", "Илья", "Денис", "Егор", "Максим", "Кирилл", "Тимур", "Артём", "Даниил"]
 _SURNAMES = ["Андреев", "Борисов", "Васильев", "Григорьев", "Дмитриев", "Егоров",
                    "Захаров", "Иванов", "Константинов", "Леонидов", "Михайлов", "Николаев"
@@ -784,7 +786,37 @@ _DETAILS = [
     "сидит на бутылке", "сын шлюхи",
     "инвалид по дурке", "член 10 см", 
     "мечтает изнасиловать школьницу", 
-    "латентный пидор"
+    "латентный пидор",
+    "кормит кота виагрой",
+    "продал почку за коллекцию фигурок аниме",
+    "спит в гробу бабушки",
+    "подрабатывает в цирке уродов",
+    "заперт в подвале мамой-алкашкой",
+    "собрал 500 гигабайт фурри-порно",
+    "считает что земля плоская",
+    "тратит зарплату на проституток",
+    "попал в Книгу рекордов Гиннесса по количеству съеденного говна",
+    "женился на подушке с принтом Ту Хао",
+    "снимается в порно под ником 'Мокрый хлебушек'",
+    "выращивает грибы",
+    "сжег свою мать в 15 лет ради лулзов",
+    "подрабатывает в Макдональдсе",
+    "пробовал собственную сперму",
+    "какой-то период своей жизни был бомжом",
+    "купил собачий фаллоимитатор",
+    "работает в Лахта-Центре",
+    "съел свою плаценту при рождении",
+    "облысевшее уёбище",
+    "попал в психушку после видения",
+    "считает себя реинкарнацией Сталина",
+    "пробовал секс с пылесосом",
+    "трахает арбузы с дыркой",
+    "выиграл конкурс по поеданию стекла",
+    "плавает в бассейне с собственной спермой",
+    "бреет анус и яйца",
+    "собирает пердеж в баночки",
+    "курит сушеные грибы",
+    "живет в палатке на балконе"
 ]
 
 # Для /zaputin
@@ -1370,6 +1402,10 @@ def format_header() -> Tuple[str, int]:
     if zaputin_mode:
         return f"🇷🇺 Пост №{post_num}", post_num
         
+    # Режим /anime
+    if anime_mode:
+        return f"🌸 投稿 {post_num} 番", post_num
+        
     # Режим /suka_blyat
     if suka_blyat_mode:
         return f"💢 Пост №{post_num}", post_num
@@ -1721,6 +1757,16 @@ async def send_message_to_users(
 
     # Создаем копию контента для модификаций
     modified_content = content.copy()
+    
+    # Применяем модификации режимов
+    if anime_mode:
+        # Преобразуем весь текст
+        if modified_content.get('text'):
+            modified_content['text'] = anime_transform(modified_content['text'])
+        if modified_content.get('caption'):
+            modified_content['caption'] = anime_transform(modified_content['caption'])
+        if modified_content.get('header'):
+            modified_content['header'] = anime_transform(modified_content['header'])
     
     # Применяем модификации режимов
     if slavaukraine_mode:
@@ -2558,6 +2604,7 @@ async def cmd_help(message: types.Message):
                          "/zaputin - активировать режим zaputin\n"
                          "/slavaukraine - активировать режим slavaukraine\n"
                          "/suka_blyat - активировать режим suka_blyat\n"
+                         "/anime - активировать аниме-режим\n"
                          "Все сообщения анонимны!")
     await message.delete()
 
@@ -2700,6 +2747,72 @@ async def cmd_stats(message: types.Message):
     })
 
     await message.delete()
+
+@dp.message(Command("anime"))
+async def cmd_anime(message: types.Message):
+    global anime_mode, last_mode_activation, zaputin_mode, slavaukraine_mode, suka_blyat_mode
+    
+    # Проверка кулдауна
+    if not await check_cooldown(message):
+        return
+        
+    # Активируем режим и выключаем другие
+    anime_mode = True
+    zaputin_mode = False
+    slavaukraine_mode = False
+    suka_blyat_mode = False
+    last_mode_activation = datetime.now(UTC)
+
+    # Отправляем сообщение активации
+    header = "### 管理者 ###"
+    state['post_counter'] += 1
+    pnum = state['post_counter']
+
+    activation_text = (
+        "にゃあ～！アニメモードがアクティベートされました！\n\n"
+        "すべてのテキストが日本語のカタカナ/ひらがなに変換されます！"
+    )
+
+    await message_queue.put({
+        "recipients": state['users_data']['active'],
+        "content": {
+            "type": "text",
+            "header": header,
+            "text": activation_text
+        },
+        "post_num": pnum,
+    })
+
+    # Таймер отключения
+    asyncio.create_task(disable_anime_mode(300))  # 5 минут
+
+    await message.delete()
+
+async def disable_anime_mode(delay: int):
+    """Отключает режим anime через указанное время"""
+    await asyncio.sleep(delay)
+    global anime_mode
+    anime_mode = False
+    
+    # Отправляем сообщение об окончании
+    header = "### Админ ###"
+    state['post_counter'] += 1
+    pnum = state['post_counter']
+    
+    end_text = (
+        "アニメモードが終了しました！\n\n"
+        "通常のチャットに戻ります！"
+    )
+    
+    await message_queue.put({
+        "recipients": state['users_data']['active'],
+        "content": {
+            "type": "text",
+            "header": header,
+            "text": end_text
+        },
+        "post_num": pnum,
+    })
 
 # ====== ДОБАВЛЯЕМ КОМАНДЫ ======
 @dp.message(Command("deanon"))
@@ -3803,47 +3916,91 @@ async def handle_message(message: Message):
                 text_content = message.html_text
             else:
                 text_content = escape_html(message.text)
-            # ---- Добавь сюда ----
+            
+            # Применяем преобразования (сохраняя все существующие режимы)
             if suka_blyat_mode:
                 text_content = suka_blyatify_text(text_content)
-            content['text'] = text_content
-                        # Добавляем украинизацию если режим активен
             if slavaukraine_mode:
                 text_content = ukrainian_transform(text_content)
+            if anime_mode:
+                text_content = anime_transform(text_content)
+                
             content['text'] = text_content
+            
         elif content_type == 'photo':
             content['file_id'] = message.photo[-1].file_id
             caption = message.caption
-            # ---- Добавь сюда ----
-            if suka_blyat_mode and caption:
-                caption = suka_blyatify_text(caption)
+            
+            # Применяем преобразования к подписи
+            if caption:
+                if suka_blyat_mode:
+                    caption = suka_blyatify_text(caption)
+                if slavaukraine_mode:
+                    caption = ukrainian_transform(caption)
+                if anime_mode:
+                    caption = anime_transform(caption)
+                    
             content['caption'] = caption
+            
         elif content_type == 'video':
             content['file_id'] = message.video.file_id
             caption = message.caption
-            if suka_blyat_mode and caption:
-                caption = suka_blyatify_text(caption)
+            
+            if caption:
+                if suka_blyat_mode:
+                    caption = suka_blyatify_text(caption)
+                if slavaukraine_mode:
+                    caption = ukrainian_transform(caption)
+                if anime_mode:
+                    caption = anime_transform(caption)
+                    
             content['caption'] = caption
+            
         elif content_type == 'animation':
             content['file_id'] = message.animation.file_id
             caption = message.caption
-            if suka_blyat_mode and caption:
-                caption = suka_blyatify_text(caption)
+            
+            if caption:
+                if suka_blyat_mode:
+                    caption = suka_blyatify_text(caption)
+                if slavaukraine_mode:
+                    caption = ukrainian_transform(caption)
+                if anime_mode:
+                    caption = anime_transform(caption)
+                    
             content['caption'] = caption
+            
         elif content_type == 'document':
             content['file_id'] = message.document.file_id
             caption = message.caption
-            if suka_blyat_mode and caption:
-                caption = suka_blyatify_text(caption)
+            
+            if caption:
+                if suka_blyat_mode:
+                    caption = suka_blyatify_text(caption)
+                if slavaukraine_mode:
+                    caption = ukrainian_transform(caption)
+                if anime_mode:
+                    caption = anime_transform(caption)
+                    
             content['caption'] = caption
+            
         elif content_type == 'sticker':
             content['file_id'] = message.sticker.file_id 
+            
         elif content_type == 'audio':
             content['file_id'] = message.audio.file_id
             caption = message.caption
-            if suka_blyat_mode and caption:
-                caption = suka_blyatify_text(caption)
+            
+            if caption:
+                if suka_blyat_mode:
+                    caption = suka_blyatify_text(caption)
+                if slavaukraine_mode:
+                    caption = ukrainian_transform(caption)
+                if anime_mode:
+                    caption = anime_transform(caption)
+                    
             content['caption'] = caption
+            
         elif content_type == 'video_note':
             content['file_id'] = message.video_note.file_id
 
@@ -3960,7 +4117,7 @@ async def handle_message(message: Message):
 
     except Exception as e:
         print(f"Критическая ошибка в handle_message: {e}")
-
+        
 # ============ СТАРТ БОТА (один loop, автоперезапуск polling) ============
 async def start_background_tasks():
     """Поднимаем все фоновые корутины ОДИН раз за весь runtime"""
