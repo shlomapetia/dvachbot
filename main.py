@@ -1758,15 +1758,13 @@ async def send_message_to_users(
     # Создаем копию контента для модификаций
     modified_content = content.copy()
     
-    # Применяем модификации режимов
+    # В функции send_message_to_users
     if anime_mode:
-        # Преобразуем весь текст
+        # Преобразуем только основной текст и подписи
         if modified_content.get('text'):
             modified_content['text'] = anime_transform(modified_content['text'])
         if modified_content.get('caption'):
             modified_content['caption'] = anime_transform(modified_content['caption'])
-        if modified_content.get('header'):
-            modified_content['header'] = anime_transform(modified_content['header'])
     
     # Применяем модификации режимов
     if slavaukraine_mode:
@@ -2561,7 +2559,7 @@ async def cmd_start(message: types.Message):
         "- Без CP\n"
         "- Не спамить\n\n"
         "Просто пиши сообщения, они будут отправлены всем анонимно. Всем от всех."
-        "Команды: \n /roll \n /stats \n /face \n / \n /help \n /invite \n /zaputin \n /slavaukraine \n /suka_blyat \n /")
+        "Команды: \n /roll ролл \n /stats стата \n /face лицо \n / \n /help помощь \n /invite пригласить \n /zaputin кремлебот режим \n /slavaukraine хохол режим \n /suka_blyat злой режим \n /anime аниме режим")
     await message.delete()
 
 
@@ -2600,7 +2598,7 @@ async def cmd_help(message: types.Message):
                          "/face \n"
                          "/roll – ролл 0-100 или /roll N\n"
                          "/invite - получить текст для приглашения анонов\n"
-                         "/ - случайный деанон\n"
+                         "/deanon - деанон постера\n"
                          "/zaputin - активировать режим zaputin\n"
                          "/slavaukraine - активировать режим slavaukraine\n"
                          "/suka_blyat - активировать режим suka_blyat\n"
