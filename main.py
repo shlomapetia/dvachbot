@@ -124,7 +124,7 @@ def ukrainian_transform(text: str) -> str:
     """Преобразует русский текст в украинский вариант"""
     if not text:
         return text
-    
+
     # Расширенный словарь замен с военным и политическим сленгом
     UKRAINIAN_WORD_REPLACEMENTS = {
         # Основные слова
@@ -138,7 +138,7 @@ def ukrainian_transform(text: str) -> str:
         "вечер": "вечiр", "неделя": "тиждень", "месяц": "мiсяць", "год": "рiк",
         "сегодня": "сьогоднi", "завтра": "завтра", "вчера": "вчора", "здесь": "тут",
         "там": "там", "холодно": "холодно", "тепло": "тепло", "хлеб": "хлiб",
-        
+
         # Глаголы
         "хотеть": "хотiти", "мочь": "могти", "говорить": "говорити", "видеть": "бачити",
         "слышать": "чути", "знать": "знати", "думать": "думати", "жить": "жити",
@@ -155,8 +155,8 @@ def ukrainian_transform(text: str) -> str:
         "сплю": "сплю", "спал": "спав", "иду": "йду", "шел": "йшов", "бегу": "бiжу",
         "бежал": "бiг", "сижу": "сиджу", "сидел": "сидiв", "стою": "стою", "стоял": "стояв",
         "дай": "дай", "дал": "дав", "беру": "беру", "взял": "взяв",
-        
-        
+
+
         # Военный сленг и политика
         "русский": "русня", "россия": "ерэфия", "рашка": "хуйлостан", 
         "взрыв": "вибух", "победа": "перемога", "солдат": "оккупант", 
@@ -168,7 +168,7 @@ def ukrainian_transform(text: str) -> str:
         "сша": "сша", "европа": "європа", "санкции": "санкцiї", "арест": "арешт",
         "площадь": "майдан", "президент": "пiдар", "правительство": "уряд",
         "минобороны": "мiноборони", "кремль": "кацапi", "рф": "ерэфия",
-        
+
         # Матерные слова
         "хуй": "хуй", "пизда": "пiзда", "пиздец": "пiздєц", "ебан": "єбан",
         "ебать": "їбать", "нахуй": "нахуi", "отъебись": "вiдiбiйся", "путин": "хуiло",
@@ -177,31 +177,31 @@ def ukrainian_transform(text: str) -> str:
         "пидор": "пiдор", "гандон": "пуйло", "чмо": "чмо", "даун": "даун",
         "дебил": "дебiл", "идиот": "iдiот",
     }
-    
+
     # Разделяем текст на строки
     lines = text.split('\n')
     transformed_lines = []
-    
+
     for line in lines:
         # Пропускаем строки с UKRAINIAN_PHRASES
         if any(phrase in line for phrase in UKRAINIAN_PHRASES):
             transformed_lines.append(line)
             continue
-            
+
         words = line.split()
         transformed_words = []
-        
+
         for word in words:
             # Сохраняем пунктуацию в конце слова
             punctuation = ""
             if word and word[-1] in ',.!?;:':
                 punctuation = word[-1]
                 word = word[:-1]
-            
+
             # Проверяем регистр
             is_upper = word.isupper()
             is_title = word.istitle()
-            
+
             # Ищем замену в словаре (в нижнем регистре)
             base_word = word.lower()
             if base_word in UKRAINIAN_WORD_REPLACEMENTS:
@@ -223,11 +223,11 @@ def ukrainian_transform(text: str) -> str:
                 new_word = new_word.replace('ы', 'i').replace('Ы', 'I')
                 new_word = new_word.replace('е', 'є').replace('Е', 'Є')
                 new_word = new_word.replace('э', 'є').replace('Э', 'Є')
-            
+
             transformed_words.append(new_word + punctuation)
-        
+
         transformed_lines.append(' '.join(transformed_words))
-    
+
     return '\n'.join(transformed_lines)
 
 def suka_blyatify_text(text: str) -> str:
@@ -942,7 +942,7 @@ async def global_error_handler(event: types.ErrorEvent) -> bool:
             print(f"Update: {update.model_dump_json(exclude_none=True)}")
         await asyncio.sleep(10)  # Задержка перед повторной попыткой
         return False
-        
+
 def escape_html(text: str) -> str:
     """Экранирует HTML символы"""
     if not text:
@@ -1397,19 +1397,19 @@ def format_header() -> Tuple[str, int]:
     # Режим /slavaukraine
     if slavaukraine_mode:
         return f"💙💛 Пост №{post_num}", post_num
-        
+
     # Режим /zaputin
     if zaputin_mode:
         return f"🇷🇺 Пост №{post_num}", post_num
-        
+
     # Режим /anime
     if anime_mode:
         return f"🌸 投稿 {post_num} 番", post_num
-        
+
     # Режим /suka_blyat
     if suka_blyat_mode:
         return f"💢 Пост №{post_num}", post_num
-        
+
     # Обычный режим
     rand = random.random()
     if rand < 0.003:
@@ -1553,8 +1553,12 @@ async def handle_audio_message(message: Message):
     reply_info = {}
 
     if message.reply_to_message:
-        reply_key = (user_id, message.reply_to_message.message_id)
-        reply_to_post = message_to_post.get(reply_key)
+        reply_mid = message.reply_to_message.message_id
+        reply_to_post = None
+        for (uid, mid), pnum in message_to_post.items():
+            if mid == reply_mid:
+                reply_to_post = pnum
+                break
         if reply_to_post and reply_to_post in post_to_messages:
             reply_info = post_to_messages[reply_to_post]
         else:
@@ -1757,7 +1761,7 @@ async def send_message_to_users(
 
     # Создаем копию контента для модификаций
     modified_content = content.copy()
-    
+
     # В функции send_message_to_users
     if anime_mode:
         # Преобразуем только основной текст и подписи
@@ -1765,7 +1769,7 @@ async def send_message_to_users(
             modified_content['text'] = anime_transform(modified_content['text'])
         if modified_content.get('caption'):
             modified_content['caption'] = anime_transform(modified_content['caption'])
-    
+
     # Применяем модификации режимов
     if slavaukraine_mode:
         # Добавляем украинские фразы к 30% сообщений
@@ -1774,13 +1778,13 @@ async def send_message_to_users(
                 modified_content['text'] += "\n\n" + random.choice(UKRAINIAN_PHRASES)
             elif modified_content.get('caption'):
                 modified_content['caption'] += "\n\n" + random.choice(UKRAINIAN_PHRASES)
-        
+
         # Преобразуем основной текст
         if modified_content.get('text'):
             modified_content['text'] = ukrainian_transform(modified_content['text'])
         elif modified_content.get('caption'):
             modified_content['caption'] = ukrainian_transform(modified_content['caption'])
-            
+
     elif zaputin_mode:
         # Добавляем патриотические фразы к 30% сообщений
         if random.random() < 0.3:
@@ -1788,7 +1792,7 @@ async def send_message_to_users(
                 modified_content['text'] += "\n\n" + random.choice(PATRIOTIC_PHRASES)
             elif modified_content.get('caption'):
                 modified_content['caption'] += "\n\n" + random.choice(PATRIOTIC_PHRASES)
-                
+
     elif suka_blyat_mode:
         # Матерные замены для текста
         if modified_content.get('text'):
@@ -1797,13 +1801,13 @@ async def send_message_to_users(
                 if random.random() < 0.3:
                     words[i] = random.choice(MAT_WORDS)
             modified_content['text'] = ' '.join(words)
-            
+
             # Добавляем "... СУКА БЛЯТЬ!" к каждому 3-му сообщению
             global suka_blyat_counter
             suka_blyat_counter += 1
             if suka_blyat_counter % 3 == 0:
                 modified_content['text'] += " ... СУКА БЛЯТЬ!"
-                
+
         # Матерные замены для подписей
         elif modified_content.get('caption'):
             words = modified_content['caption'].split()
@@ -1811,7 +1815,7 @@ async def send_message_to_users(
                 if random.random() < 0.3:
                     words[i] = random.choice(MAT_WORDS)
             modified_content['caption'] = ' '.join(words)
-            
+
             suka_blyat_counter += 1
             if suka_blyat_counter % 3 == 0:
                 modified_content['caption'] += " ... СУКА БЛЯТЬ!"
@@ -2494,7 +2498,7 @@ async def motivation_broadcaster():
 
             # ИСПРАВЛЕНИЕ: Правильный расчет получателей
             recipients = state['users_data']['active'] - state['users_data']['banned']
-            
+
             if not recipients:
                 print("ℹ️ Нет получателей для мотивационного сообщения")
                 continue
@@ -2516,16 +2520,16 @@ async def motivation_broadcaster():
 async def check_cooldown(message: Message) -> bool:
     """Проверяет кулдаун на активацию режимов для всех пользователей"""
     global last_mode_activation
-    
+
     if last_mode_activation is None:
         return True
-        
+
     elapsed = (datetime.now(UTC) - last_mode_activation).total_seconds()
     if elapsed < MODE_COOLDOWN:
         time_left = MODE_COOLDOWN - elapsed
         minutes = int(time_left // 60)
         seconds = int(time_left % 60)
-        
+
         try:
             await message.answer(
                 f"⏳ Эй пидор, не спеши! Режимы можно включать раз в час.\n"
@@ -2535,10 +2539,10 @@ async def check_cooldown(message: Message) -> bool:
             )
         except Exception as e:
             print(f"Ошибка отправки кулдауна: {e}")
-            
+
         await message.delete()
         return False
-        
+
     return True
 
 # ========== КОМАНДЫ ==========
@@ -2627,11 +2631,11 @@ async def cmd_roll(message: types.Message):
 @dp.message(Command("slavaukraine"))
 async def cmd_slavaukraine(message: types.Message):
     global slavaukraine_mode, last_mode_activation, zaputin_mode, suka_blyat_mode
-    
+
     # Проверка кулдауна
     if not await check_cooldown(message):
         return
-        
+
     # Активация режима и деактивация других
     slavaukraine_mode = True
     last_mode_activation = datetime.now(UTC)
@@ -2669,15 +2673,15 @@ async def disable_slavaukraine_mode(delay: int):
     await asyncio.sleep(delay)
     global slavaukraine_mode
     slavaukraine_mode = False
-    
+
     header, pnum = format_header()
     header = "### Админ ###"
-    
+
     end_text = (
         "💀 Визг хохлов закончен!\n\n"
         "Украинский режим отключен. Возвращаемся к обычному трёпу."
     )
-    
+
     await message_queue.put({
         "recipients": state['users_data']['active'],
         "content": {
@@ -2749,11 +2753,11 @@ async def cmd_stats(message: types.Message):
 @dp.message(Command("anime"))
 async def cmd_anime(message: types.Message):
     global anime_mode, last_mode_activation, zaputin_mode, slavaukraine_mode, suka_blyat_mode
-    
+
     # Проверка кулдауна
     if not await check_cooldown(message):
         return
-        
+
     # Активируем режим и выключаем другие
     anime_mode = True
     zaputin_mode = False
@@ -2791,17 +2795,17 @@ async def disable_anime_mode(delay: int):
     await asyncio.sleep(delay)
     global anime_mode
     anime_mode = False
-    
+
     # Отправляем сообщение об окончании
     header = "### Админ ###"
     state['post_counter'] += 1
     pnum = state['post_counter']
-    
+
     end_text = (
         "アニメモードが終了しました！\n\n"
         "通常のチャットに戻ります！"
     )
-    
+
     await message_queue.put({
         "recipients": state['users_data']['active'],
         "content": {
@@ -2821,18 +2825,18 @@ async def cmd_deanon(message: Message):
         await message.answer("⚠️ Ответь на сообщение для деанона!")
         await message.delete()
         return
-        
+
     # Определяем цель деанона
     reply_key = (message.from_user.id, message.reply_to_message.message_id)
     target_post = message_to_post.get(reply_key)
-    
+
     if not target_post or target_post not in messages_storage:
         await message.answer("🚫 Не удалось найти пост для деанона!")
         await message.delete()
         return
-        
+
     target_id = messages_storage[target_post].get("author_id")
-    
+
     # Генерируем фейковые данные
     name = random.choice(DEANON_NAMES)
     surname = random.choice(DEANON_SURNAMES)
@@ -2856,7 +2860,7 @@ async def cmd_deanon(message: Message):
 
     # Получаем информацию о сообщении для ответа
     reply_info = post_to_messages.get(target_post, {})
-    
+
     # Отправляем как ответ на сообщение
     header = "### ДЕАНОН ###"
     state['post_counter'] += 1
@@ -2880,11 +2884,11 @@ async def cmd_deanon(message: Message):
 @dp.message(Command("zaputin"))
 async def cmd_zaputin(message: types.Message):
     global zaputin_mode, last_mode_activation, suka_blyat_mode, slavaukraine_mode
-    
+
     # Проверка кулдауна
     if not await check_cooldown(message):
         return
-        
+
     # Активируем режим и выключаем другие
     zaputin_mode = True
     suka_blyat_mode = False
@@ -2921,14 +2925,14 @@ async def disable_zaputin_mode(delay: int):
     await asyncio.sleep(delay)
     global zaputin_mode
     zaputin_mode = False
-    
+
     # Отправляем сообщение об окончании
     header = "### Админ ###"
     state['post_counter'] += 1
     pnum = state['post_counter']
-    
+
     end_text = "💀 Бунт кремлеботов окончился. Всем спасибо, все свободны."
-    
+
     await message_queue.put({
         "recipients": state['users_data']['active'],
         "content": {
@@ -2943,11 +2947,11 @@ async def disable_zaputin_mode(delay: int):
 @dp.message(Command("suka_blyat"))
 async def cmd_suka_blyat(message: types.Message):
     global suka_blyat_mode, last_mode_activation, zaputin_mode, slavaukraine_mode
- 
+
     # Проверка кулдауна
     if not await check_cooldown(message):
         return
-        
+
     # Активируем режим и выключаем другие
     suka_blyat_mode = True
     zaputin_mode = False
@@ -2984,14 +2988,14 @@ async def disable_suka_blyat_mode(delay: int):
     await asyncio.sleep(delay)
     global suka_blyat_mode
     suka_blyat_mode = False
-    
+
     # Отправляем сообщение об окончании
     header = "### Админ ###"
     state['post_counter'] += 1
     pnum = state['post_counter']
-    
+
     end_text = "💀 СУКА БЛЯТЬ КОНЧИЛОСЬ. Теперь можно и помолчать."
-    
+
     await message_queue.put({
         "recipients": state['users_data']['active'],
         "content": {
@@ -3001,7 +3005,7 @@ async def disable_suka_blyat_mode(delay: int):
         },
         "post_num": pnum,
     })
-    
+
 # ========== АДМИН КОМАНДЫ ==========
 
 
@@ -3388,7 +3392,7 @@ async def cmd_unmute(message: types.Message):
             target_id, "Эй хуйло ебаное, тебя размутили, можешь писать.")
     except:
         pass
-        
+
 
 
 @dp.message(Command("unban"))
@@ -3688,8 +3692,12 @@ async def handle_voice(message: Message):
     reply_info = {}
 
     if message.reply_to_message:
-        reply_key = (user_id, message.reply_to_message.message_id)
-        reply_to_post = message_to_post.get(reply_key)
+        reply_mid = message.reply_to_message.message_id
+        reply_to_post = None
+        for (uid, mid), pnum in message_to_post.items():
+            if mid == reply_mid:
+                reply_to_post = pnum
+                break
         if reply_to_post and reply_to_post in post_to_messages:
             reply_info = post_to_messages[reply_to_post]
         else:
@@ -3767,8 +3775,12 @@ async def handle_media_group_init(message: Message):
     # Проверяем reply_to_message для ответов
     reply_to_post = None
     if message.reply_to_message:
-        reply_key = (user_id, message.reply_to_message.message_id)
-        reply_to_post = message_to_post.get(reply_key)
+        reply_mid = message.reply_to_message.message_id
+        reply_to_post = None
+        for (uid, mid), pnum in message_to_post.items():
+            if mid == reply_mid:
+                reply_to_post = pnum
+                break
         if reply_to_post and reply_to_post not in messages_storage:
             reply_to_post = None
 
@@ -3876,8 +3888,12 @@ async def handle_message(message: Message):
         reply_info = {}
 
         if message.reply_to_message:
-            reply_key = (user_id, message.reply_to_message.message_id)
-            reply_to_post = message_to_post.get(reply_key)
+            reply_mid = message.reply_to_message.message_id
+            reply_to_post = None
+            for (uid, mid), pnum in message_to_post.items():
+                if mid == reply_mid:
+                    reply_to_post = pnum
+                    break
 
             if reply_to_post and reply_to_post in post_to_messages:
                 reply_info = post_to_messages[reply_to_post]
@@ -3914,7 +3930,7 @@ async def handle_message(message: Message):
                 text_content = message.html_text
             else:
                 text_content = escape_html(message.text)
-            
+
             # Применяем преобразования (сохраняя все существующие режимы)
             if suka_blyat_mode:
                 text_content = suka_blyatify_text(text_content)
@@ -3922,13 +3938,13 @@ async def handle_message(message: Message):
                 text_content = ukrainian_transform(text_content)
             if anime_mode:
                 text_content = anime_transform(text_content)
-                
+
             content['text'] = text_content
-            
+
         elif content_type == 'photo':
             content['file_id'] = message.photo[-1].file_id
             caption = message.caption
-            
+
             # Применяем преобразования к подписи
             if caption:
                 if suka_blyat_mode:
@@ -3937,13 +3953,13 @@ async def handle_message(message: Message):
                     caption = ukrainian_transform(caption)
                 if anime_mode:
                     caption = anime_transform(caption)
-                    
+
             content['caption'] = caption
-            
+
         elif content_type == 'video':
             content['file_id'] = message.video.file_id
             caption = message.caption
-            
+
             if caption:
                 if suka_blyat_mode:
                     caption = suka_blyatify_text(caption)
@@ -3951,13 +3967,13 @@ async def handle_message(message: Message):
                     caption = ukrainian_transform(caption)
                 if anime_mode:
                     caption = anime_transform(caption)
-                    
+
             content['caption'] = caption
-            
+
         elif content_type == 'animation':
             content['file_id'] = message.animation.file_id
             caption = message.caption
-            
+
             if caption:
                 if suka_blyat_mode:
                     caption = suka_blyatify_text(caption)
@@ -3965,13 +3981,13 @@ async def handle_message(message: Message):
                     caption = ukrainian_transform(caption)
                 if anime_mode:
                     caption = anime_transform(caption)
-                    
+
             content['caption'] = caption
-            
+
         elif content_type == 'document':
             content['file_id'] = message.document.file_id
             caption = message.caption
-            
+
             if caption:
                 if suka_blyat_mode:
                     caption = suka_blyatify_text(caption)
@@ -3979,16 +3995,16 @@ async def handle_message(message: Message):
                     caption = ukrainian_transform(caption)
                 if anime_mode:
                     caption = anime_transform(caption)
-                    
+
             content['caption'] = caption
-            
+
         elif content_type == 'sticker':
             content['file_id'] = message.sticker.file_id 
-            
+
         elif content_type == 'audio':
             content['file_id'] = message.audio.file_id
             caption = message.caption
-            
+
             if caption:
                 if suka_blyat_mode:
                     caption = suka_blyatify_text(caption)
@@ -3996,9 +4012,9 @@ async def handle_message(message: Message):
                     caption = ukrainian_transform(caption)
                 if anime_mode:
                     caption = anime_transform(caption)
-                    
+
             content['caption'] = caption
-            
+
         elif content_type == 'video_note':
             content['file_id'] = message.video_note.file_id
 
@@ -4115,7 +4131,7 @@ async def handle_message(message: Message):
 
     except Exception as e:
         print(f"Критическая ошибка в handle_message: {e}")
-        
+
 # ============ СТАРТ БОТА (один loop, автоперезапуск polling) ============
 async def start_background_tasks():
     """Поднимаем все фоновые корутины ОДИН раз за весь runtime"""
