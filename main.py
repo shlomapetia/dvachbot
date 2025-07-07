@@ -370,8 +370,8 @@ dp = Dispatcher()
 # Настройка логирования - только важные сообщения
 logging.basicConfig(
     level=logging.WARNING,  # Только предупреждения и ошибки
-    format="%(message)s",  # Просто текст без дат и т.п.
-    datefmt="%H:%M:%S"  # Если время нужно, то в коротком формате
+    format="%(message)s",  # Просто текст без дат
+    datefmt="%H:%M:%S"  # Если время нужно
 )
 # Отключаем логирование для aiohttp (веб-сервер)
 aiohttp_log = logging.getLogger('aiohttp')
