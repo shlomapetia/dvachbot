@@ -483,21 +483,13 @@ async def cleanup_old_messages():
 def get_user_msgs_deque(user_id):
     """Получаем deque для юзера, ограничиваем количество юзеров в памяти"""
     if user_id not in last_user_msgs:
-        # Если слишком много юзеров - удаляем самого старого
         if len(last_user_msgs) >= MAX_ACTIVE_USERS_IN_MEMORY:
-            # Удаляем первого (самого старого)
             oldest_user = next(iter(last_user_msgs))
             del last_user_msgs[oldest_user]
 
-        last_user_msgs[user_id] = deque(maxlen=10)  # Исправлено!
+        last_user_msgs[user_id] = deque(maxlen=10)
 
-    return last_user_msgs[user_id]  # Исправлено!
-
-DEANON_SURNAMES = _SURNAMES
-DEANON_CITIES = _CITIES
-DEANON_PROFESSIONS = _PROFESSIONS
-DEANON_FETISHES = _FETISHES
-DEANON_DETAILS = _DETAILS
+    return last_user_msgs[user_id]
 
 # Конфиг
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -845,6 +837,13 @@ PATRIOTIC_PHRASES = [
 
 # Для /suka_blyat
 MAT_WORDS = ["сука", "блядь", "пиздец", "ебать", "нах", "пизда", "хуйня", "ебал", "отъебись", "ебаный", "еблан", "ХУЙ", "ПИЗДА"]
+
+
+DEANON_SURNAMES = _SURNAMES
+DEANON_CITIES = _CITIES
+DEANON_PROFESSIONS = _PROFESSIONS
+DEANON_FETISHES = _FETISHES
+DEANON_DETAILS = _DETAILS
 
 def conan_phrase(username: str = "Приятель"):
     tpl = secrets.choice(TEMPLATES)
