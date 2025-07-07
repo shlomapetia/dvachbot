@@ -123,39 +123,56 @@ def ukrainian_transform(text: str) -> str:
     if not text:
         return text
     
-    # Замена целых слов по словарю
-    words = text.split()
-    transformed_words = []
+    # Разделяем текст на строки
+    lines = text.split('\n')
+    transformed_lines = []
     
-    for word in words:
-        # Сохраняем пунктуацию в конце слова
-        punctuation = ""
-        if word[-1] in ',.!?;:':
-            punctuation = word[-1]
-            word = word[:-1]
+    for line in lines:
+        # Пропускаем строки с UKRAINIAN_PHRASES
+        if any(phrase in line for phrase in UKRAINIAN_PHRASES):
+            transformed_lines.append(line)
+            continue
+            
+        words = line.split()
+        transformed_words = []
         
-        # Проверяем регистр
-        is_upper = word.isupper()
-        is_title = word.istitle()
+        for word in words:
+            # Сохраняем пунктуацию в конце слова
+            punctuation = ""
+            if word and word[-1] in ',.!?;:':
+                punctuation = word[-1]
+                word = word[:-1]
+            
+            # Проверяем регистр
+            is_upper = word.isupper()
+            is_title = word.istitle()
+            
+            # Ищем замену в словаре
+            base_word = word.lower()
+            if base_word in UKRAINIAN_WORD_REPLACEMENTS:
+                new_word = UKRAINIAN_WORD_REPLACEMENTS[base_word]
+                if is_upper:
+                    new_word = new_word.upper()
+                elif is_title:
+                    new_word = new_word.capitalize()
+            else:
+                # Заменяем буквы в оставшихся словах
+                new_word = word
+                # Замена 'и' с вероятностями
+                if 'и' in new_word.lower():
+                    rand = random.random()
+                    if rand < 0.45:
+                        new_word = new_word.replace('и', 'ї').replace('И', 'Ї')
+                    elif rand < 0.9:
+                        new_word = new_word.replace('и', 'i').replace('И', 'I')
+                new_word = new_word.replace('ы', 'i').replace('Ы', 'I')
+                new_word = new_word.replace('е', 'є').replace('Е', 'Є')
+            
+            transformed_words.append(new_word + punctuation)
         
-        # Ищем замену в словаре
-        base_word = word.lower()
-        if base_word in UKRAINIAN_WORD_REPLACEMENTS:
-            new_word = UKRAINIAN_WORD_REPLACEMENTS[base_word]
-            if is_upper:
-                new_word = new_word.upper()
-            elif is_title:
-                new_word = new_word.capitalize()
-        else:
-            # Заменяем буквы в оставшихся словах
-            new_word = word
-            new_word = new_word.replace('и', 'ї').replace('И', 'Ї')
-            new_word = new_word.replace('ы', 'i').replace('Ы', 'I')
-            new_word = new_word.replace('е', 'є').replace('Е', 'Є')
-        
-        transformed_words.append(new_word + punctuation)
+        transformed_lines.append(' '.join(transformed_words))
     
-    return ' '.join(transformed_words)
+    return '\n'.join(transformed_lines)
 
 def suka_blyatify_text(text: str) -> str:
     if not text:
@@ -476,6 +493,11 @@ def get_user_msgs_deque(user_id):
 
     return last_user_msgs[user_id]  # Исправлено!
 
+DEANON_SURNAMES = _SURNAMES
+DEANON_CITIES = _CITIES
+DEANON_PROFESSIONS = _PROFESSIONS
+DEANON_FETISHES = _FETISHES
+DEANON_DETAILS = _DETAILS
 
 # Конфиг
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -2685,7 +2707,7 @@ async def cmd_stats(message: types.Message):
 
 # ====== ДОБАВЛЯЕМ КОМАНДЫ ======
 @dp.message(Command("deanon"))
-async def cmd_deanon(message: types.Message):
+async def cmd_deanon(message: Message):
     """Случайный деанон пользователя с ответом на сообщение"""
     # Проверяем, что команда вызвана ответом на сообщение
     if not message.reply_to_message:
@@ -2716,7 +2738,7 @@ async def cmd_deanon(message: types.Message):
 
     # Формируем текст деанона
     deanon_text = (
-        f"\n Этого анона зовут: {name} {surname}\n"
+        f"\nЭтого анона зовут: {name} {surname}\n"
         f"Возраст: {age}\n"
         f"Город проживания: {city}\n"
         f"Профессия: {profession}\n"
@@ -2739,10 +2761,10 @@ async def cmd_deanon(message: types.Message):
             "type": "text",
             "header": header,
             "text": deanon_text,
-            "reply_to_post": target_post  # Важно: указываем пост, на который отвечаем
+            "reply_to_post": target_post
         },
         "post_num": pnum,
-        "reply_info": reply_info  # Передаем информацию для ответа
+        "reply_info": reply_info
     })
 
     await message.delete()
