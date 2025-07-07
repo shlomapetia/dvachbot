@@ -53,10 +53,71 @@ last_suka_blyat = None
 suka_blyat_counter = 0
 last_mode_activation = None
 MODE_COOLDOWN = 3600  # 1 час в секундах
+# для проверки одинаковых / коротких сообщений
+last_texts: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=5))
+
+# хранит последние 5 Message-объектов пользователя
+# Вместо defaultdict используем обычный dict с ручной инициализацией
+last_user_msgs = {}
+MAX_ACTIVE_USERS_IN_MEMORY = 5000
+
+# Рядом с другими глобальными словарями
+spam_violations = defaultdict(dict)  # user_id -> количество нарушений
 
 
 # Отключаем стандартную обработку сигналов в aiogram
 os.environ["AIORGRAM_DISABLE_SIGNAL_HANDLERS"] = "1"
+
+
+SPAM_RULES = {
+    'text': {
+        'max_repeats': 3,  # Макс одинаковых текстов подряд
+        'min_length': 2,  # Минимальная длина текста
+        'window_sec': 15,  # Окно для проверки (сек)
+        'max_per_window': 6,  # Макс сообщений в окне
+        'penalty': [60, 300, 600]  # Шкала наказаний: [1 мин, 5мин, 10 мин]
+    },
+    'sticker': {
+        'max_per_window': 6,  # 5 стикеров за 15 сек
+        'window_sec': 15,
+        'penalty': [60, 600, 900]  # 1мин, 10мин, 15 мин
+    },
+    'animation': {  # Гифки
+        'max_per_window': 5,  # 4 гифки за 30 сек
+        'window_sec': 20,
+        'penalty': [60, 600, 900]  # 1мин, 10мин, 15 мин
+    }
+}
+
+# Хранилище данных
+state = {
+    'users_data': {
+        'active': set(),
+        'banned': set()
+    },
+    'post_counter': 0,
+    'message_counter': {},
+    'settings': {  # Добавляем настройки по умолчанию
+        'dvach_enabled': False
+    }
+}
+# user_id -> datetime конца мута (UTC)
+mutes: dict[int, datetime] = {}
+# Временные данные (не сохраняются)
+spam_tracker = defaultdict(list)
+messages_storage = {}
+post_to_messages = {}
+message_to_post = {}
+last_messages = deque(maxlen=300)
+last_activity_time = datetime.now()
+daily_log = io.StringIO()
+
+# Добавьте рядом с другими глобальными переменными
+sent_media_groups = set()  # Для отслеживания уже отправленных медиа-групп
+
+# Хранит информацию о текущих медиа-группах: media_group_id -> данные
+current_media_groups = {}
+
 
 def suka_blyatify_text(text: str) -> str:
     if not text:
@@ -364,14 +425,6 @@ async def cleanup_old_messages():
         except Exception as e:
             print(f"Ошибка очистки: {e}")
 
-# для проверки одинаковых / коротких сообщений
-last_texts: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=5))
-
-# хранит последние 5 Message-объектов пользователя
-# Вместо defaultdict используем обычный dict с ручной инициализацией
-last_user_msgs = {}
-MAX_ACTIVE_USERS_IN_MEMORY = 5000
-
 def get_user_msgs_deque(user_id):
     """Получаем deque для юзера, ограничиваем количество юзеров в памяти"""
     if user_id not in last_user_msgs:
@@ -384,8 +437,7 @@ def get_user_msgs_deque(user_id):
         last_user_msgs[user_id] = deque(maxlen=10)  # Исправлено!
 
     return last_user_msgs[user_id]  # Исправлено!
-# Рядом с другими глобальными словарями
-spam_violations = defaultdict(int)  # user_id -> количество нарушений
+
 
 # Конфиг
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -572,7 +624,7 @@ DEANON_NAMES = ["Валера", "Геннадий", "Дмитрий", "Арка�
                 "Олег", "Павел", "Константин", "Виктор", "Юрий", "Тимофей", "Глеб", "Роман"
                 "Эдик", "Гена", "Андрей", "Иван", "Данил", "Саня", "Лёша", "Коля", "Ваня", "Петя", "Саша", "Миша"
                 "Матвей", "Руслан", "Артем", "Илья", "Денис", "Егор", "Максим", "Кирилл", "Тимур", "Артём", "Даниил"]
-DEANON_SURNAMES = ["Андреев", "Борисов", "Васильев", "Григорьев", "Дмитриев", "Егоров",
+_SURNAMES = ["Андреев", "Борисов", "Васильев", "Григорьев", "Дмитриев", "Егоров",
                    "Захаров", "Иванов", "Константинов", "Леонидов", "Михайлов", "Николаев"
                    "Путин", "Орлов", "Петров", "Романов", "Смирнов", "Титов", "Ульянов", "Федоров",
                    "Харитонов", "Царев", "Чернов", "Шапошников",
@@ -583,21 +635,21 @@ DEANON_SURNAMES = ["Андреев", "Борисов", "Васильев", "Гр
                    "Петухов", "Хуев", "Дрочилов", "Пидарасов", "Мудаков", "Говнюков",
                    "Залупин", "Мудозвонов", "Херович", "Песков", "Шизанутов", "Кончалов",
                    "Минетов", "Спермов", "Членов", "Вагин", "Сосунков", "Педиков", "Гомиков", "Аналов"]
-DEANON_CITIES = ["Магнитогорск", "Челябинск", "Тюмень", "Уфа", "Омск", "Кемерово",
+_CITIES = ["Магнитогорск", "Челябинск", "Тюмень", "Уфа", "Омск", "Кемерово",
                  "Братск", "Норильск", "Воркута", "Ухта", "Нижний Тагил", "Череповец",
                  "Липецк", "Тольятти", "Набережные Челны", "Магадан", "Петропавловск-Камчатский",
                  "Новокузнецк", "Красноярск", "Иркутск", "Кемерово", "Новосибирск", "Красноярск",
                  "Ижевск", "Сургут", "Сыктывкар", "Вологда", "Владивосток", "Москва", "Самара", 
                  "Саратов", "Казань", "Пенза", "Киев", "Минск", "Вильнюс", "Рига", "Таллин", 
                  "Хельсинки", "Стокгольм", "Осло", "Копенгаген", "Берлин"]
-DEANON_PROFESSIONS = ["сантехник", "грузчик", "охранник", "менеджер по продажам", 
+_PROFESSIONS = ["сантехник", "грузчик", "охранник", "менеджер по продажам", 
                       "электрик", "безработный", "дворник", "алкаш", "наркодилер", 
                       "вор в законе", "охотник на педофилов", "разнорабочий", 
                       "грузчик-хуесос", "уборщик сортиров", "торговец героином", 
                       "смотритель помойки", "сборщик бутылок", "попрошайка", "сутенер",
                       "психолог", "психиатр", "врач", "врач-нарколог", "врач-сексолог", "врач-терапевт", "врач-хирург",
                       "гей шлюха", "трансгендер", "аниматор", "диджей", "бармен", "бармен-пидор", "бариста", "анимешник", "художник"]
-DEANON_FETISHES = ["ножки школьниц", "трусики бабушек", "Школьницы", "Еврейское порно", "Егор Летов", "испражнения в банке", 
+_FETISHES = ["ножки школьниц", "трусики бабушек", "Школьницы", "Еврейское порно", "Егор Летов", "испражнения в банке", 
                    "трупы голубей", "просроченный майонез", "порно 80-х", 
                    "запах говна", "гнойные прыщи", "обрезки ногтей", 
                    "использованные тампоны", "аутофелляция", "засохшая сперма", "фистинг",
@@ -607,7 +659,7 @@ DEANON_FETISHES = ["ножки школьниц", "трусики бабушек
                    "хентай", "фурри", "негры", "девочки", "мамки", "детское порно", "боллбастинг",
                    "пожилые", "анальный секс", "классический", "уринация", "бдсм", "свинг", "соло",
                    "групп секс", "оргизм", "минет", "фелацио", "кунилингус", "анальный секс", "оргазм"]
-DEANON_DETAILS = [
+_DETAILS = [
     "скрывает криминальное прошлое", "сосет у работодателя", "мочится в раковину",
     "ебется с детьми", "боится темноты", "коллекционирует дилдаки",
     "имеет 5 судимостей", "просрочил паспорт", "не моется 2 недели",
@@ -739,36 +791,7 @@ async def global_error_handler(event: types.ErrorEvent) -> bool:
             print(f"Update: {update.model_dump_json(exclude_none=True)}")
         await asyncio.sleep(10)  # Задержка перед повторной попыткой
         return False
-
-# Хранилище данных
-state = {
-    'users_data': {
-        'active': set(),
-        'banned': set()
-    },
-    'post_counter': 0,
-    'message_counter': {},
-    'settings': {  # Добавляем настройки по умолчанию
-        'dvach_enabled': False
-    }
-}
-# user_id -> datetime конца мута (UTC)
-mutes: dict[int, datetime] = {}
-# Временные данные (не сохраняются)
-spam_tracker = defaultdict(list)
-messages_storage = {}
-post_to_messages = {}
-message_to_post = {}
-last_messages = deque(maxlen=300)
-last_activity_time = datetime.now()
-daily_log = io.StringIO()
-
-# Добавьте рядом с другими глобальными переменными
-sent_media_groups = set()  # Для отслеживания уже отправленных медиа-групп
-
-# Хранит информацию о текущих медиа-группах: media_group_id -> данные
-current_media_groups = {}
-
+        
 def escape_html(text: str) -> str:
     """Экранирует HTML символы"""
     if not text:
@@ -1111,28 +1134,8 @@ async def auto_save_state():
             print(f"❌ Ошибка в auto_save_state: {e}")
             await asyncio.sleep(60)
 
-SPAM_RULES = {
-    'text': {
-        'max_repeats': 3,  # Макс одинаковых текстов подряд
-        'min_length': 2,  # Минимальная длина текста
-        'window_sec': 15,  # Окно для проверки (сек)
-        'max_per_window': 6,  # Макс сообщений в окне
-        'penalty': [60, 300, 600]  # Шкала наказаний: [1 мин, 5мин, 10 мин]
-    },
-    'sticker': {
-        'max_per_window': 6,  # 5 стикеров за 15 сек
-        'window_sec': 15,
-        'penalty': [60, 600, 900]  # 1мин, 10мин, 15 мин
-    },
-    'animation': {  # Гифки
-        'max_per_window': 5,  # 4 гифки за 30 сек
-        'window_sec': 20,
-        'penalty': [60, 600, 900]  # 1мин, 10мин, 15 мин
-    }
-}
-
 async def check_spam(user_id: int, msg: Message) -> bool:
-    """Проверяет спам с градацией наказаний и сбросом уровня"""
+    """Проверяет спам с прогрессивным наказанием и сбросом уровня"""
     # Определяем тип контента
     if msg.content_type == 'text':
         msg_type = 'text'
@@ -1144,26 +1147,23 @@ async def check_spam(user_id: int, msg: Message) -> bool:
         msg_type = 'animation'
         content = None
     elif msg.content_type in ['photo', 'video', 'document'] and msg.caption:
-        # Обрабатываем подписи к медиа как текст
         msg_type = 'text'
         content = msg.caption
     else:
-        return True  # Другие типы не проверяем
+        return True
 
-    rules = SPAM_RULES.get(msg_type, {})
+    rules = SPAM_RULES.get(msg_type)
     if not rules:
         return True
 
     now = datetime.now(UTC)
-
     # Инициализация данных пользователя
-    if user_id not in spam_violations:
+    if user_id not in spam_violations or not spam_violations[user_id]:
         spam_violations[user_id] = {
-            'level': 0,  # Уровень нарушения (число)
+            'level': 0,
             'last_reset': now,
-            'last_contents': deque(maxlen=4)  # Храним последние 4 сообщения
+            'last_contents': deque(maxlen=4)
         }
-
     # Сброс уровня, если прошло больше 1 часа
     if (now - spam_violations[user_id]['last_reset']) > timedelta(hours=1):
         spam_violations[user_id] = {
@@ -1171,98 +1171,72 @@ async def check_spam(user_id: int, msg: Message) -> bool:
             'last_reset': now,
             'last_contents': deque(maxlen=4)
         }
-
     # Проверка повторяющихся текстов/подписей
-    if msg_type == 'text':
-        # Добавляем текущее сообщение в историю
+    if msg_type == 'text' and content:
         spam_violations[user_id]['last_contents'].append(content)
-
-        # Проверяем, не чередует ли пользователь 2 сообщения
-        if len(spam_violations[user_id]['last_contents']) >= 4:
-            unique_contents = set(spam_violations[user_id]['last_contents'])
-            # Если всего 2 уникальных сообщения в последних 4
-            if len(unique_contents) == 2:
-                # Проверяем, что они действительно чередуются
+        # 3 одинаковых подряд
+        if len(spam_violations[user_id]['last_contents']) == rules['max_repeats']:
+            if len(set(spam_violations[user_id]['last_contents'])) == 1:
+                spam_violations[user_id]['level'] = min(
+                    spam_violations[user_id]['level'] + 1,
+                    len(rules['penalty']) - 1)
+                return False
+        # Чередование двух текстов
+        if len(spam_violations[user_id]['last_contents']) == 4:
+            unique = set(spam_violations[user_id]['last_contents'])
+            if len(unique) == 2:
                 contents = list(spam_violations[user_id]['last_contents'])
-                pattern1 = [contents[0], contents[1]] * 2
-                pattern2 = [contents[1], contents[0]] * 2
-                if contents == pattern1 or contents == pattern2:
+                p1 = [contents[0], contents[1]] * 2
+                p2 = [contents[1], contents[0]] * 2
+                if contents == p1 or contents == p2:
                     spam_violations[user_id]['level'] = min(
                         spam_violations[user_id]['level'] + 1,
                         len(rules['penalty']) - 1)
-                    return False  # Это спам
+                    return False
 
-        # Также сохраняем в общую историю текстов для проверки повторов
-        last_texts[user_id].append(content)
-        if len(last_texts[user_id]) == rules.get('max_repeats', 3) and len(
-                set(last_texts[user_id])) == 1:
-            spam_violations[user_id]['level'] = min(
-                spam_violations[user_id]['level'] + 1,
-                len(rules['penalty']) - 1)
-            return False  # Это спам
-
-    # Проверка лимитов в временном окне
-    window_start = now - timedelta(seconds=rules.get('window_sec', 15))
-
-    # Обновляем трекер
-    spam_tracker[user_id] = [
-        t for t in spam_tracker.get(user_id, []) if t > window_start
-    ]
+    # Проверка лимита по времени
+    window_start = now - timedelta(seconds=rules['window_sec'])
+    spam_tracker[user_id] = [t for t in spam_tracker[user_id] if t > window_start]
     spam_tracker[user_id].append(now)
-
-    # Если превысили лимит
-    if len(spam_tracker[user_id]) >= rules.get('max_per_window', 5):
-        # Увеличиваем уровень
+    if len(spam_tracker[user_id]) >= rules['max_per_window']:
         spam_violations[user_id]['level'] = min(
             spam_violations[user_id]['level'] + 1,
             len(rules['penalty']) - 1)
-        return False  # Это спам
-
-    return True  # Это не спам
+        return False
+    return True
 
 async def apply_penalty(user_id: int, msg_type: str):
-    """Применяет наказание согласно текущему уровню"""
+    """Применяет мут согласно текущему уровню нарушения"""
     rules = SPAM_RULES.get(msg_type, {})
     if not rules:
         return
-
-    # Получаем текущий уровень нарушений
     level = spam_violations.get(user_id, {}).get('level', 0)
-    level = min(level, len(rules.get('penalty', [])) - 1)  # Ограничиваем максимальный уровень
-
-    # Определяем время мута
-    mute_seconds = rules['penalty'][level] if rules.get('penalty') else 30  # По умолчанию 30 сек
+    level = min(level, len(rules.get('penalty', [])) - 1)
+    mute_seconds = rules['penalty'][level] if rules.get('penalty') else 30
     mutes[user_id] = datetime.now(UTC) + timedelta(seconds=mute_seconds)
-
     # Определяем тип нарушения
-    violation_type = ""
-    if msg_type == 'text':
-        violation_type = "текстовый спам"
-    elif msg_type == 'sticker':
-        violation_type = "спам стикерами"
-    elif msg_type == 'animation':
-        violation_type = "спам гифками"
-
+    violation_type = {
+        'text': "текстовый спам",
+        'sticker': "спам стикерами",
+        'animation': "спам гифками"
+    }.get(msg_type, "спам")
     # Уведомление
     try:
-        time_str = ""
         if mute_seconds < 60:
             time_str = f"{mute_seconds} сек"
         elif mute_seconds < 3600:
             time_str = f"{mute_seconds // 60} мин"
         else:
             time_str = f"{mute_seconds // 3600} час"
-
         await bot.send_message(
             user_id,
             f"🚫 Эй пидор ты в муте на {time_str} за {violation_type}\n"
             f"Спамишь дальше - получишь бан",
             parse_mode="HTML")
-
-        # Отправляем уведомление в чат
         await send_moderation_notice(user_id, "mute", time_str, 0)
     except Exception as e:
         print(f"Ошибка отправки уведомления о муте: {e}")
+
 
 def format_header() -> Tuple[str, int]:
     """Форматирование заголовка с учетом режимов"""
@@ -2404,7 +2378,7 @@ async def cmd_start(message: types.Message):
         "- Без CP\n"
         "- Не спамить\n\n"
         "Просто пиши сообщения, они будут отправлены всем анонимно. Всем от всех."
-        "Команды: \n /roll \n /stats \n /face \n /deanon \n /help \n /invite \n /zaputin \n /slavaukraine \n /suka_blyat \n /deanon")
+        "Команды: \n /roll \n /stats \n /face \n / \n /help \n /invite \n /zaputin \n /slavaukraine \n /suka_blyat \n /")
     await message.delete()
 
 
@@ -2443,7 +2417,7 @@ async def cmd_help(message: types.Message):
                          "/face \n"
                          "/roll – ролл 0-100 или /roll N\n"
                          "/invite - получить текст для приглашения анонов\n"
-                         "/deanon - случайный деанон\n"
+                         "/ - случайный деанон\n"
                          "/zaputin - активировать режим zaputin\n"
                          "/slavaukraine - активировать режим slavaukraine\n"
                          "/suka_blyat - активировать режим suka_blyat\n"
@@ -2532,6 +2506,11 @@ async def disable_slavaukraine_mode(delay: int):
         "post_num": pnum,
     })
 
+async def reset_violations_after_hour(user_id: int):
+    await asyncio.sleep(3600)
+    if user_id in spam_violations:
+        spam_violations[user_id]['level'] = 0
+
 @dp.message(Command("stop"))
 async def cmd_stop(message: types.Message):
     """Остановка любых активных режимов без уведомления"""
@@ -2589,10 +2568,6 @@ async def cmd_stats(message: types.Message):
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: types.Message):
     """Случайный деанон пользователя с ответом на сообщение"""
-    if not is_admin(message.from_user.id):
-        await message.delete()
-        return
-
     # Проверяем, что команда вызвана ответом на сообщение
     if not message.reply_to_message:
         await message.answer("⚠️ Ответь на сообщение для деанона!")
@@ -3146,8 +3121,8 @@ async def cmd_wipe(message: types.Message):
 @dp.message(Command("unmute"))
 async def cmd_unmute(message: types.Message):
     if not is_admin(message.from_user.id):
+        await message.delete()
         return
-
     target_id = None
     if message.reply_to_message:
         target_id = message.reply_to_message.from_user.id
@@ -3155,11 +3130,9 @@ async def cmd_unmute(message: types.Message):
         parts = message.text.split()
         if len(parts) == 2 and parts[1].isdigit():
             target_id = int(parts[1])
-
     if not target_id:
         await message.answer("Нужно reply или /unmute <id>")
         return
-
     mutes.pop(target_id, None)
     await message.answer(f"🔈 Пользователь {target_id} размучен")
     try:
@@ -3167,6 +3140,7 @@ async def cmd_unmute(message: types.Message):
             target_id, "Эй хуйло ебаное, тебя размутили, можешь писать.")
     except:
         pass
+        
 
 
 @dp.message(Command("unban"))
@@ -3596,15 +3570,11 @@ async def handle_media_group_init(message: Message):
 
 @dp.message()
 async def handle_message(message: Message):
-    """Основной обработчик сообщений"""
+    user_id = message.from_user.id
     # Пропускаем сообщения, которые являются частью медиа-группы
     if message.media_group_id:
         return
-
-    user_id = message.from_user.id
-
     try:
-        # 1. Проверка мута (должна быть ПЕРВОЙ)
         until = mutes.get(user_id)
         if until and until > datetime.now(UTC):
             left = until - datetime.now(UTC)
