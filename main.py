@@ -118,6 +118,44 @@ sent_media_groups = set()  # Для отслеживания уже отправ
 # Хранит информацию о текущих медиа-группах: media_group_id -> данные
 current_media_groups = {}
 
+def ukrainian_transform(text: str) -> str:
+    """Преобразует русский текст в украинский вариант"""
+    if not text:
+        return text
+    
+    # Замена целых слов по словарю
+    words = text.split()
+    transformed_words = []
+    
+    for word in words:
+        # Сохраняем пунктуацию в конце слова
+        punctuation = ""
+        if word[-1] in ',.!?;:':
+            punctuation = word[-1]
+            word = word[:-1]
+        
+        # Проверяем регистр
+        is_upper = word.isupper()
+        is_title = word.istitle()
+        
+        # Ищем замену в словаре
+        base_word = word.lower()
+        if base_word in UKRAINIAN_WORD_REPLACEMENTS:
+            new_word = UKRAINIAN_WORD_REPLACEMENTS[base_word]
+            if is_upper:
+                new_word = new_word.upper()
+            elif is_title:
+                new_word = new_word.capitalize()
+        else:
+            # Заменяем буквы в оставшихся словах
+            new_word = word
+            new_word = new_word.replace('и', 'ї').replace('И', 'Ї')
+            new_word = new_word.replace('ы', 'i').replace('Ы', 'I')
+            new_word = new_word.replace('е', 'є').replace('Е', 'Є')
+        
+        transformed_words.append(new_word + punctuation)
+    
+    return ' '.join(transformed_words)
 
 def suka_blyatify_text(text: str) -> str:
     if not text:
@@ -453,6 +491,76 @@ REPLY_CACHE = 500  # сколько постов держать
 REPLY_FILE = "reply_cache.json"  # отдельный файл для reply
 # В начале файла с константами
 MAX_MESSAGES_IN_MEMORY = 1110  # храним только последние 1000 постов
+
+UKRAINIAN_WORD_REPLACEMENTS = {
+    "спасибо": "дякую",
+    "пожалуйста": "будь ласка",
+    "привет": "привiт",
+    "пока": "бувай",
+    "хорошо": "добре",
+    "плохо": "погано",
+    "человек": "людина",
+    "мужчина": "чоловiк",
+    "женщина": "жiнка",
+    "ребенок": "дитина",
+    "деньги": "грошi",
+    "работа": "робота",
+    "дом": "дiм",
+    "город": "мiсто",
+    "страна": "країна",
+    "язык": "мова",
+    "вода": "вода",
+    "огонь": "вогонь",
+    "земля": "земля",
+    "воздух": "повiтря",
+    "друг": "друг",
+    "враг": "ворог",
+    "правда": "правда",
+    "ложь": "брехня",
+    "большой": "великий",
+    "маленький": "маленький",
+    "новый": "новий",
+    "старый": "старий",
+    "хотеть": "хотiти",
+    "мочь": "могти",
+    "говорить": "говорити",
+    "видеть": "бачити",
+    "слышать": "чути",
+    "знать": "знати",
+    "думать": "думати",
+    "жить": "жити",
+    "умирать": "помирати",
+    "любить": "кохати",
+    "ненавидеть": "ненавидiти",
+    "есть": "їсти",
+    "пить": "пити",
+    "спать": "спати",
+    "идти": "йти",
+    "бежать": "бiгти",
+    "сидеть": "сидiти",
+    "стоять": "стояти",
+    "давать": "давати",
+    "брать": "брати",
+    "время": "час",
+    "день": "день",
+    "ночь": "нiч",
+    "утро": "ранок",
+    "вечер": "вечiр",
+    "неделя": "тиждень",
+    "месяц": "мiсяць",
+    "год": "рiк",
+    "сегодня": "сьогоднi",
+    "завтра": "завтра",
+    "вчера": "вчора",
+    "здесь": "тут",
+    "там": "там",
+    "холодно": "холодно",
+    "тепло": "тепло",
+    "хлеб": "хлiб",
+    "соль": "сiль",
+    "мясо": "м'ясо",
+    "молоко": "молоко"
+}
 
 # Мотивационные сообщения для приглашений
 MOTIVATIONAL_MESSAGES = [
@@ -1410,12 +1518,17 @@ async def handle_audio_message(message: Message):
     except:
         pass
 
+    # Применяем преобразования к подписи
+    caption = message.caption
+    if slavaukraine_mode and caption:
+        caption = ukrainian_transform(caption)
+
     # Формируем контент
     content = {
         'type': 'audio',
         'header': header,
         'file_id': message.audio.file_id,
-        'caption': message.caption,
+        'caption': caption,
         'reply_to_post': reply_to_post
     }
 
@@ -1430,14 +1543,14 @@ async def handle_audio_message(message: Message):
     # Отправляем автору
     reply_to_message_id = reply_info.get(user_id) if reply_info else None
 
-    caption = f"<i>{header}</i>"
-    if message.caption:
-        caption += f"\n\n{escape_html(message.caption)}"
+    caption_text = f"<i>{header}</i>"
+    if caption:
+        caption_text += f"\n\n{escape_html(caption)}"
 
     sent_to_author = await bot.send_audio(
         user_id,
         message.audio.file_id,
-        caption=caption,
+        caption=caption_text,
         reply_to_message_id=reply_to_message_id,
         parse_mode="HTML"
     )
@@ -1598,21 +1711,27 @@ async def send_message_to_users(
     modified_content = content.copy()
     
     # Применяем модификации режимов
-    if zaputin_mode:
-        # Добавляем патриотические фразы к 30% сообщений
-        if random.random() < 0.3:
-            if modified_content.get('text'):
-                modified_content['text'] += "\n\n" + random.choice(PATRIOTIC_PHRASES)
-            elif modified_content.get('caption'):
-                modified_content['caption'] += "\n\n" + random.choice(PATRIOTIC_PHRASES)
-                
-    elif slavaukraine_mode:
+    if slavaukraine_mode:
         # Добавляем украинские фразы к 30% сообщений
         if random.random() < 0.3:
             if modified_content.get('text'):
                 modified_content['text'] += "\n\n" + random.choice(UKRAINIAN_PHRASES)
             elif modified_content.get('caption'):
                 modified_content['caption'] += "\n\n" + random.choice(UKRAINIAN_PHRASES)
+        
+        # Преобразуем основной текст
+        if modified_content.get('text'):
+            modified_content['text'] = ukrainian_transform(modified_content['text'])
+        elif modified_content.get('caption'):
+            modified_content['caption'] = ukrainian_transform(modified_content['caption'])
+            
+    elif zaputin_mode:
+        # Добавляем патриотические фразы к 30% сообщений
+        if random.random() < 0.3:
+            if modified_content.get('text'):
+                modified_content['text'] += "\n\n" + random.choice(PATRIOTIC_PHRASES)
+            elif modified_content.get('caption'):
+                modified_content['caption'] += "\n\n" + random.choice(PATRIOTIC_PHRASES)
                 
     elif suka_blyat_mode:
         # Матерные замены для текста
@@ -3532,10 +3651,14 @@ async def handle_media_group_init(message: Message):
             'author_id': user_id,
             'timestamp': datetime.now(MSK),
             'media': [],
-            'caption': message.caption if message.caption else None,
+            'caption': ukrainian_transform(message.caption) if slavaukraine_mode and message.caption else message.caption,
             'reply_to_post': reply_to_post,
             'processed_messages': set()
         }
+    else:
+        # Обновляем подпись если нужно
+        if slavaukraine_mode and message.caption:
+            current_media_groups[media_group_id]['caption'] = ukrainian_transform(message.caption)
 
     # Добавляем медиа в группу только если это новое сообщение
     if message.message_id not in current_media_groups[media_group_id]['processed_messages']:
@@ -3557,10 +3680,6 @@ async def handle_media_group_init(message: Message):
         if media_data['file_id']:  # Только если есть file_id
             current_media_groups[media_group_id]['media'].append(media_data)
             current_media_groups[media_group_id]['processed_messages'].add(message.message_id)
-
-            # Обновляем подпись, если она есть
-            if message.caption and not current_media_groups[media_group_id].get('caption'):
-                current_media_groups[media_group_id]['caption'] = message.caption
 
     await message.delete()
 
@@ -3669,6 +3788,10 @@ async def handle_message(message: Message):
             # ---- Добавь сюда ----
             if suka_blyat_mode:
                 text_content = suka_blyatify_text(text_content)
+            content['text'] = text_content
+                        # Добавляем украинизацию если режим активен
+            if slavaukraine_mode:
+                text_content = ukrainian_transform(text_content)
             content['text'] = text_content
         elif content_type == 'photo':
             content['file_id'] = message.photo[-1].file_id
