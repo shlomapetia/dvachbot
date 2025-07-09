@@ -1470,29 +1470,29 @@ def format_header() -> Tuple[str, int]:
         prefix = "Пыня - "
     elif rand_prefix < 0.018:   # 0.2%
         prefix = "Нариман Намазов - "
-    elif rand_prefix < 0.021
+    elif rand_prefix < 0.021:
         prefix = "ИМПЕРАТОР КОНАН - "
-    elif rand_prefix < 0.023
+    elif rand_prefix < 0.023:
         prefix = "Антон Бабкин - "
-    elif rand_prefix < 0.025
+    elif rand_prefix < 0.025:
         prefix = "### НАРИМАН НАМАЗОВ ### "
-    elif rand_prefix < 0.027
+    elif rand_prefix < 0.027:
         prefix = "### ПУТИН ### "
-    elif rand_prefix < 0.028
+    elif rand_prefix < 0.028:
         prefix = "Гей - "
-    elif rand_prefix < 0.030
+    elif rand_prefix < 0.030:
         prefix = "Анархист - "
-    elif rand_prefix < 0.033
+    elif rand_prefix < 0.033:
         prefix = "### Имбецил ### "
-    elif rand_prefix < 0.035
+    elif rand_prefix < 0.035:
         prefix = "### ЧМО ###"
-    elif rand_prefix < 0.037
+    elif rand_prefix < 0.037:
         prefix = "### ОНАНИСТ ### "
-    elif rand_prefix < 0.040
+    elif rand_prefix < 0.040:
         prefix = "### ЧЕЧЕНЕЦ ### "
-    elif rand_prefix < 0.043
+    elif rand_prefix < 0.043:
         prefix = "Томоко Куроки - "
-    elif rand_prefix < 0.045
+    elif rand_prefix < 0.045:
         prefix = "### Аниме девочка ### "
 
     # Формируем итоговый заголовок
