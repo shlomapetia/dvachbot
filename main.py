@@ -4209,10 +4209,9 @@ async def start_background_tasks():
     return tasks 
 
 async def supervisor():
-    global is_shutting_down, bot
-    loop = asyncio.get_running_loop()  # ДОБАВЬ ЭТУ СТРОЧКУ
+    global is_shutting_down, bot, healthcheck_site
+    loop = asyncio.get_running_loop()
 
-    # Вставь вот это до load_state:
     restore_backup_on_start()
 
     # Обработка сигналов для Linux/Mac
@@ -4230,10 +4229,13 @@ async def supervisor():
         message_queue = asyncio.Queue(maxsize=5000)
 
         # Запуск фоновых задач
-        tasks = await start_background_tasks()  # Используем существующую функцию
+        tasks = await start_background_tasks()
 
         print("✅ Фоновые задачи запущены")
+
+        # ВАЖНО: запускать и polling, и aiohttp вместе
         await dp.start_polling(bot, skip_updates=True)
+        # aiohttp сервис уже работает в том же loop
 
     except Exception as e:
         print(f"🔥 Critical error: {e}")
