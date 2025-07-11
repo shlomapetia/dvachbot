@@ -45,6 +45,7 @@ import deanonymizer
 from conan import conan_roaster, conan_phrase
 from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES
 from deanonymizer import process_deanon_command
+from deanonymizer import _SURNAMES, _CITIES, _PROFESSIONS, _FETISHES, _DETAILS
 
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
