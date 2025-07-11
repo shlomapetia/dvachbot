@@ -7,6 +7,7 @@ import logging
 import time
 import os
 import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from japanese_translator import anime_transform
 import re 
 import glob
@@ -47,9 +48,6 @@ import deanonymizer
 from conan import conan_roaster, conan_phrase
 from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES 
 from deanonymizer import process_deanon_command, DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS
-
-# Добавляем текущую директорию в sys.path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
