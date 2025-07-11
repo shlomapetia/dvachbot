@@ -2,6 +2,7 @@
 import secrets
 import random
 from datetime import datetime, UTC
+import asyncio
 
 # Константы для генерации фраз Конана
 SPORT_INVENTS = [
