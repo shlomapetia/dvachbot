@@ -161,18 +161,19 @@ async def healthcheck(request):
     """Для Railway Health Checks"""
     return web.Response(text="Bot is alive")
 
-# Заменяем функцию start_healthcheck
 async def start_healthcheck():
-    """Для Railway Health Checks"""
     port = int(os.environ.get('PORT', 8080))
     app = web.Application()
     app.router.add_get("/", healthcheck)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()  # Важно: ожидаем запуска
-    print(f"🟢 Healthcheck-сервер запущен на порту {port}")
-    return site
+    try:
+        await site.start()  # Ensure this is awaited properly
+        print(f"🟢 Healthcheck server started on port {port}")
+    except Exception as e:
+        print(f"Error starting healthcheck server: {str(e)}")
+        raise
 
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot-backup.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
