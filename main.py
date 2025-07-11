@@ -43,7 +43,7 @@ from japanese_translator import anime_transform
 from ukrainian_mode import ukrainian_transform, UKRAINIAN_PHRASES
 import deanonymizer 
 from conan import conan_roaster, conan_phrase
-from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES
+from zaputin_mode import zaputin_transform, UKRAINIAN_PHRASES
 from deanonymizer import process_deanon_command, DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
