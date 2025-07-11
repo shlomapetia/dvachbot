@@ -510,12 +510,6 @@ INVITE_TEXTS = [
 # Для /suka_blyat
 MAT_WORDS = ["сука", "блядь", "пиздец", "ебать", "нах", "пизда", "хуйня", "ебал", "блять", "отъебись", "ебаный", "еблан", "ХУЙ", "ПИЗДА"]
 
-DEANON_SURNAMES = _SURNAMES
-DEANON_CITIES = _CITIES
-DEANON_PROFESSIONS = _PROFESSIONS
-DEANON_FETISHES = _FETISHES
-DEANON_DETAILS = _DETAILS
-
 # хранит 5 последних sticker_file_id для проверки «одинаковых»
 last_stickers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=5))
 
