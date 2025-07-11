@@ -43,14 +43,14 @@ from japanese_translator import anime_transform
 from ukrainian_mode import ukrainian_transform, UKRAINIAN_PHRASES
 import deanonymizer 
 from conan import conan_roaster, conan_phrase
-from zaputin_mode import zaputin_transform, UKRAINIAN_PHRASES
+from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES 
 from deanonymizer import process_deanon_command, DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
 git_executor = ThreadPoolExecutor(max_workers=1)
 send_executor = ThreadPoolExecutor(max_workers=100)
 git_semaphore = asyncio.Semaphore(1)
-message_queue = None
+message_queue = asyncio.Queue()
 anime_mode = False
 zaputin_mode = False
 slavaukraine_mode = False
