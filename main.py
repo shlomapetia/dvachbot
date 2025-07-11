@@ -158,8 +158,9 @@ def restore_backup_on_start():
         print(f"Ошибка при восстановлении backup: {e}")
 
 async def healthcheck(request):
-    """Для Railway Health Checks"""
+    print("🚀 Получен запрос на healthcheck")
     return web.Response(text="Bot is alive")
+
 
 async def start_healthcheck():
     port = int(os.environ.get('PORT', 8080))
@@ -169,11 +170,13 @@ async def start_healthcheck():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     try:
-        await site.start()  # Ensure this is awaited properly
-        print(f"🟢 Healthcheck server started on port {port}")
+        print(f"🟢 Попытка запустить healthcheck сервер на порту {port}")
+        await site.start()  # Попробуем запустить сервер
+        print(f"🟢 Healthcheck-сервер успешно запущен на порту {port}")
     except Exception as e:
-        print(f"Error starting healthcheck server: {str(e)}")
+        print(f"Ошибка запуска healthcheck сервера: {str(e)}")
         raise
+
 
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot-backup.git"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
