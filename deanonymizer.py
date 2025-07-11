@@ -1,6 +1,8 @@
 import random
 from typing import Tuple
 from aiogram.types import Message
+import asyncio
+
 
 # Для /deanon
 DEANON_NAMES = ["Валера", "Геннадий", "Дмитрий", "Аркадий", "Николай", "Женя", "Чмоня", "Арестарх", 
