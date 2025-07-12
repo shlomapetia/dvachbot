@@ -6,17 +6,17 @@ def zaputin_transform(text: str) -> str:
     if not text:
         return text
         
-    # Заменяем символы
-    text = (
-        text.replace('З', 'Z')
-        .replace('з', 'z')
-        .replace('В', 'V')
-        .replace('в', 'v')
-        .replace('СС', 'ZZ')
-        .replace('сс', 'zz')
-        .replace('Сс', 'Zz')
-        .replace('сС', 'zZ')
-    )
+    # Заменяем символы (все варианты)
+    replacements = {
+        'З': 'Z', 'з': 'z',
+        'В': 'V', 'в': 'v',
+        'С': 'Z', 'с': 'z',  # Добавлены одиночные замены
+        'сс': 'zz', 'СС': 'ZZ',
+        'Сс': 'Zz', 'сС': 'zZ'
+    }
+    
+    for old, new in replacements.items():
+        text = text.replace(old, new)
     
     return text
 
