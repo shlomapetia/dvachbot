@@ -1046,9 +1046,6 @@ def format_header() -> Tuple[str, int]:
     state['post_counter'] += 1
     post_num = state['post_counter']
 
-    if is_system:
-        return "### Админ ###", post_num
-        
     # Режим /slavaukraine
     if slavaukraine_mode:
         return f"💙💛 Пiст №{post_num}", post_num
@@ -1392,8 +1389,9 @@ async def send_media_group(media_group_id: str):
 
 async def send_moderation_notice(user_id: int, action: str, duration: str = None, deleted_posts: int = 0):
     """Отправляет уведомление о модерационном действии в чат"""
-    header, post_num = format_header()
-    header = header.replace("Пост", "### АДМИН ###")
+    state['post_counter'] += 1
+    post_num = state['post_counter']
+    header = "### Админ ###"
 
     if action == "ban":
         text = (f"🚨 Хуесос был забанен за спам. Помянем.")
@@ -3425,6 +3423,11 @@ async def handle_media_group_init(message: Message):
 @dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
+    
+    if not message.text and not message.caption and not message.content_type:
+        await message.delete()
+        return
+        
     # Пропускаем сообщения, которые являются частью медиа-группы
     if message.media_group_id:
         return
@@ -3751,17 +3754,26 @@ async def start_background_tasks():
     return tasks 
 
 async def supervisor():
-    global is_shutting_down, bot, healthcheck_site
-    loop = asyncio.get_running_loop()
-
-    restore_backup_on_start()
-
-    if hasattr(signal, 'SIGTERM'):
-        loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
-    if hasattr(signal, 'SIGINT'):
-        loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown()))
-
+    # Блокировка от множественного запуска
+    lock_file = "bot.lock"
+    if os.path.exists(lock_file):
+        print("⛔ Bot already running! Exiting...")
+        sys.exit(1)
+    
+    with open(lock_file, "w") as f:
+        f.write(str(os.getpid()))
+    
     try:
+        global is_shutting_down, bot, healthcheck_site
+        loop = asyncio.get_running_loop()
+
+        restore_backup_on_start()
+
+        if hasattr(signal, 'SIGTERM'):
+            loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
+        if hasattr(signal, 'SIGINT'):
+            loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown()))
+
         load_state()
         healthcheck_site = await start_healthcheck()
         bot = Bot(token=BOT_TOKEN)
@@ -3774,15 +3786,16 @@ async def supervisor():
 
         print("✅ Фоновые задачи запущены")
 
-        # ВАЖНО: запускать и polling, и aiohttp вместе
+        # Запускаем polling
         await dp.start_polling(bot, skip_updates=True)
-        # aiohttp сервис уже работает в том же loop
 
     except Exception as e:
         print(f"🔥 Critical error: {e}")
     finally:
         if not is_shutting_down:
             await graceful_shutdown()
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
