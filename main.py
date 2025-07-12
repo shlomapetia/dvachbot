@@ -47,7 +47,20 @@ from ukrainian_mode import ukrainian_transform, UKRAINIAN_PHRASES
 import deanonymizer 
 from conan import conan_roaster, conan_phrase
 from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES 
-from deanonymizer import process_deanon_command, DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS
+from deanonymizer import process_deanon_command, DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS, generate_deanon_info
+
+# ========== Глобальные настройки досок ==========
+BOARDS = ['b', 'po', 'a', 'sex', 'vg']  # Идентификаторы досок
+BOARD_INFO = {
+    'b': {"name": "/b/", "description": "Бред", "username": "@dvach_chatbot"},
+    'po': {"name": "/po/", "description": "Политика", "username": "@dvach_po_chatbot"},
+    'a': {"name": "/a/", "description": "Аниме", "username": "@dvach_a_chatbot"},
+    'sex': {"name": "/sex/", "description": "Сексач", "username": "@dvach_sex_chatbot"},
+    'vg': {"name": "/vg/", "description": "Видеоигры", "username": "@dvach_vg_chatbot"},
+}
+
+# Очереди сообщений для каждой доски
+message_queues = {board: asyncio.Queue(maxsize=9000) for board in BOARDS}
 
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
@@ -2421,8 +2434,10 @@ async def cmd_deanon(message: Message):
         message_to_post=message_to_post,
         messages_storage=messages_storage,
         state=state,
-        message_queue=message_queue
+        message_queue=message_queue,
+        post_to_messages=post_to_messages
     )
+    await message.delete()
     
 # ====== ZAPUTIN ======
 @dp.message(Command("zaputin"))
