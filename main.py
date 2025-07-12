@@ -48,6 +48,8 @@ import deanonymizer
 from conan import conan_roaster, conan_phrase
 from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES 
 from deanonymizer import process_deanon_command, DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS, generate_deanon_info
+from help_text import HELP_TEXT
+from help_broadcaster import help_broadcaster
 
 # ========== Глобальные настройки досок ==========
 BOARDS = ['b', 'po', 'a', 'sex', 'vg']  # Идентификаторы досок
@@ -1044,6 +1046,9 @@ def format_header() -> Tuple[str, int]:
     state['post_counter'] += 1
     post_num = state['post_counter']
 
+    if is_system:
+        return "### Админ ###", post_num
+        
     # Режим /slavaukraine
     if slavaukraine_mode:
         return f"💙💛 Пiст №{post_num}", post_num
@@ -2204,20 +2209,7 @@ async def cmd_face(message: types.Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    await message.answer("Это анонимный чат ТГАЧ\n\n"
-                         "Команды:\n"
-                         "/start - начать\n"
-                         "/help - помощь\n"
-                         "/stats - статистика\n"
-                         "/face \n"
-                         "/roll – ролл 0-100 или /roll N\n"
-                         "/invite - получить текст для приглашения анонов\n"
-                         "/deanon - деанон постера\n"
-                         "/zaputin - активировать режим zaputin\n"
-                         "/slavaukraine - активировать режим slavaukraine\n"
-                         "/suka_blyat - активировать режим suka_blyat\n"
-                         "/anime - активировать аниме-режим\n"
-                         "Все сообщения анонимны!")
+    await message.answer(HELP_TEXT)
     await message.delete()
 
 
@@ -2429,14 +2421,57 @@ async def disable_anime_mode(delay: int):
 
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: Message):
-    await process_deanon_command(
-        message=message,
-        message_to_post=message_to_post,
-        messages_storage=messages_storage,
-        state=state,
-        message_queue=message_queue,
-        post_to_messages=post_to_messages
+    """Обработчик команды /deanon"""
+    # Проверяем, что команда вызвана ответом на сообщение
+    if not message.reply_to_message:
+        await message.answer("⚠️ Ответь на сообщение для деанона!")
+        await message.delete()
+        return
+
+    # Определяем цель деанона
+    reply_key = (message.from_user.id, message.reply_to_message.message_id)
+    target_post = message_to_post.get(reply_key)
+
+    if not target_post or target_post not in messages_storage:
+        await message.answer("🚫 Не удалось найти пост для деанона!")
+        await message.delete()
+        return
+
+    target_id = messages_storage[target_post].get("author_id")
+    
+    # Генерируем фейковые данные
+    name, surname, city, profession, fetish, detail = generate_deanon_info()
+    ip = f"{random.randint(10,250)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
+    age = random.randint(18, 45)
+    
+    # Формируем текст деанона
+    deanon_text = (
+        f"\nЭтого анона зовут: {name} {surname}\n"
+        f"Возраст: {age}\n"
+        f"Город проживания: {city}\n"
+        f"Профессия: {profession}\n"
+        f"Фетиш: {fetish}\n"
+        f"IP-адрес: {ip}\n"
+        f"Дополнительная информация о нём: {detail}"
     )
+
+    # Отправляем как ответ на сообщение
+    header = "### ДЕАНОН ###"
+    state['post_counter'] += 1
+    pnum = state['post_counter']
+
+    await message_queue.put({
+        "recipients": state['users_data']['active'],
+        "content": {
+            "type": "text",
+            "header": header,
+            "text": deanon_text,
+            "reply_to_post": target_post
+        },
+        "post_num": pnum,
+        "reply_info": post_to_messages.get(target_post, {})
+    })
+
     await message.delete()
     
 # ====== ZAPUTIN ======
@@ -3710,6 +3745,7 @@ async def start_background_tasks():
         asyncio.create_task(motivation_broadcaster()),
         asyncio.create_task(auto_memory_cleaner()),
         asyncio.create_task(cleanup_old_messages()),
+        asyncio.create_task(help_broadcaster(state, message_queue, format_header)),
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
     return tasks 
