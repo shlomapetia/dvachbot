@@ -1250,6 +1250,12 @@ async def handle_audio_message(message: Message):
     caption = message.caption
     if slavaukraine_mode and caption:
         caption = ukrainian_transform(caption)
+    if suka_blyat_mode and caption:
+        caption = suka_blyatify_text(caption)
+    if anime_mode and caption:
+        caption = anime_transform(caption)
+    if zaputin_mode and caption:
+        caption = zaputin_transform(caption)      
 
     # Формируем контент
     content = {
@@ -3391,7 +3397,13 @@ async def handle_media_group_init(message: Message):
     else:
         # Обновляем подпись если нужно
         if slavaukraine_mode and message.caption:
+            current_media_groups[media_group_id]['caption'] = suka_blyatify_text(message.caption)
+        if suka_blyat_mode and message.caption:
             current_media_groups[media_group_id]['caption'] = ukrainian_transform(message.caption)
+        if anime_mode and message.caption:
+            current_media_groups[media_group_id]['caption'] = anime_transform(message.caption)
+        if zaputin_mode and message.caption:
+            current_media_groups[media_group_id]['caption'] = zaputin_transform(message.caption)        
 
     # Добавляем медиа в группу только если это новое сообщение
     if message.message_id not in current_media_groups[media_group_id]['processed_messages']:
@@ -3535,6 +3547,8 @@ async def handle_message(message: Message):
                 text_content = ukrainian_transform(text_content)
             if anime_mode:
                 text_content = anime_transform(text_content)
+            if zaputin_mode:
+                text_content = zaputin_transform(text_content)    
 
             content['text'] = text_content
 
@@ -3550,7 +3564,9 @@ async def handle_message(message: Message):
                     caption = ukrainian_transform(caption)
                 if anime_mode:
                     caption = anime_transform(caption)
-
+                if zaputin_mode:
+                    caption = zaputin_transform(caption)   
+                
             content['caption'] = caption
 
         elif content_type == 'video':
@@ -3564,6 +3580,8 @@ async def handle_message(message: Message):
                     caption = ukrainian_transform(caption)
                 if anime_mode:
                     caption = anime_transform(caption)
+                if zaputin_mode:
+                    caption = zaputin_transform(caption)   
 
             content['caption'] = caption
 
@@ -3578,6 +3596,8 @@ async def handle_message(message: Message):
                     caption = ukrainian_transform(caption)
                 if anime_mode:
                     caption = anime_transform(caption)
+                if zaputin_mode:
+                    caption = zaputin_transform(caption)                       
 
             content['caption'] = caption
 
@@ -3592,7 +3612,9 @@ async def handle_message(message: Message):
                     caption = ukrainian_transform(caption)
                 if anime_mode:
                     caption = anime_transform(caption)
-
+                if zaputin_mode:
+                    caption = zaputin_transform(caption)   
+            
             content['caption'] = caption
 
         elif content_type == 'sticker':
@@ -3609,7 +3631,9 @@ async def handle_message(message: Message):
                     caption = ukrainian_transform(caption)
                 if anime_mode:
                     caption = anime_transform(caption)
-
+                if zaputin_mode:
+                    caption = zaputin_transform(caption)                 
+            
             content['caption'] = caption
 
         elif content_type == 'video_note':
