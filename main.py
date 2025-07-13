@@ -51,7 +51,15 @@ from help_text import HELP_TEXT
 from help_broadcaster import help_broadcaster
 
 # ========== Глобальные настройки досок ==========
-BOARDS = ['b', 'po', 'a', 'sex', 'vg']  # Идентификаторы досок
+BOARDS = ['b', 'po', 'a', 'sex', 'vg']  # Список всех досок
+
+BOT_TOKENS = {
+    'b': os.environ.get('BOT_TOKEN_B'),    # Токен основного бота /b/
+    'po': os.environ.get('BOT_TOKEN_PO'),  # Токен для /po/
+    'a': os.environ.get('BOT_TOKEN_A'),    # Токен для /a/
+    'sex': os.environ.get('BOT_TOKEN_SEX'), # Токен для /sex/
+    'vg': os.environ.get('BOT_TOKEN_VG'),   # Токен для /vg/
+}
 BOARD_INFO = {
     'b': {"name": "/b/", "description": "Бред", "username": "@dvach_chatbot"},
     'po': {"name": "/po/", "description": "Политика", "username": "@dvach_po_chatbot"},
@@ -3988,19 +3996,18 @@ async def supervisor():
         f.write(str(os.getpid()))
     
     try:
-        global is_shutting_down, bot, healthcheck_site
+        global is_shutting_down, bot, healthcheck_site, bots, dispatchers
         loop = asyncio.get_running_loop()
 
         restore_backup_on_start()
 
-        if hasattr(signal, 'SIGTERM'):
-            loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
-        if hasattr(signal, 'SIGINT'):
-            loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown()))
+        # Инициализация ботов и диспетчеров для всех досок
+        bots = {board: Bot(token=BOT_TOKENS[board]) for board in BOARDS}
+        dispatchers = {board: Dispatcher() for board in BOARDS}
 
         load_state()
         healthcheck_site = await start_healthcheck()
-        bot = Bot(token=BOT_TOKEN)
+        # bot = Bot(token=BOT_TOKEN)  # Убираем старую инициализацию одного бота
 
         global message_queue
         message_queue = asyncio.Queue(maxsize=5000)
@@ -4010,8 +4017,10 @@ async def supervisor():
 
         print("✅ Фоновые задачи запущены")
 
-        # Запускаем polling
-        await dp.start_polling(bot, skip_updates=True)
+        # Запускаем polling для каждого диспетчера
+        await asyncio.gather(
+            *[dp.start_polling(bots[board], skip_updates=True) for board, dp in dispatchers.items()]
+        )
 
     except Exception as e:
         print(f"🔥 Critical error: {e}")
