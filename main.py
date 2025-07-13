@@ -143,6 +143,7 @@ sent_media_groups = set()  # Для отслеживания уже отправ
 
 # Хранит информацию о текущих медиа-группах: media_group_id -> данные
 current_media_groups = {}
+media_group_timers = {}
 
 def suka_blyatify_text(text: str) -> str:
     if not text:
@@ -2573,7 +2574,7 @@ async def cmd_deanon(message: Message):
     deanon_text = (
         f"\nЭтого анона зовут: {name} {surname}\n"
         f"Возраст: {age}\n"
-        f"Город проживания: {city}\n"
+        f"Адрес проживания: {city}\n"
         f"Профессия: {profession}\n"
         f"Фетиш: {fetish}\n"
         f"IP-адрес: {ip}\n"
@@ -3249,104 +3250,62 @@ async def memory_cleaner():
 
 # ========== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ==========
 async def process_complete_media_group(media_group_id: str):
-    """Отправка собранного медиа-альбома без дублирования"""
     if media_group_id not in current_media_groups:
         return
-        
-    media_group = current_media_groups[media_group_id]
-    
-    if not media_group.get('media') or len(media_group['media']) == 0:
-        if media_group_id in current_media_groups:
-            del current_media_groups[media_group_id]
+    group = current_media_groups[media_group_id]
+    if not group['media']:
+        del current_media_groups[media_group_id]
         return
-
-    # Проверяем reply_to_post
-    if media_group.get('reply_to_post') and media_group['reply_to_post'] not in messages_storage:
-        media_group['reply_to_post'] = None
 
     # Помечаем как отправленную
-    if media_group_id in sent_media_groups:
-        return
     sent_media_groups.add(media_group_id)
-
-
-    post_num = media_group['post_num']
-    user_id = media_group['author_id']
-
-    # Формируем контент для сохранения
+    post_num = group['post_num']
+    user_id = group['author_id']
     content = {
         'type': 'media_group',
-        'header': media_group['header'],
-        'media': media_group['media'],
-        'caption': media_group.get('caption'),
-        'reply_to_post': media_group.get('reply_to_post')
+        'header': group['header'],
+        'media': group['media'],
+        'caption': group.get('caption'),
+        'reply_to_post': group.get('reply_to_post')
     }
-
-    # Сохраняем сообщение
     messages_storage[post_num] = {
         'author_id': user_id,
-        'timestamp': media_group['timestamp'],
+        'timestamp': group['timestamp'],
         'content': content,
-        'reply_to': media_group.get('reply_to_post')
+        'reply_to': group.get('reply_to_post')
     }
 
     # Отправляем автору
     try:
         builder = MediaGroupBuilder()
         reply_to_message_id = None
-
-        # Если это ответ, получаем message_id для reply
-        if media_group.get('reply_to_post'):
-            reply_map = post_to_messages.get(media_group['reply_to_post'], {})
+        if group.get('reply_to_post'):
+            reply_map = post_to_messages.get(group['reply_to_post'], {})
             reply_to_message_id = reply_map.get(user_id)
-
-        # Добавляем медиа с подписью только к первому элементу
-        for idx, media in enumerate(media_group['media']):
+        for idx, media in enumerate(group['media']):
             if not media.get('file_id'):
                 continue
-
             caption = None
             if idx == 0:
-                caption = f"<i>{media_group['header']}</i>"
-                if media_group.get('caption'):
-                    caption += f"\n\n{escape_html(media_group['caption'])}"
-
+                caption = f"<i>{group['header']}</i>"
+                if group.get('caption'):
+                    caption += f"\n\n{escape_html(group['caption'])}"
             if media['type'] == 'photo':
-                builder.add_photo(
-                    media=media['file_id'],
-                    caption=caption,
-                    parse_mode="HTML" if caption else None
-                )
+                builder.add_photo(media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
             elif media['type'] == 'video':
-                builder.add_video(
-                    media=media['file_id'],
-                    caption=caption,
-                    parse_mode="HTML" if caption else None
-                )
+                builder.add_video(media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
             elif media['type'] == 'document':
-                builder.add_document(
-                    media=media['file_id'],
-                    caption=caption,
-                    parse_mode="HTML" if caption else None
-                )
+                builder.add_document(media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
             elif media['type'] == 'audio':
-                builder.add_audio(
-                    media=media['file_id'],
-                    caption=caption,
-                    parse_mode="HTML" if caption else None
-                )
-
-        # Проверяем, что есть что отправлять
-        if not builder.build():  # Проверяем собранные медиа
+                builder.add_audio(media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
+        if not builder.build():
+            del current_media_groups[media_group_id]
             return
-
         sent_messages = await bot.send_media_group(
             chat_id=user_id,
             media=builder.build(),
             reply_to_message_id=reply_to_message_id
         )
-
-        # Сохраняем связь сообщения с постом
         if sent_messages:
             messages_storage[post_num]['author_message_id'] = sent_messages[0].message_id
             if post_num not in post_to_messages:
@@ -3354,22 +3313,20 @@ async def process_complete_media_group(media_group_id: str):
             post_to_messages[post_num][user_id] = sent_messages[0].message_id
             for msg in sent_messages:
                 message_to_post[(user_id, msg.message_id)] = post_num
-
     except Exception as e:
         print(f"Ошибка отправки медиа-альбома автору: {e}")
-        return
 
-    # Отправляем остальным пользователям через очередь ТОЛЬКО ОДИН РАЗ
+    # Отправляем остальным
     recipients = state['users_data']['active'] - {user_id}
     if recipients:
         await message_queue.put({
             'recipients': recipients,
             'content': content,
             'post_num': post_num,
-            'reply_info': post_to_messages.get(media_group['reply_to_post'], {}) if media_group.get('reply_to_post') else None
+            'reply_info': post_to_messages.get(group['reply_to_post'], {}) if group.get('reply_to_post') else None
         })
 
-    # Удаляем временные данные
+    # Чистим временную память
     if media_group_id in current_media_groups:
         del current_media_groups[media_group_id]
 
@@ -3464,51 +3421,24 @@ async def handle_voice(message: Message):
 
 @dp.message(F.media_group_id)
 async def handle_media_group_init(message: Message):
-    """Обработчик медиа-альбомов с защитой от дублирования"""
     user_id = message.from_user.id
 
+    # Проверка на бан и мут
     if user_id in state['users_data']['banned']:
         await message.delete()
         return
-
     if mutes.get(user_id) and mutes[user_id] > datetime.now(UTC):
         await message.delete()
         return
 
     media_group_id = message.media_group_id
-
-    # Добавляем проверку shadow_mute для медиа-групп
-    user_id = message.from_user.id
-    if user_id in shadow_mutes and shadow_mutes[user_id] > datetime.now(UTC):
-        await message.delete()
-        
-        # Имитируем отправку только автору
-        try:
-            header = f"Пост №{state['post_counter'] + 1}"
-            caption = message.caption or ""
-            
-            if caption:
-                full_caption = f"<i>{header}</i>\n\n{escape_html(caption)}"
-            else:
-                full_caption = f"<i>{header}</i>"
-                
-            await bot.send_photo(
-                user_id,
-                message.photo[-1].file_id,
-                caption=full_caption,
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            print(f"Ошибка фантомной отправки медиа: {e}")
-        
+    if not media_group_id:
         return
-    
-    
+
     # Проверяем reply_to_message для ответов
     reply_to_post = None
     if message.reply_to_message:
         reply_mid = message.reply_to_message.message_id
-        reply_to_post = None
         for (uid, mid), pnum in message_to_post.items():
             if mid == reply_mid:
                 reply_to_post = pnum
@@ -3516,13 +3446,11 @@ async def handle_media_group_init(message: Message):
         if reply_to_post and reply_to_post not in messages_storage:
             reply_to_post = None
 
-    media_group_id = message.media_group_id
-
+    # Инициализация группы, если не существует
     if media_group_id not in current_media_groups:
         header, post_num = format_header()
         caption = message.caption or ""
-        
-        # Применяем преобразования к подписи
+        # Преобразования режимов
         if slavaukraine_mode and caption:
             caption = ukrainian_transform(caption)
         elif suka_blyat_mode and caption:
@@ -3531,7 +3459,7 @@ async def handle_media_group_init(message: Message):
             caption = anime_transform(caption)
         elif zaputin_mode and caption:
             caption = zaputin_transform(caption)
-            
+
         current_media_groups[media_group_id] = {
             'post_num': post_num,
             'header': header,
@@ -3542,17 +3470,15 @@ async def handle_media_group_init(message: Message):
             'reply_to_post': reply_to_post,
             'processed_messages': set()
         }
-        # Запускаем отложенную обработку
-        asyncio.create_task(delayed_process_media_group(media_group_id))
 
     # Добавляем медиа в группу только если это новое сообщение
-    if message.message_id not in current_media_groups[media_group_id]['processed_messages']:
+    group = current_media_groups[media_group_id]
+    if message.message_id not in group['processed_messages']:
         media_data = {
             'type': message.content_type,
             'file_id': None,
             'message_id': message.message_id
         }
-
         if message.photo:
             media_data['file_id'] = message.photo[-1].file_id
         elif message.video:
@@ -3561,16 +3487,32 @@ async def handle_media_group_init(message: Message):
             media_data['file_id'] = message.document.file_id
         elif message.audio:
             media_data['file_id'] = message.audio.file_id
-
         if media_data['file_id']:
-            current_media_groups[media_group_id]['media'].append(media_data)
-            current_media_groups[media_group_id]['processed_messages'].add(message.message_id)
+            group['media'].append(media_data)
+            group['processed_messages'].add(message.message_id)
 
     await message.delete()
 
-    # Обрабатываем группу через 0.8 секунды
-    await asyncio.sleep(0.8)
-    await process_complete_media_group(media_group_id)
+    # --- Новый таймер для завершения группы ---
+    # Сбрасываем таймер если сообщение пришло в ту же группу
+    if media_group_id in media_group_timers:
+        media_group_timers[media_group_id].cancel()
+
+    # Запускаем новый таймер (например, 1.5 секунды)
+    media_group_timers[media_group_id] = asyncio.create_task(
+        complete_media_group_after_delay(media_group_id, delay=1.5)
+    )
+
+async def complete_media_group_after_delay(media_group_id, delay=1.5):
+    try:
+        await asyncio.sleep(delay)
+        await process_complete_media_group(media_group_id)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        # Очищаем таймер
+        if media_group_id in media_group_timers:
+            del media_group_timers[media_group_id]
 
 @dp.message()
 async def handle_message(message: Message):
