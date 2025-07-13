@@ -1105,14 +1105,14 @@ def format_header() -> Tuple[str, int]:
     elif rand_prefix < 0.033:
         prefix = "### Имбецил ### "
     elif rand_prefix < 0.035:
-        prefix = "### ЧМО ###"
+        prefix = "### ЧМО ### "
     elif rand_prefix < 0.037:
         prefix = "### ОНАНИСТ ### "
     elif rand_prefix < 0.040:
         prefix = "### ЧЕЧЕНЕЦ ### "
-    elif rand_prefix < 0.043:
+    elif rand_prefix < 0.042:
         prefix = "Томоко Куроки - "
-    elif rand_prefix < 0.045:
+    elif rand_prefix < 0.044:
         prefix = "### Аниме девочка ### "
 
     # Формируем итоговый заголовок
