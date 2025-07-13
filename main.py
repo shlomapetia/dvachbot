@@ -51,16 +51,7 @@ from help_text import HELP_TEXT
 from help_broadcaster import help_broadcaster
 
 # ========== Глобальные настройки досок ==========
-BOARDS = ['b', 'po', 'a', 'sex', 'vg']  # Список всех досок
-
-BOT_TOKENS = {
-    'b': os.environ.get('BOT_TOKEN'),    # Токен основного бота /b/
-    'po': os.environ.get('BOT_TOKEN_PO'),  # Токен для /po/
-    'a': os.environ.get('BOT_TOKEN_A'),    # Токен для /a/
-    'sex': os.environ.get('BOT_TOKEN_SEX'), # Токен для /sex/
-    'vg': os.environ.get('BOT_TOKEN_VG'),   # Токен для /vg/
-}
-
+BOARDS = ['b', 'po', 'a', 'sex', 'vg']  # Идентификаторы досок
 BOARD_INFO = {
     'b': {"name": "/b/", "description": "Бред", "username": "@dvach_chatbot"},
     'po': {"name": "/po/", "description": "Политика", "username": "@dvach_po_chatbot"},
@@ -197,20 +188,14 @@ async def start_healthcheck():
     app.router.add_get("/", healthcheck)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Пробуем IPv6, если доступно, иначе IPv4
+    site = web.TCPSite(runner, "0.0.0.0", port)
     try:
-        site = web.TCPSite(runner, "[::]", port)  # IPv6
-        print(f"🟢 Попытка запустить healthcheck сервер на [::]:{port} (IPv6)")
-        await site.start()
-        print(f"🟢 Healthcheck-сервер успешно запущен на [::]:{port}")
+        print(f"🟢 Попытка запустить healthcheck сервер на порту {port}")
+        await site.start()  # Попробуем запустить сервер
+        print(f"🟢 Healthcheck-сервер успешно запущен на порту {port}")
     except Exception as e:
-        print(f"Ошибка запуска на IPv6: {str(e)}")
-        # Пробуем IPv4 как fallback
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        print(f"🟢 Попытка запустить healthcheck сервер на 0.0.0.0:{port} (IPv4)")
-        await site.start()
-        print(f"🟢 Healthcheck-сервер успешно запущен на 0.0.0.0:{port}")
-    return site
+        print(f"Ошибка запуска healthcheck сервера: {str(e)}")
+        raise
 
 
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot-backup.git"
@@ -243,12 +228,14 @@ async def git_commit_and_push():
             return False
 
 def sync_git_operations(token: str) -> bool:
+    """Синхронные Git-операции"""
     try:
         work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot-backup.git"
 
         if not os.path.exists(os.path.join(work_dir, ".git")):
+            # Клонирование репозитория
             clone_cmd = ["git", "clone", repo_url, work_dir]
             result = subprocess.run(clone_cmd, capture_output=True, text=True)
             if result.returncode != 0:
@@ -256,6 +243,7 @@ def sync_git_operations(token: str) -> bool:
                 return False
             print("✅ Репозиторий клонирован")
         else:
+            # Обновление репозитория
             pull_cmd = ["git", "-C", work_dir, "pull"]
             result = subprocess.run(pull_cmd, capture_output=True, text=True)
             if result.returncode != 0:
@@ -264,6 +252,7 @@ def sync_git_operations(token: str) -> bool:
         # Копирование файлов
         files_to_copy = ["state.json", "reply_cache.json"]
         copied_files = []
+
         for fname in files_to_copy:
             src = os.path.join(os.getcwd(), fname)
             if os.path.exists(src):
@@ -273,13 +262,6 @@ def sync_git_operations(token: str) -> bool:
         if not copied_files:
             print("⚠️ Нет файлов для бэкапа")
             return False
-
-        # Проверяем, есть ли изменения
-        status_cmd = ["git", "-C", work_dir, "status", "--porcelain"]
-        result = subprocess.run(status_cmd, capture_output=True, text=True)
-        if not result.stdout:
-            print("ℹ️ Нет изменений для коммита")
-            return True  # Возвращаем True, так как это не ошибка, просто нет изменений
 
         # Git операции
         subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True)
@@ -3996,12 +3978,7 @@ async def start_background_tasks():
     return tasks 
 
 async def supervisor():
-    # Проверка токенов
-    for board, token in BOT_TOKENS.items():
-        if token is None:
-            print(f"⛔ Ошибка: Токен для доски {board} не задан! Проверьте переменную окружения в Railway.")
-            sys.exit(1)  # Прерываем выполнение
-
+    # Блокировка от множественного запуска
     lock_file = "bot.lock"
     if os.path.exists(lock_file):
         print("⛔ Bot already running! Exiting...")
@@ -4011,60 +3988,30 @@ async def supervisor():
         f.write(str(os.getpid()))
     
     try:
-        global is_shutting_down, healthcheck_site, bots, dispatchers, bot_to_board
+        global is_shutting_down, bot, healthcheck_site
         loop = asyncio.get_running_loop()
 
         restore_backup_on_start()
 
-        # Инициализация ботов и диспетчеров
-        print("✅ Инициализация ботов...")
-        bots = {board: Bot(token=BOT_TOKENS[board]) for board in BOARDS}
-        dispatchers = {board: Dispatcher() for board in BOARDS}
-        bot_to_board = {bots[board]: board for board in BOARDS}
-        print("✅ Боты инициализированы:", list(bots.keys()))
-
-        # Регистрация обработчиков
-        for board in BOARDS:
-            dp = dispatchers[board]
-            dp.message.register(cmd_start, Command("start"))
-            dp.message.register(cmd_help, Command("help"))
-            dp.message.register(cmd_stats, Command("stats"))
-            dp.message.register(cmd_face, Command("face"))
-            dp.message.register(cmd_roll, Command("roll"))
-            dp.message.register(cmd_invite, Command("invite"))
-            dp.message.register(cmd_deanon, Command("deanon"))
-            dp.message.register(cmd_zaputin, Command("zaputin"))
-            dp.message.register(cmd_slavaukraine, Command("slavaukraine"))
-            dp.message.register(cmd_suka_blyat, Command("suka_blyat"))
-            dp.message.register(cmd_anime, Command("anime"))
-            dp.message.register(cmd_admin, Command("admin"))
-            dp.message.register(cmd_get_id, Command("id"))
-            dp.message.register(cmd_ban, Command("ban"))
-            dp.message.register(cmd_mute, Command("mute"))
-            dp.message.register(cmd_wipe, Command("wipe"))
-            dp.message.register(cmd_unmute, Command("unmute"))
-            dp.message.register(cmd_unban, Command("unban"))
-            dp.message.register(cmd_del, Command("del"))
-            dp.message.register(handle_message)
-            dp.callback_query.register(admin_save, F.data == "save")
-            dp.callback_query.register(admin_stats, F.data == "stats")
-            dp.callback_query.register(admin_spammers, F.data == "spammers")
-            dp.callback_query.register(admin_banned, F.data == "banned")
+        if hasattr(signal, 'SIGTERM'):
+            loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
+        if hasattr(signal, 'SIGINT'):
+            loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown()))
 
         load_state()
-        healthcheck_site = await start_healthcheck()  # Запускаем healthcheck-сервер
+        healthcheck_site = await start_healthcheck()
+        bot = Bot(token=BOT_TOKEN)
 
-        print("✅ Боты инициализированы:", list(bots.keys()))
-        
+        global message_queue
+        message_queue = asyncio.Queue(maxsize=5000)
+
         # Запуск фоновых задач
         tasks = await start_background_tasks()
+
         print("✅ Фоновые задачи запущены")
 
         # Запускаем polling
-        print("✅ Запуск polling...")
-        await asyncio.gather(
-            *[dispatchers[board].start_polling(bots[board], skip_updates=True) for board in BOARDS]
-        )
+        await dp.start_polling(bot, skip_updates=True)
 
     except Exception as e:
         print(f"🔥 Critical error: {e}")
