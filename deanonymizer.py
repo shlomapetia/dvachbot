@@ -142,89 +142,69 @@ DEANON_DETAILS = [
 ]
 
 
+
 def generate_deanon_info() -> Tuple[str, str, str, str, str, str]:
-    """Генерирует фейковые данные для деанона"""
-    # Генерация адреса
+    """Генерирует фейковые данные для деанона (без изменений)"""
     city = random.choice(DEANON_CITIES)
     street = random.choice(DEANON_STREETS)
     house = random.randint(1, 200)
     address = f"{city}, ул. {street}, д. {house}"
-    
-    # 70% шанс добавить квартиру
     if random.random() < 0.7:
         flat = random.randint(1, 204)
         address += f", кв. {flat}"
     
-    # Генерация деталей (1, 2 или 3 факта)
     details = [random.choice(DEANON_DETAILS)]
-    
-    # 40% шанс на второй факт
-    if random.random() < 0.4:
-        details.append(random.choice(DEANON_DETAILS))
-    
-    # 10% шанс на третий факт
-    if random.random() < 0.1:
-        details.append(random.choice(DEANON_DETAILS))
-    
+    if random.random() < 0.4: details.append(random.choice(DEANON_DETAILS))
+    if random.random() < 0.1: details.append(random.choice(DEANON_DETAILS))
     details_str = ", ".join(details)
 
     return (
-        random.choice(DEANON_NAMES),
-        random.choice(DEANON_SURNAMES),
-        address,
-        random.choice(DEANON_PROFESSIONS),
-        random.choice(DEANON_FETISHES),
-        details_str
+        random.choice(DEANON_NAMES), random.choice(DEANON_SURNAMES),
+        address, random.choice(DEANON_PROFESSIONS),
+        random.choice(DEANON_FETISHES), details_str
     )
 
 async def process_deanon_command(
     message: Message,
-    message_to_post: dict,
-    messages_storage: dict,
-    state: dict,
-    message_queue: asyncio.Queue
+    board_id: str,
+    board_message_to_post: dict,
+    global_messages_storage: dict,
+    board_state: dict,
+    board_post_to_messages: dict,
+    board_queue: asyncio.Queue,
+    format_header_func
 ) -> None:
-    """Обрабатывает команду /deanon"""
-    # Проверяем, что команда вызвана ответом на сообщение
-    if not message.reply_to_message:
-        await message.answer("⚠️ Ответь на сообщение для деанона!")
-        await message.delete()
-        return
+    """Обрабатывает команду /deanon, принимая все зависимости как аргументы."""
 
-    # Определяем цель деанона
     reply_key = (message.from_user.id, message.reply_to_message.message_id)
-    target_post = message_to_post.get(reply_key)
+    target_post = board_message_to_post.get(reply_key)
 
-    if not target_post or target_post not in messages_storage:
-        await message.answer("🚫 Не удалось найти пост для деанона!")
+    if not target_post or target_post not in global_messages_storage:
+        await message.answer("🚫 Не удалось найти пост для деанона на этой доске!")
         await message.delete()
         return
 
-    target_id = messages_storage[target_post].get("author_id")
-    
-    # Генерируем фейковые данные
-    name, surname, city, profession, fetish, detail = generate_deanon_info()
+    name, surname, address, profession, fetish, detail = generate_deanon_info()
     ip = f"{random.randint(10,250)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
     age = random.randint(18, 45)
     
-    # Формируем текст деанона
     deanon_text = (
         f"\nЭтого анона зовут: {name} {surname}\n"
         f"Возраст: {age}\n"
-        f"Город проживания: {city}\n"
+        f"Адрес проживания: {address}\n"
         f"Профессия: {profession}\n"
         f"Фетиш: {fetish}\n"
         f"IP-адрес: {ip}\n"
         f"Дополнительная информация о нём: {detail}"
     )
 
-    # Отправляем как ответ на сообщение
-    header = "### ДЕАНОН ###"
-    state['post_counter'] += 1
-    pnum = state['post_counter']
+    header, pnum = format_header_func(board_id)
+    
+    # Заменяем state['post_counter'] на вызов функции
+    # В данном случае, format_header_func уже инкрементировала глобальный счетчик
 
-    await message_queue.put({
-        "recipients": state['users_data']['active'],
+    await board_queue.put({
+        "recipients": board_state['users_data']['active'],
         "content": {
             "type": "text",
             "header": header,
@@ -232,7 +212,7 @@ async def process_deanon_command(
             "reply_to_post": target_post
         },
         "post_num": pnum,
-        "reply_info": post_to_messages.get(target_post, {})
+        "reply_info": board_post_to_messages.get(target_post, {})
     })
 
     await message.delete()
