@@ -3250,6 +3250,9 @@ async def memory_cleaner():
 
 # ========== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ==========
 async def process_complete_media_group(media_group_id: str):
+    # Защита от повторной отправки!
+    if media_group_id in sent_media_groups:
+        return
     if media_group_id not in current_media_groups:
         return
     group = current_media_groups[media_group_id]
@@ -3257,7 +3260,7 @@ async def process_complete_media_group(media_group_id: str):
         del current_media_groups[media_group_id]
         return
 
-    # Помечаем как отправленную
+    # Помечаем как отправленную (это важно, чтобы дубли не ушли!)
     sent_media_groups.add(media_group_id)
     post_num = group['post_num']
     user_id = group['author_id']
@@ -3435,6 +3438,11 @@ async def handle_media_group_init(message: Message):
     if not media_group_id:
         return
 
+    # Проверка: если группа уже отправлена - ничего не делаем
+    if media_group_id in sent_media_groups:
+        await message.delete()
+        return
+
     # Проверяем reply_to_message для ответов
     reply_to_post = None
     if message.reply_to_message:
@@ -3494,18 +3502,22 @@ async def handle_media_group_init(message: Message):
     await message.delete()
 
     # --- Новый таймер для завершения группы ---
-    # Сбрасываем таймер если сообщение пришло в ту же группу
+    # Сбрасываем таймер если он уже есть
     if media_group_id in media_group_timers:
         media_group_timers[media_group_id].cancel()
 
-    # Запускаем новый таймер (например, 1.5 секунды)
-    media_group_timers[media_group_id] = asyncio.create_task(
-        complete_media_group_after_delay(media_group_id, delay=1.5)
-    )
+    # Запускаем новый таймер (например, 1.5 секунды) ТОЛЬКО если группа еще не отправлена!
+    if media_group_id not in sent_media_groups:
+        media_group_timers[media_group_id] = asyncio.create_task(
+            complete_media_group_after_delay(media_group_id, delay=1.5)
+        )
 
 async def complete_media_group_after_delay(media_group_id, delay=1.5):
     try:
         await asyncio.sleep(delay)
+        # Перед отправкой снова проверяем, не отправили ли уже эту группу
+        if media_group_id in sent_media_groups:
+            return
         await process_complete_media_group(media_group_id)
     except asyncio.CancelledError:
         pass
@@ -3513,7 +3525,7 @@ async def complete_media_group_after_delay(media_group_id, delay=1.5):
         # Очищаем таймер
         if media_group_id in media_group_timers:
             del media_group_timers[media_group_id]
-
+            
 @dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
