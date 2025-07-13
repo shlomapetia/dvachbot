@@ -197,14 +197,20 @@ async def start_healthcheck():
     app.router.add_get("/", healthcheck)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    # Пробуем IPv6, если доступно, иначе IPv4
     try:
-        print(f"🟢 Попытка запустить healthcheck сервер на порту {port}")
-        await site.start()  # Попробуем запустить сервер
-        print(f"🟢 Healthcheck-сервер успешно запущен на порту {port}")
+        site = web.TCPSite(runner, "[::]", port)  # IPv6
+        print(f"🟢 Попытка запустить healthcheck сервер на [::]:{port} (IPv6)")
+        await site.start()
+        print(f"🟢 Healthcheck-сервер успешно запущен на [::]:{port}")
     except Exception as e:
-        print(f"Ошибка запуска healthcheck сервера: {str(e)}")
-        raise
+        print(f"Ошибка запуска на IPv6: {str(e)}")
+        # Пробуем IPv4 как fallback
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        print(f"🟢 Попытка запустить healthcheck сервер на 0.0.0.0:{port} (IPv4)")
+        await site.start()
+        print(f"🟢 Healthcheck-сервер успешно запущен на 0.0.0.0:{port}")
+    return site
 
 
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot-backup.git"
@@ -4043,7 +4049,7 @@ async def supervisor():
             dp.callback_query.register(admin_banned, F.data == "banned")
 
         load_state()
-        healthcheck_site = None  # Пока отключаем healthcheck, так как он не настроен
+        healthcheck_site = await start_healthcheck()  # Запускаем healthcheck-сервер
 
         print("✅ Боты инициализированы:", list(bots.keys()))
         
