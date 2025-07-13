@@ -8,7 +8,6 @@ import time
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from japanese_translator import anime_transform
 import re 
 import glob
 import random
@@ -42,7 +41,7 @@ from aiogram.types import (
 import subprocess
 import signal
 from datetime import datetime, timedelta, timezone, UTC
-from japanese_translator import anime_transform
+from japanese_translator import anime_transform, get_random_anime_image
 from ukrainian_mode import ukrainian_transform, UKRAINIAN_PHRASES
 import deanonymizer 
 from conan import conan_roaster, conan_phrase
@@ -1570,7 +1569,30 @@ async def send_message_to_users(
                     reply_to_message_id=reply_to,
                     parse_mode="HTML",
                 )
-
+            elif ct == "photo" and content.get('image_url'):
+                # Специальная обработка для аниме-картинок по URL
+                caption = f"<i>{header_text}</i>"
+                if content.get('caption'):
+                    caption += f"\n\n{escape_html(content['caption'])}"
+                
+                if reply_to_post:
+                    if uid == original_author:
+                        reply_text = f">>{reply_to_post} (You)\n"
+                    else:
+                        reply_text = f">>{reply_to_post}\n"
+                    caption = f"{reply_text}{caption}"
+                
+                # Проверяем длину подписи
+                if len(caption) > 1024:
+                    caption = caption[:1021] + "..."
+                
+                return await bot.send_photo(
+                    uid,
+                    content['image_url'],
+                    caption=caption,
+                    reply_to_message_id=reply_to,
+                    parse_mode="HTML"
+                )
             elif ct == "video":
                 if len(full_text) > 1024:
                     full_text = full_text[:1021] + "..."
@@ -3697,7 +3719,7 @@ async def handle_message(message: Message):
                 text_content = message.html_text
             else:
                 text_content = escape_html(message.text)
-
+        
             # Применяем преобразования (сохраняя все существующие режимы)
             if suka_blyat_mode:
                 text_content = suka_blyatify_text(text_content)
@@ -3706,9 +3728,27 @@ async def handle_message(message: Message):
             if anime_mode:
                 text_content = anime_transform(text_content)
             if zaputin_mode:
-                text_content = zaputin_transform(text_content)    
-
-            content['text'] = text_content
+                text_content = zaputin_transform(text_content)
+        
+            # Режим аниме: с вероятностью 43% заменяем текст на картинку с подписью
+            if anime_mode and random.random() < 0.43:
+                # Проверяем длину текста для подписи (ограничение Telegram)
+                full_caption = f"<i>{header}</i>\n\n{text_content}"
+                if len(full_caption) <= 1024:  # Максимальная длина подписи
+                    content['type'] = 'photo'
+                    content['caption'] = text_content
+                    content['image_url'] = await get_random_anime_image()
+                    
+                    # Если не удалось получить картинку, возвращаемся к тексту
+                    if not content['image_url']:
+                        content['type'] = 'text'
+                        content['text'] = text_content
+                else:
+                    content['type'] = 'text'
+                    content['text'] = text_content
+            else:
+                content['type'] = 'text'
+                content['text'] = text_content
 
         elif content_type == 'photo':
             content['file_id'] = message.photo[-1].file_id
