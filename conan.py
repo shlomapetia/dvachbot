@@ -87,7 +87,6 @@ TEMPLATES = [
     "В палату вернись, ебаный {ins}", "Я король мужских членов"
 ]
 
-
 def conan_phrase(username: str = "Приятель") -> str:
     tpl = secrets.choice(TEMPLATES)
     return tpl.format(
@@ -100,64 +99,70 @@ def conan_phrase(username: str = "Приятель") -> str:
         catch=secrets.choice(CATCHPHRASES),
     )
 
-async def conan_roaster(
-    format_header_func,   # Функция для форматирования заголовка
-    boards_data,          # Словарь со всеми досками
-    global_messages_storage, # Единое хранилище постов
-    board_message_to_post_dict, # Словарь со словарями message_to_post
-    board_post_to_messages_dict, # Словарь со словарями post_to_messages
-    queues,               # Словарь с очередями
-    ):
-    """Каждые 5-18 минут Конан отвечает на случайный пост на случайной доске."""
+async def conan_roaster(state, messages_storage, post_to_messages, message_to_post, message_queue, format_header):
+    """Каждые 5-18 минут Конан отвечает рандомному посту."""
     while True:
         try:
-            await asyncio.sleep(random.randint(300, 1080)) # 5-18 минут
+            await asyncio.sleep(secrets.randbelow(3600) + 1600)  # 5-15 минут
 
-            # Находим доски, где есть активные пользователи и посты
-            eligible_boards = [
-                b_id for b_id, data in boards_data.items()
-                if data['users_data']['active'] and board_message_to_post_dict.get(b_id)
+            # Проверяем что есть посты и активные пользователи
+            if not messages_storage or not state["users_data"]["active"]:
+                continue
+
+            # Выбираем случайный пост из последних 50 (только те, что есть в post_to_messages)
+            valid_posts = [
+                p for p in messages_storage.keys() if p in post_to_messages
             ]
-            if not eligible_boards:
+            if not valid_posts:
                 continue
 
-            target_board_id = random.choice(eligible_boards)
-            
-            board_message_to_post = board_message_to_post_dict[target_board_id]
-            if not board_message_to_post:
+            post_num = secrets.choice(valid_posts[-50:] if len(valid_posts) > 50 else valid_posts)
+            original_author = messages_storage.get(post_num, {}).get('author_id')
+
+            # Проверяем что есть кому отвечать
+            reply_map = post_to_messages.get(post_num, {})
+            if not reply_map:
                 continue
 
-            random_reply_key = random.choice(list(board_message_to_post.keys()))
-            target_post_num = board_message_to_post.get(random_reply_key)
-            
-            if not target_post_num or target_post_num not in global_messages_storage:
-                continue
-
+            # Генерируем фразу
             phrase = conan_phrase()
-            header, new_pnum = format_header_func(target_board_id)
-            
-            global_messages_storage[new_pnum] = {
-                'board_id': target_board_id,
-                'author_id': 0,
+
+            # Формируем текст ответа без (You) - оно добавится автоматически при отправке
+            reply_text = f">>{post_num}\n{phrase}"
+
+            header, new_pnum = format_header()
+
+            # Сохраняем метаданные
+            messages_storage[new_pnum] = {
+                'author_id': 0,  # 0 = системное сообщение
                 'timestamp': datetime.now(UTC),
-                'content': {'type': 'text', 'header': header, 'text': phrase},
-                'reply_to': target_post_num
+                'content': {
+                    'type': 'text',
+                    'header': header,
+                    'text': phrase
+                },
+                'reply_to': post_num
             }
 
-            await queues[target_board_id].put({
-                "recipients": boards_data[target_board_id]['users_data']['active'],
-                "content": {
-                    "type": "text",
-                    "header": header,
-                    "text": phrase,
-                    "reply_to_post": target_post_num
-                },
+            # Формируем контент для отправки
+            content = {
+                "type": "text",
+                "header": header,
+                "text": phrase,
+                "reply_to_post": post_num
+            }
+
+            # Отправляем всем
+            await message_queue.put({
+                "recipients": state["users_data"]["active"],
+                "content": content,
                 "post_num": new_pnum,
-                "reply_info": board_post_to_messages_dict[target_board_id].get(target_post_num, {})
+                "reply_info": reply_map,
+                "original_author": original_author  # Передаем ID автора для корректной обработки (You)
             })
 
-            print(f"💪 Конан ответил на пост #{target_post_num} на доске /{target_board_id}/")
+            print(f"Conan reply to #{post_num}: {phrase[:50]}...")
 
         except Exception as e:
-            print(f"Ошибка в Conan_roaster: {e}")
-            await asyncio.sleep(60)
+            print(f"Conan error: {e}")
+            await asyncio.sleep(5)
