@@ -374,7 +374,7 @@ async def auto_backup():
     """Автоматическое сохранение каждые 1 ч"""
     while True:
         try:
-            await asyncio.sleep(14400)  # 4 ч
+            await asyncio.sleep(3600)  # 1 ч
 
             if is_shutting_down:
                 break
@@ -471,7 +471,7 @@ ADMINS = {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
 SPAM_LIMIT = 14
 SPAM_WINDOW = 15
 STATE_FILE = 'state.json'
-SAVE_INTERVAL = 14400  # секунд
+SAVE_INTERVAL = 3600  # секунд
 STICKER_WINDOW = 10  # секунд
 STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
@@ -912,7 +912,7 @@ async def auto_save_state():
     """Автоматическое сохранение состояния каждые 1ч"""
     while True:
         try:
-            await asyncio.sleep(14400)
+            await asyncio.sleep(3600)
 
             if is_shutting_down:
                 break
