@@ -4003,6 +4003,12 @@ async def supervisor():
         restore_backup_on_start()
 
         # Инициализация ботов и диспетчеров для всех досок
+        for board, token in BOT_TOKENS.items():
+            if token is None:
+                print(f"Ошибка: Токен для доски {board} не задан!")
+            else:
+                print(f"Токен для {board}: {token[:5]}...")  # Первые 5 символов токена
+                
         bots = {board: Bot(token=BOT_TOKENS[board]) for board in BOARDS}
         dispatchers = {board: Dispatcher() for board in BOARDS}
         bot_to_board = {bots[board]: board for board in BOARDS}  # Связь бота с доской
