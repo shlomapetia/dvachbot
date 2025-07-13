@@ -1,6 +1,9 @@
 # japanese_translator.py
 import random
 import re
+import aiohttp
+from aiohttp import ClientTimeout
+
 
 # Расширенные словари для транслитерации (исправлены)
 HIRAGANA_MAP = {
@@ -374,3 +377,17 @@ def anime_transform(text):
         result += " " + random.choice(END_PHRASES)
         
     return result
+
+async def get_random_anime_image():
+    """Получает URL случайной аниме-картинки с API"""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
+            async with session.get("https://api.nekosapi.com/v4/images/random?limit=1") as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get('url')  # Из документации API
+                else:
+                    print(f"Ошибка API: {response.status}")
+    except Exception as e:
+        print(f"Ошибка при получении аниме-картинки: {e}")
+    return None
