@@ -4045,6 +4045,8 @@ async def supervisor():
         load_state()
         healthcheck_site = None  # Пока отключаем healthcheck, так как он не настроен
 
+        print("✅ Боты инициализированы:", list(bots.keys()))
+        
         # Запуск фоновых задач
         tasks = await start_background_tasks()
         print("✅ Фоновые задачи запущены")
