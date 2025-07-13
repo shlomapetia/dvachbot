@@ -3730,8 +3730,8 @@ async def handle_message(message: Message):
             if zaputin_mode:
                 text_content = zaputin_transform(text_content)
         
-            # Режим аниме: с вероятностью 43% заменяем текст на картинку с подписью
-            if anime_mode and random.random() < 0.43:
+            # Режим аниме: с вероятностью 41% заменяем текст на картинку с подписью
+            if anime_mode and random.random() < 0.41:
                 # Проверяем длину текста для подписи (ограничение Telegram)
                 full_caption = f"<i>{header}</i>\n\n{text_content}"
                 if len(full_caption) <= 1024:  # Максимальная длина подписи
