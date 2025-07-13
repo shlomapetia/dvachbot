@@ -385,7 +385,11 @@ async def get_random_anime_image():
             async with session.get("https://api.nekosapi.com/v4/images/random?limit=1") as response:
                 if response.status == 200:
                     data = await response.json()
-                    return data.get('url')  # Из документации API
+                    # Типичный ответ — список объектов
+                    if isinstance(data, list) and len(data) > 0 and 'url' in data[0]:
+                        return data[0]['url']
+                    else:
+                        print("⚠️ Некорректный ответ от API nekosapi:", data)
                 else:
                     print(f"Ошибка API: {response.status}")
     except Exception as e:
