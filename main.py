@@ -3987,7 +3987,12 @@ async def start_background_tasks():
     return tasks 
 
 async def supervisor():
-    # Блокировка от множественного запуска
+    # Проверка токенов
+    for board, token in BOT_TOKENS.items():
+        if token is None:
+            print(f"⛔ Ошибка: Токен для доски {board} не задан! Проверьте переменную окружения в Railway.")
+            sys.exit(1)  # Прерываем выполнение
+
     lock_file = "bot.lock"
     if os.path.exists(lock_file):
         print("⛔ Bot already running! Exiting...")
@@ -4002,18 +4007,14 @@ async def supervisor():
 
         restore_backup_on_start()
 
-        # Инициализация ботов и диспетчеров для всех досок
-        for board, token in BOT_TOKENS.items():
-            if token is None:
-                print(f"Ошибка: Токен для доски {board} не задан!")
-            else:
-                print(f"Токен для {board}: {token[:5]}...")  # Первые 5 символов токена
-                
+        # Инициализация ботов и диспетчеров
+        print("✅ Инициализация ботов...")
         bots = {board: Bot(token=BOT_TOKENS[board]) for board in BOARDS}
         dispatchers = {board: Dispatcher() for board in BOARDS}
-        bot_to_board = {bots[board]: board for board in BOARDS}  # Связь бота с доской
+        bot_to_board = {bots[board]: board for board in BOARDS}
+        print("✅ Боты инициализированы:", list(bots.keys()))
 
-        # Регистрация обработчиков для каждого диспетчера
+        # Регистрация обработчиков
         for board in BOARDS:
             dp = dispatchers[board]
             dp.message.register(cmd_start, Command("start"))
@@ -4035,21 +4036,21 @@ async def supervisor():
             dp.message.register(cmd_unmute, Command("unmute"))
             dp.message.register(cmd_unban, Command("unban"))
             dp.message.register(cmd_del, Command("del"))
-            dp.message.register(handle_message)  # Обработчик всех сообщений
+            dp.message.register(handle_message)
             dp.callback_query.register(admin_save, F.data == "save")
             dp.callback_query.register(admin_stats, F.data == "stats")
             dp.callback_query.register(admin_spammers, F.data == "spammers")
             dp.callback_query.register(admin_banned, F.data == "banned")
 
         load_state()
-        healthcheck_site = await start_healthcheck()
+        healthcheck_site = None  # Пока отключаем healthcheck, так как он не настроен
 
         # Запуск фоновых задач
         tasks = await start_background_tasks()
-
         print("✅ Фоновые задачи запущены")
 
-        # Запускаем polling для каждого диспетчера
+        # Запускаем polling
+        print("✅ Запуск polling...")
         await asyncio.gather(
             *[dispatchers[board].start_polling(bots[board], skip_updates=True) for board in BOARDS]
         )
