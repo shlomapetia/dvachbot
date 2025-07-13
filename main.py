@@ -81,6 +81,7 @@ MODE_COOLDOWN = 3600  # 1 час в секундах
 # для проверки одинаковых / коротких сообщений
 last_texts: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=5))
 
+shadow_mutes: dict[int, datetime] = {}  # user_id -> datetime конца тихого мута
 # хранит последние 5 Message-объектов пользователя
 # Вместо defaultdict используем обычный dict с ручной инициализацией
 last_user_msgs = {}
@@ -684,6 +685,7 @@ def save_reply_cache():
         return False
 
 def load_state():
+    global message_to_post, post_to_messages
     if not os.path.exists('state.json'):
         return
     with open('state.json', 'r', encoding='utf-8') as f:
@@ -715,6 +717,7 @@ def load_archived_post(post_num):
     return None
 
 def load_reply_cache():
+    global message_to_post, post_to_messages
     """Читаем reply_cache.json, восстанавливаем словари"""
     if not os.path.exists(REPLY_FILE):
         return
@@ -1118,57 +1121,53 @@ def format_header() -> Tuple[str, int]:
 
 # ========== ФУНКЦИЯ УДАЛЕНИЯ ПОСТОВ ==========
 async def delete_user_posts(user_id: int, time_period_minutes: int) -> int:
-    """Удаляет все посты пользователя за указанный период времени (в минутах)"""
+    """Удаляет ВСЕ сообщения пользователя за период"""
     try:
         time_threshold = datetime.now(UTC) - timedelta(minutes=time_period_minutes)
         posts_to_delete = []
-        deleted_messages = 0  # Счётчик удалённых сообщений
+        deleted_messages = 0
 
-        # Находим посты пользователя за указанный период
+        # Находим посты за период
         for post_num, post_data in list(messages_storage.items()):
+            post_time = post_data.get('timestamp')
+            if not post_time: 
+                continue
+                
             if (post_data.get('author_id') == user_id and 
-                post_data.get('timestamp', datetime.now(UTC)) >= time_threshold):
+                post_time >= time_threshold):
                 posts_to_delete.append(post_num)
 
+        # Собираем ВСЕ сообщения для удаления
+        messages_to_delete = []
         for post_num in posts_to_delete:
-            # Удаляем у всех получателей
-            for uid, mid in post_to_messages.get(post_num, {}).items():
-                try:
-                    await bot.delete_message(uid, mid)
-                    deleted_messages += 1
-                except TelegramBadRequest as e:
-                    if "message to delete not found" not in str(e):
-                        print(f"Ошибка удаления сообщения {mid} у пользователя {uid}: {e}")
-                except Exception as e:
-                    print(f"Ошибка удаления сообщения {mid} у пользователя {uid}: {e}")
+            if post_num in post_to_messages:
+                for uid, mid in post_to_messages[post_num].items():
+                    messages_to_delete.append((uid, mid))
 
-            # Удаляем у автора
-            author_mid = messages_storage.get(post_num, {}).get("author_message_id")
-            if author_mid:
-                try:
-                    await bot.delete_message(user_id, author_mid)
-                    deleted_messages += 1
-                except TelegramBadRequest as e:
-                    if "message to delete not found" not in str(e):
-                        print(f"Ошибка удаления сообщения у автора {user_id}: {e}")
-                except Exception as e:
-                    print(f"Ошибка удаления сообщения у автора {user_id}: {e}")
+        # Удаляем каждое сообщение
+        for (uid, mid) in messages_to_delete:
+            try:
+                await bot.delete_message(uid, mid)
+                deleted_messages += 1
+            except TelegramBadRequest as e:
+                if "message to delete not found" not in str(e):
+                    print(f"Ошибка удаления {mid} у {uid}: {e}")
+            except Exception as e:
+                print(f"Ошибка удаления {mid} у {uid}: {e}")
 
-            # Удаляем из хранилищ
+        # Удаляем записи из хранилищ
+        for post_num in posts_to_delete:
             post_to_messages.pop(post_num, None)
             messages_storage.pop(post_num, None)
+            # Удаляем из message_to_post
+            global message_to_post
+            message_to_post = {k: v for k, v in message_to_post.items() if v != post_num}
 
-        # Чистим message_to_post
-        global message_to_post
-        message_to_post = {
-            k: v for k, v in message_to_post.items() 
-            if v not in posts_to_delete
-        }
-
-        return deleted_messages  # Возвращаем количество удалённых сообщений
+        return deleted_messages
     except Exception as e:
         print(f"Ошибка в delete_user_posts: {e}")
         return 0
+
 
 async def process_media_group_message(message: Message, media_group_id: str):
     """Обработка отдельного сообщения в медиа-группе"""
@@ -1583,8 +1582,10 @@ async def send_message_to_users(
                 )
 
             elif ct == "media_group":
+                if not content.get('media') or len(content['media']) == 0:
+                    return None
+                    
                 builder = MediaGroupBuilder()
-
                 for idx, media in enumerate(content['media']):
                     media_caption = None
                     if idx == 0:
@@ -2356,6 +2357,93 @@ async def cmd_stats(message: types.Message):
 
     await message.delete()
 
+@dp.message(Command("shadowmute"))
+async def cmd_shadowmute(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        await message.delete()
+        return
+
+    # Упрощенная логика получения target_id
+    target_id = None
+    if message.reply_to_message:
+        target_id = get_author_id_by_reply(message)
+    
+    if not target_id and command.args:
+        try:
+            target_id = int(command.args.split()[0])
+        except ValueError:
+            pass
+
+    if not target_id:
+        await message.answer("❌ Не удалось определить пользователя")
+        await message.delete()
+        return
+
+    # Установка времени мута
+    duration_str = command.args.split()[1] if command.args and len(command.args.split()) > 1 else "24h"
+    try:
+        if 'd' in duration_str:
+            days = int(duration_str.split('d')[0])
+            total_seconds = days * 86400
+        elif 'h' in duration_str:
+            hours = int(duration_str.split('h')[0])
+            total_seconds = hours * 3600
+        elif 'm' in duration_str:
+            minutes = int(duration_str.split('m')[0])
+            total_seconds = minutes * 60
+        else:
+            total_seconds = 86400  # 24 часа по умолчанию
+    except:
+        total_seconds = 86400
+
+    shadow_mutes[target_id] = datetime.now(UTC) + timedelta(seconds=total_seconds)
+    
+    # Форматирование времени для ответа
+    if total_seconds < 60:
+        time_str = f"{total_seconds} сек"
+    elif total_seconds < 3600:
+        time_str = f"{total_seconds // 60} мин"
+    elif total_seconds < 86400:
+        hours = total_seconds // 3600
+        time_str = f"{hours} час"
+    else:
+        days = total_seconds // 86400
+        time_str = f"{days} дней"
+
+    await message.answer(
+        f"👻 Тихо замучен пользователь {target_id} на {time_str}",
+        parse_mode="HTML"
+    )
+    await message.delete()
+
+
+# ========== КОМАНДА /UNSHADOWMUTE ==========
+@dp.message(Command("unshadowmute"))
+async def cmd_unshadowmute(message: Message):
+    """Снятие тихого мута"""
+    if not is_admin(message.from_user.id):
+        await message.delete()
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: /unshadowmute <user_id>")
+        await message.delete()
+        return
+
+    try:
+        user_id = int(parts[1])
+        if user_id in shadow_mutes:
+            del shadow_mutes[user_id]
+            await message.answer(f"👻 Пользователь {user_id} тихо размучен")
+        else:
+            await message.answer(f"ℹ️ Пользователь {user_id} не в shadow-муте")
+    except ValueError:
+        await message.answer("Неверный ID пользователя")
+    
+    await message.delete()
+
+
 @dp.message(Command("anime"))
 async def cmd_anime(message: types.Message):
     global anime_mode, last_mode_activation, zaputin_mode, slavaukraine_mode, suka_blyat_mode
@@ -2635,34 +2723,15 @@ async def cmd_admin(message: types.Message):
 
 # ===== Вспомогательная функция =====================================
 def get_author_id_by_reply(msg: types.Message) -> int | None:
-    """
-    Получаем ID автора поста, на который отвечает админ.
-    1. Берём message_id ответа
-    2. Находим post_num через message_to_post
-    3. Берём author_id из messages_storage
-    """
+    """Получаем ID автора поста по reply"""
     if not msg.reply_to_message:
         return None
 
     reply_mid = msg.reply_to_message.message_id
-    key_any_user = None
-
-    # reply пришёл от бота к текущему администратору
-    # message_to_post хранит ключ (любое_user_id, message_id)
     for (uid, mid), pnum in message_to_post.items():
         if mid == reply_mid:
-            key_any_user = (uid, mid)
-            post_num = pnum
-            break
-    else:
-        return None  # не нашли
-
-    # Добавляем проверку существования post_num в messages_storage
-    if post_num not in messages_storage:
-        return None
-
-    return messages_storage[post_num].get("author_id")
-
+            return messages_storage.get(pnum, {}).get("author_id")
+    return None
 
 # ===== /id ==========================================================
 @dp.message(Command("id"))
@@ -2908,10 +2977,9 @@ async def cmd_wipe(message: types.Message):
        reply + /wipe        – автор реплая
        /wipe <id>           – по ID
     """
+    global message_to_post  # ДОЛЖНО БЫТЬ В САМОМ НАЧАЛЕ ФУНКЦИИ!
     if not is_admin(message.from_user.id):
         return
-
-    global message_to_post  # Перенесено в начало функции
 
     target_id = None
     if message.reply_to_message:
@@ -2968,6 +3036,7 @@ async def cmd_wipe(message: types.Message):
         f"🗑 Удалено {len(posts_to_delete)} постов ({deleted} сообщений) пользователя {target_id}"
     )
 
+
 @dp.message(Command("unmute"))
 async def cmd_unmute(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -3017,6 +3086,7 @@ async def cmd_unban(message: types.Message):
 
 @dp.message(Command("del"))
 async def cmd_del(message: types.Message):
+    global message_to_post
     if not is_admin(message.from_user.id):
         return
 
@@ -3024,29 +3094,29 @@ async def cmd_del(message: types.Message):
         await message.answer("Ответь на сообщение, которое нужно удалить")
         return
 
-    # 1. Ищем post_num по message_id (неважно, кто отправитель)
+    # 1. Ищем post_num по message_id
     target_mid = message.reply_to_message.message_id
     post_num = None
-    for pnum, mapping in post_to_messages.items():
-        if target_mid in mapping.values():
+    for (uid, mid), pnum in message_to_post.items():
+        if mid == target_mid:
             post_num = pnum
             break
 
-    # Если не нашли – сообщаем
     if post_num is None:
         await message.answer("Не нашёл этот пост в базе")
         return
 
     # 2. Удаляем у всех получателей
     deleted = 0
-    for uid, mid in post_to_messages.get(post_num, {}).items():
-        try:
-            await bot.delete_message(uid, mid)
-            deleted += 1
-        except:
-            pass
+    if post_num in post_to_messages:
+        for uid, mid in post_to_messages[post_num].items():
+            try:
+                await bot.delete_message(uid, mid)
+                deleted += 1
+            except:
+                pass
 
-    # 3. Удаляем у автора (если сохранили author_message_id)
+    # 3. Удаляем у автора
     author_mid = messages_storage.get(post_num, {}).get('author_message_id')
     author_id = messages_storage.get(post_num, {}).get('author_id')
     if author_mid and author_id:
@@ -3059,8 +3129,12 @@ async def cmd_del(message: types.Message):
     # 4. Чистим словари
     post_to_messages.pop(post_num, None)
     messages_storage.pop(post_num, None)
+    
+    # 5. Чистим message_to_post
+    message_to_post = {k: v for k, v in message_to_post.items() if v != post_num}
 
     await message.answer(f"Пост №{post_num} удалён у {deleted} пользователей")
+
 # ========== CALLBACK HANDLERS ==========
 
 @dp.callback_query(F.data == "save")
@@ -3145,9 +3219,10 @@ async def process_complete_media_group(media_group_id: str):
     """Отправка собранного медиа-альбома без дублирования"""
     if media_group_id not in current_media_groups:
         return
-
+        
     media_group = current_media_groups[media_group_id]
-    if not media_group.get('media'):
+    
+    if not media_group.get('media') or len(media_group['media']) == 0:
         if media_group_id in current_media_groups:
             del current_media_groups[media_group_id]
         return
@@ -3354,7 +3429,6 @@ async def handle_voice(message: Message):
             'user_id': user_id
         })
 
-# Добавьте этот обработчик перед @dp.message()
 @dp.message(F.media_group_id)
 async def handle_media_group_init(message: Message):
     """Обработчик медиа-альбомов с защитой от дублирования"""
@@ -3370,6 +3444,33 @@ async def handle_media_group_init(message: Message):
 
     media_group_id = message.media_group_id
 
+    # Добавляем проверку shadow_mute для медиа-групп
+    user_id = message.from_user.id
+    if user_id in shadow_mutes and shadow_mutes[user_id] > datetime.now(UTC):
+        await message.delete()
+        
+        # Имитируем отправку только автору
+        try:
+            header = f"Пост №{state['post_counter'] + 1}"
+            caption = message.caption or ""
+            
+            if caption:
+                full_caption = f"<i>{header}</i>\n\n{escape_html(caption)}"
+            else:
+                full_caption = f"<i>{header}</i>"
+                
+            await bot.send_photo(
+                user_id,
+                message.photo[-1].file_id,
+                caption=full_caption,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"Ошибка фантомной отправки медиа: {e}")
+        
+        return
+    
+    
     # Проверяем reply_to_message для ответов
     reply_to_post = None
     if message.reply_to_message:
@@ -3382,28 +3483,34 @@ async def handle_media_group_init(message: Message):
         if reply_to_post and reply_to_post not in messages_storage:
             reply_to_post = None
 
+    media_group_id = message.media_group_id
+
     if media_group_id not in current_media_groups:
         header, post_num = format_header()
+        caption = message.caption or ""
+        
+        # Применяем преобразования к подписи
+        if slavaukraine_mode and caption:
+            caption = ukrainian_transform(caption)
+        elif suka_blyat_mode and caption:
+            caption = suka_blyatify_text(caption)
+        elif anime_mode and caption:
+            caption = anime_transform(caption)
+        elif zaputin_mode and caption:
+            caption = zaputin_transform(caption)
+            
         current_media_groups[media_group_id] = {
             'post_num': post_num,
             'header': header,
             'author_id': user_id,
             'timestamp': datetime.now(MSK),
             'media': [],
-            'caption': ukrainian_transform(message.caption) if slavaukraine_mode and message.caption else message.caption,
+            'caption': caption,
             'reply_to_post': reply_to_post,
             'processed_messages': set()
         }
-    else:
-        # Обновляем подпись если нужно
-        if slavaukraine_mode and message.caption:
-            current_media_groups[media_group_id]['caption'] = suka_blyatify_text(message.caption)
-        if suka_blyat_mode and message.caption:
-            current_media_groups[media_group_id]['caption'] = ukrainian_transform(message.caption)
-        if anime_mode and message.caption:
-            current_media_groups[media_group_id]['caption'] = anime_transform(message.caption)
-        if zaputin_mode and message.caption:
-            current_media_groups[media_group_id]['caption'] = zaputin_transform(message.caption)        
+        # Запускаем отложенную обработку
+        asyncio.create_task(delayed_process_media_group(media_group_id))
 
     # Добавляем медиа в группу только если это новое сообщение
     if message.message_id not in current_media_groups[media_group_id]['processed_messages']:
@@ -3422,19 +3529,83 @@ async def handle_media_group_init(message: Message):
         elif message.audio:
             media_data['file_id'] = message.audio.file_id
 
-        if media_data['file_id']:  # Только если есть file_id
+        if media_data['file_id']:
             current_media_groups[media_group_id]['media'].append(media_data)
             current_media_groups[media_group_id]['processed_messages'].add(message.message_id)
 
     await message.delete()
 
-    # Обрабатываем группу через 0.5 секунды
-    await asyncio.sleep(0.5)
+    # Обрабатываем группу через 0.8 секунды
+    await asyncio.sleep(0.8)
     await process_complete_media_group(media_group_id)
 
 @dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
+    
+    # Проверка shadow-мута (ДОБАВЛЕНО)
+    if user_id in shadow_mutes and shadow_mutes[user_id] > datetime.now(UTC):
+        # Удаляем оригинальное сообщение
+        try:
+            await message.delete()
+        except:
+            pass
+
+        # Форматируем "фантомный" заголовок с текущим номером
+        header = f"Пост №{state['post_counter'] + 1}"
+        
+        # Имитируем отправку сообщения только автору
+        try:
+            if message.text:
+                # Применяем преобразования как для обычного сообщения
+                text = message.text
+                if suka_blyat_mode:
+                    text = suka_blyatify_text(text)
+                if slavaukraine_mode:
+                    text = ukrainian_transform(text)
+                if anime_mode:
+                    text = anime_transform(text)
+                if zaputin_mode:
+                    text = zaputin_transform(text)
+                    
+                await bot.send_message(
+                    user_id, 
+                    f"<i>{header}</i>\n\n{escape_html(text)}", 
+                    parse_mode="HTML"
+                )
+            
+            elif message.photo:
+                caption = message.caption or ""
+                # Применяем преобразования к подписи
+                if suka_blyat_mode and caption:
+                    caption = suka_blyatify_text(caption)
+                if slavaukraine_mode and caption:
+                    caption = ukrainian_transform(caption)
+                if anime_mode and caption:
+                    caption = anime_transform(caption)
+                if zaputin_mode and caption:
+                    caption = zaputin_transform(caption)
+                    
+                full_caption = f"<i>{header}</i>"
+                if caption:
+                    full_caption += f"\n\n{escape_html(caption)}"
+                
+                await bot.send_photo(
+                    user_id,
+                    message.photo[-1].file_id,
+                    caption=full_caption,
+                    parse_mode="HTML"
+                )
+            
+            # Аналогично для других типов контента...
+            
+        except Exception as e:
+            print(f"Ошибка фантомной отправки: {e}")
+        
+        # Выходим без дальнейшей обработки
+        return
+
+
     
     if not message.text and not message.caption and not message.content_type:
         await message.delete()
