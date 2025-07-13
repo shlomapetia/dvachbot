@@ -51,7 +51,16 @@ from help_text import HELP_TEXT
 from help_broadcaster import help_broadcaster
 
 # ========== Глобальные настройки досок ==========
-BOARDS = ['b', 'po', 'a', 'sex', 'vg']  # Идентификаторы досок
+BOARDS = ['b', 'po', 'a', 'sex', 'vg']  # Список всех досок
+
+BOT_TOKENS = {
+    'b': os.environ.get('BOT_TOKEN'),    # Токен основного бота /b/
+    'po': os.environ.get('BOT_TOKEN_PO'),  # Токен для /po/
+    'a': os.environ.get('BOT_TOKEN_A'),    # Токен для /a/
+    'sex': os.environ.get('BOT_TOKEN_SEX'), # Токен для /sex/
+    'vg': os.environ.get('BOT_TOKEN_VG'),   # Токен для /vg/
+}
+
 BOARD_INFO = {
     'b': {"name": "/b/", "description": "Бред", "username": "@dvach_chatbot"},
     'po': {"name": "/po/", "description": "Политика", "username": "@dvach_po_chatbot"},
@@ -3988,30 +3997,56 @@ async def supervisor():
         f.write(str(os.getpid()))
     
     try:
-        global is_shutting_down, bot, healthcheck_site
+        global is_shutting_down, healthcheck_site, bots, dispatchers, bot_to_board
         loop = asyncio.get_running_loop()
 
         restore_backup_on_start()
 
-        if hasattr(signal, 'SIGTERM'):
-            loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
-        if hasattr(signal, 'SIGINT'):
-            loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown()))
+        # Инициализация ботов и диспетчеров для всех досок
+        bots = {board: Bot(token=BOT_TOKENS[board]) for board in BOARDS}
+        dispatchers = {board: Dispatcher() for board in BOARDS}
+        bot_to_board = {bots[board]: board for board in BOARDS}  # Связь бота с доской
+
+        # Регистрация обработчиков для каждого диспетчера
+        for board in BOARDS:
+            dp = dispatchers[board]
+            dp.message.register(cmd_start, Command("start"))
+            dp.message.register(cmd_help, Command("help"))
+            dp.message.register(cmd_stats, Command("stats"))
+            dp.message.register(cmd_face, Command("face"))
+            dp.message.register(cmd_roll, Command("roll"))
+            dp.message.register(cmd_invite, Command("invite"))
+            dp.message.register(cmd_deanon, Command("deanon"))
+            dp.message.register(cmd_zaputin, Command("zaputin"))
+            dp.message.register(cmd_slavaukraine, Command("slavaukraine"))
+            dp.message.register(cmd_suka_blyat, Command("suka_blyat"))
+            dp.message.register(cmd_anime, Command("anime"))
+            dp.message.register(cmd_admin, Command("admin"))
+            dp.message.register(cmd_id, Command("id"))
+            dp.message.register(cmd_ban, Command("ban"))
+            dp.message.register(cmd_mute, Command("mute"))
+            dp.message.register(cmd_wipe, Command("wipe"))
+            dp.message.register(cmd_unmute, Command("unmute"))
+            dp.message.register(cmd_unban, Command("unban"))
+            dp.message.register(cmd_del, Command("del"))
+            dp.message.register(handle_message)  # Обработчик всех сообщений
+            dp.callback_query.register(admin_save, F.data == "save")
+            dp.callback_query.register(admin_stats, F.data == "stats")
+            dp.callback_query.register(admin_spammers, F.data == "spammers")
+            dp.callback_query.register(admin_banned, F.data == "banned")
 
         load_state()
         healthcheck_site = await start_healthcheck()
-        bot = Bot(token=BOT_TOKEN)
-
-        global message_queue
-        message_queue = asyncio.Queue(maxsize=5000)
 
         # Запуск фоновых задач
         tasks = await start_background_tasks()
 
         print("✅ Фоновые задачи запущены")
 
-        # Запускаем polling
-        await dp.start_polling(bot, skip_updates=True)
+        # Запускаем polling для каждого диспетчера
+        await asyncio.gather(
+            *[dispatchers[board].start_polling(bots[board], skip_updates=True) for board in BOARDS]
+        )
 
     except Exception as e:
         print(f"🔥 Critical error: {e}")
