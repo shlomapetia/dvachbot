@@ -2370,6 +2370,7 @@ async def cmd_shadowmute(message: Message, command: CommandObject):
     
     if not target_id and command.args:
         try:
+            # Пробуем взять первый аргумент как ID
             target_id = int(command.args.split()[0])
         except ValueError:
             pass
@@ -2380,44 +2381,65 @@ async def cmd_shadowmute(message: Message, command: CommandObject):
         return
 
     # Установка времени мута
-    duration_str = command.args.split()[1] if command.args and len(command.args.split()) > 1 else "24h"
-    try:
-        if 'd' in duration_str:
-            days = int(duration_str.split('d')[0])
-            total_seconds = days * 86400
-        elif 'h' in duration_str:
-            hours = int(duration_str.split('h')[0])
-            total_seconds = hours * 3600
-        elif 'm' in duration_str:
-            minutes = int(duration_str.split('m')[0])
-            total_seconds = minutes * 60
-        else:
-            total_seconds = 86400  # 24 часа по умолчанию
-    except:
-        total_seconds = 86400
-
-    shadow_mutes[target_id] = datetime.now(UTC) + timedelta(seconds=total_seconds)
+    duration_str = "24h"  # значение по умолчанию
     
-    # Форматирование времени для ответа
-    if total_seconds < 60:
-        time_str = f"{total_seconds} сек"
-    elif total_seconds < 3600:
-        time_str = f"{total_seconds // 60} мин"
-    elif total_seconds < 86400:
-        hours = total_seconds // 3600
-        time_str = f"{hours} час"
-    else:
-        days = total_seconds // 86400
-        time_str = f"{days} дней"
+    # Если есть аргументы, берем последний как время
+    if command.args:
+        args = command.args.split()
+        # Если есть реплай, берем первый аргумент как время
+        if message.reply_to_message and len(args) >= 1:
+            duration_str = args[0]
+        # Если нет реплая, берем второй аргумент как время
+        elif not message.reply_to_message and len(args) >= 2:
+            duration_str = args[1]
 
-    await message.answer(
-        f"👻 Тихо замучен пользователь {target_id} на {time_str}",
-        parse_mode="HTML"
-    )
+    try:
+        # Парсим duration_str
+        duration_str = duration_str.lower().replace(" ", "")
+        
+        if duration_str.endswith("m"):  # минуты
+            minutes = int(duration_str[:-1])
+            total_seconds = minutes * 60
+        elif duration_str.endswith("h"):  # часы
+            hours = int(duration_str[:-1])
+            total_seconds = hours * 3600
+        elif duration_str.endswith("d"):  # дни
+            days = int(duration_str[:-1])
+            total_seconds = days * 86400
+        else:  # если нет суффикса, считаем как минуты
+            total_seconds = int(duration_str) * 60
+        
+        # Ограничиваем максимальное время мута (30 дней)
+        total_seconds = min(total_seconds, 2592000)
+        shadow_mutes[target_id] = datetime.now(UTC) + timedelta(seconds=total_seconds)
+        
+        # Форматирование времени для ответа
+        if total_seconds < 60:
+            time_str = f"{total_seconds} сек"
+        elif total_seconds < 3600:
+            time_str = f"{total_seconds // 60} мин"
+        elif total_seconds < 86400:
+            hours = total_seconds // 3600
+            time_str = f"{hours} час"
+        else:
+            days = total_seconds // 86400
+            time_str = f"{days} дней"
+
+        await message.answer(
+            f"👻 Тихо замучен пользователь {target_id} на {time_str}",
+            parse_mode="HTML"
+        )
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат времени. Примеры:\n"
+            "30m - 30 минут\n"
+            "2h - 2 часа\n"
+            "1d - 1 день"
+        )
+    
     await message.delete()
 
 
-# ========== КОМАНДА /UNSHADOWMUTE ==========
 @dp.message(Command("unshadowmute"))
 async def cmd_unshadowmute(message: Message):
     """Снятие тихого мута"""
@@ -2425,21 +2447,32 @@ async def cmd_unshadowmute(message: Message):
         await message.delete()
         return
 
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("Использование: /unshadowmute <user_id>")
+    # Получаем target_id: либо из реплая, либо из аргумента
+    target_id = None
+
+    # 1. Если это ответ на сообщение, берем ID автора
+    if message.reply_to_message:
+        target_id = get_author_id_by_reply(message)
+
+    # 2. Если не нашли из реплая, пробуем из аргументов
+    if not target_id:
+        parts = message.text.split()
+        if len(parts) >= 2:
+            try:
+                target_id = int(parts[1])
+            except ValueError:
+                pass
+
+    if not target_id:
+        await message.answer("Использование: /unshadowmute <user_id> или ответ на сообщение")
         await message.delete()
         return
 
-    try:
-        user_id = int(parts[1])
-        if user_id in shadow_mutes:
-            del shadow_mutes[user_id]
-            await message.answer(f"👻 Пользователь {user_id} тихо размучен")
-        else:
-            await message.answer(f"ℹ️ Пользователь {user_id} не в shadow-муте")
-    except ValueError:
-        await message.answer("Неверный ID пользователя")
+    if target_id in shadow_mutes:
+        del shadow_mutes[target_id]
+        await message.answer(f"👻 Пользователь {target_id} тихо размучен")
+    else:
+        await message.answer(f"ℹ️ Пользователь {target_id} не в shadow-муте")
     
     await message.delete()
 
