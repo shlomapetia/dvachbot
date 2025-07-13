@@ -1558,41 +1558,41 @@ async def send_message_to_users(
                     reply_to_message_id=reply_to,
                     parse_mode="HTML",
                 )
-
+            
             elif ct == "photo":
-                if len(full_text) > 1024:
-                    full_text = full_text[:1021] + "..."
-                return await bot.send_photo(
-                    uid,
-                    modified_content["file_id"],
-                    caption=full_text,
-                    reply_to_message_id=reply_to,
-                    parse_mode="HTML",
-                )
-            elif ct == "photo" and content.get('image_url'):
-                # Специальная обработка для аниме-картинок по URL
-                caption = f"<i>{header_text}</i>"
-                if content.get('caption'):
-                    caption += f"\n\n{escape_html(content['caption'])}"
-                
-                if reply_to_post:
-                    if uid == original_author:
-                        reply_text = f">>{reply_to_post} (You)\n"
-                    else:
-                        reply_text = f">>{reply_to_post}\n"
-                    caption = f"{reply_text}{caption}"
-                
-                # Проверяем длину подписи
-                if len(caption) > 1024:
-                    caption = caption[:1021] + "..."
-                
-                return await bot.send_photo(
-                    uid,
-                    content['image_url'],
-                    caption=caption,
-                    reply_to_message_id=reply_to,
-                    parse_mode="HTML"
-                )
+                # Проверяем, есть ли image_url (это случай аниме-фото)
+                img_url = content.get('image_url')
+                if img_url:
+                    # Есть картинка — отправляем фото по URL
+                    if len(full_text) > 1024:
+                        full_text = full_text[:1021] + "..."
+                    return await bot.send_photo(
+                        uid,
+                        img_url,
+                        caption=full_text,
+                        reply_to_message_id=reply_to,
+                        parse_mode="HTML"
+                    )
+                elif "file_id" in content:
+                    # Есть file_id — обычная фото из Telegram
+                    if len(full_text) > 1024:
+                        full_text = full_text[:1021] + "..."
+                    return await bot.send_photo(
+                        uid,
+                        content["file_id"],
+                        caption=full_text,
+                        reply_to_message_id=reply_to,
+                        parse_mode="HTML"
+                    )
+                else:
+                    # НЕТ картинки — отправляем просто текст!
+                    return await bot.send_message(
+                        uid,
+                        full_text,
+                        reply_to_message_id=reply_to,
+                        parse_mode="HTML"
+                    )
+        
             elif ct == "video":
                 if len(full_text) > 1024:
                     full_text = full_text[:1021] + "..."
