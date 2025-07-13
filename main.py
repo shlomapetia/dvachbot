@@ -243,14 +243,12 @@ async def git_commit_and_push():
             return False
 
 def sync_git_operations(token: str) -> bool:
-    """Синхронные Git-операции"""
     try:
         work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot-backup.git"
 
         if not os.path.exists(os.path.join(work_dir, ".git")):
-            # Клонирование репозитория
             clone_cmd = ["git", "clone", repo_url, work_dir]
             result = subprocess.run(clone_cmd, capture_output=True, text=True)
             if result.returncode != 0:
@@ -258,7 +256,6 @@ def sync_git_operations(token: str) -> bool:
                 return False
             print("✅ Репозиторий клонирован")
         else:
-            # Обновление репозитория
             pull_cmd = ["git", "-C", work_dir, "pull"]
             result = subprocess.run(pull_cmd, capture_output=True, text=True)
             if result.returncode != 0:
@@ -267,7 +264,6 @@ def sync_git_operations(token: str) -> bool:
         # Копирование файлов
         files_to_copy = ["state.json", "reply_cache.json"]
         copied_files = []
-
         for fname in files_to_copy:
             src = os.path.join(os.getcwd(), fname)
             if os.path.exists(src):
@@ -277,6 +273,13 @@ def sync_git_operations(token: str) -> bool:
         if not copied_files:
             print("⚠️ Нет файлов для бэкапа")
             return False
+
+        # Проверяем, есть ли изменения
+        status_cmd = ["git", "-C", work_dir, "status", "--porcelain"]
+        result = subprocess.run(status_cmd, capture_output=True, text=True)
+        if not result.stdout:
+            print("ℹ️ Нет изменений для коммита")
+            return True  # Возвращаем True, так как это не ошибка, просто нет изменений
 
         # Git операции
         subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True)
@@ -4035,7 +4038,7 @@ async def supervisor():
             dp.message.register(cmd_suka_blyat, Command("suka_blyat"))
             dp.message.register(cmd_anime, Command("anime"))
             dp.message.register(cmd_admin, Command("admin"))
-            dp.message.register(cmd_id, Command("id"))
+            dp.message.register(cmd_get_id, Command("id"))
             dp.message.register(cmd_ban, Command("ban"))
             dp.message.register(cmd_mute, Command("mute"))
             dp.message.register(cmd_wipe, Command("wipe"))
