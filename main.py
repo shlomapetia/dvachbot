@@ -1119,7 +1119,6 @@ def format_header() -> Tuple[str, int]:
     header_text = f"{circle}{prefix}Пост №{post_num}"
     return header_text, post_num
 
-# ========== ФУНКЦИЯ УДАЛЕНИЯ ПОСТОВ ==========
 async def delete_user_posts(user_id: int, time_period_minutes: int) -> int:
     """Удаляет ВСЕ сообщения пользователя за период"""
     try:
@@ -1144,14 +1143,18 @@ async def delete_user_posts(user_id: int, time_period_minutes: int) -> int:
                 for uid, mid in post_to_messages[post_num].items():
                     messages_to_delete.append((uid, mid))
 
-        # Удаляем каждое сообщение
+        # Удаляем каждое сообщение с повторными попытками
         for (uid, mid) in messages_to_delete:
             try:
-                await bot.delete_message(uid, mid)
-                deleted_messages += 1
-            except TelegramBadRequest as e:
-                if "message to delete not found" not in str(e):
-                    print(f"Ошибка удаления {mid} у {uid}: {e}")
+                for _ in range(3):  # 3 попытки удаления
+                    try:
+                        await bot.delete_message(uid, mid)
+                        deleted_messages += 1
+                        break
+                    except TelegramBadRequest as e:
+                        if "message to delete not found" in str(e):
+                            break
+                        await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"Ошибка удаления {mid} у {uid}: {e}")
 
