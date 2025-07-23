@@ -100,10 +100,10 @@ def conan_phrase(username: str = "Приятель") -> str:
     )
 
 async def conan_roaster(state, messages_storage, post_to_messages, message_to_post, message_queue, format_header):
-    """Каждые 5-18 минут Конан отвечает рандомному посту."""
+    """Каждые пару часов  Конан отвечает рандомному посту."""
     while True:
         try:
-            await asyncio.sleep(secrets.randbelow(3600) + 1600)  # 5-15 минут
+            await asyncio.sleep(secrets.randbelow(3600) + 7200)
 
             # Проверяем что есть посты и активные пользователи
             if not messages_storage or not state["users_data"]["active"]:
