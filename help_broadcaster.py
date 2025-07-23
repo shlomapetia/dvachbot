@@ -9,7 +9,7 @@ async def help_broadcaster(state, message_queue, format_header_func):
     while True:
         try:
             # Случайный интервал 2-3 часа в секундах
-            delay = random.randint(7200, 10800)
+            delay = random.randint(10800, 16800)
             await asyncio.sleep(delay)
             
             if not state['users_data']['active']:
