@@ -60,18 +60,18 @@ TEMPLATES = [
     "Ты унижен, {name}, ты дрыщ не осилишь {inv} {wgt}",
     "На колени, раб, {name}", "В глаза долбишься, {ins}? Я {ach}.",
     "В глаза долбишься, {ins}? Русня ты знаешь что я {ach}?",
-    "Молчи мразь. Я {ach}", "Молчи русня. Я {ach}",
+    "Молчи мразь. Я {ach}", "Молчи русня. Я {ach}", "Я убью тебя мразь",
     "Ты знаешь что с тобой общается {ach}?", "Ты знаешь что я {ach}?",
     "Ты знаешь что я сосал?", "{ins} дрищавый {ins}", "Ты выглядишь как {ins}",
-    "У тебя шиза, {ins}", "У тебя шиза",
+    "У тебя шиза, {ins}", "У тебя шиза", "В этом тёмном лесу меня ебали тысячелетиями",
     "Слабая русня не поднимает {inv} {wgt}", "Ты не осилишь {inv} {wgt}",
-    "Да, я сосал.", "Буду ли я хуй?",
+    "Да, я сосал.", "Буду ли я хуй?", "Я сосал самому Зевсу",
     "Спокуха, {ins}", "Таблетки прими, {ins}", "{fact}",
     "Русня, а ты знаешь этот факт про меня? {fact}",
     "Правда глаза режет, {ins}?", "{catch}", "{ins} ты с ума сошел от зависти",
     "Проекции, {ins}", "Запомни. {fact}", "Сейчас обоссу, {ins}",
     "В палату вернись, {ins}", "Манямирок выключи, {ins}",
-    "{ins} чмо ты с ума сошло от зависти", "Ты {ins}",
+    "{ins} чмо ты с ума сошло от зависти", "Ты {ins}", "Легионы мужчин насаживали меня на свои мемберы",
     "Кажется пора проучить тебя пидорас. Большой афганский дядя накажет тебя.", "Ты похож на {ins}",
     "Ты выглядишь как руснявый {ins}", "Какой же ты {ins}!",
     "Привет, приятель!", "Приходи в лесную качалку, {ins}", "Привет, приятель!", "Привет, приятель!", 
@@ -99,40 +99,45 @@ def conan_phrase(username: str = "Приятель") -> str:
         catch=secrets.choice(CATCHPHRASES),
     )
 
-async def conan_roaster(state, messages_storage, post_to_messages, message_to_post, message_queue, format_header):
-    """Каждые пару часов  Конан отвечает рандомному посту."""
+async def conan_roaster(state, messages_storage, post_to_messages, message_to_post, message_queues, format_header, board_data):
+    """Каждые пару часов Конан отвечает рандомному посту на случайной доске."""
     while True:
         try:
             await asyncio.sleep(secrets.randbelow(3600) + 7200)
 
-            # Проверяем что есть посты и активные пользователи
-            if not messages_storage or not state["users_data"]["active"]:
-                continue
-
-            # Выбираем случайный пост из последних 50 (только те, что есть в post_to_messages)
+            # 1. Проверяем, есть ли вообще посты с известной доской
             valid_posts = [
-                p for p in messages_storage.keys() if p in post_to_messages
+                p_num for p_num, p_data in messages_storage.items()
+                if p_data.get("board_id") and p_num in post_to_messages
             ]
             if not valid_posts:
                 continue
 
+            # 2. Выбираем случайный пост из последних 50
             post_num = secrets.choice(valid_posts[-50:] if len(valid_posts) > 50 else valid_posts)
-            original_author = messages_storage.get(post_num, {}).get('author_id')
+            
+            # 3. Получаем данные оригинального поста, включая его доску
+            original_post_data = messages_storage.get(post_num, {})
+            original_board_id = original_post_data.get('board_id')
+            original_author_id = original_post_data.get('author_id')
 
-            # Проверяем что есть кому отвечать
+            # 4. Проверяем, что доска поста все еще существует и есть кому отвечать
+            if not original_board_id or original_board_id not in message_queues:
+                continue
+            
+            b_data = board_data[original_board_id]
+            if not b_data['users']['active']:
+                continue
+            
             reply_map = post_to_messages.get(post_num, {})
             if not reply_map:
                 continue
 
-            # Генерируем фразу
+            # 5. Генерируем фразу и заголовок в контексте нужной доски
             phrase = conan_phrase()
+            header, new_pnum = await format_header(original_board_id)
 
-            # Формируем текст ответа без (You) - оно добавится автоматически при отправке
-            reply_text = f">>{post_num}\n{phrase}"
-
-            header, new_pnum = format_header()
-
-            # Сохраняем метаданные
+            # 6. Сохраняем метаданные ответа, ОБЯЗАТЕЛЬНО указывая board_id
             messages_storage[new_pnum] = {
                 'author_id': 0,  # 0 = системное сообщение
                 'timestamp': datetime.now(UTC),
@@ -141,10 +146,11 @@ async def conan_roaster(state, messages_storage, post_to_messages, message_to_po
                     'header': header,
                     'text': phrase
                 },
-                'reply_to': post_num
+                'reply_to': post_num,
+                'board_id': original_board_id
             }
 
-            # Формируем контент для отправки
+            # 7. Формируем контент для отправки
             content = {
                 "type": "text",
                 "header": header,
@@ -152,17 +158,17 @@ async def conan_roaster(state, messages_storage, post_to_messages, message_to_po
                 "reply_to_post": post_num
             }
 
-            # Отправляем всем
-            await message_queue.put({
-                "recipients": state["users_data"]["active"],
+            # 8. Отправляем в очередь КОНКРЕТНОЙ доски
+            await message_queues[original_board_id].put({
+                "recipients": b_data["users"]["active"],
                 "content": content,
                 "post_num": new_pnum,
                 "reply_info": reply_map,
-                "original_author": original_author  # Передаем ID автора для корректной обработки (You)
+                "board_id": original_board_id
             })
 
-            print(f"Conan reply to #{post_num}: {phrase[:50]}...")
+            print(f"✅ Conan ответил на пост #{post_num} на доске /{original_board_id}/: {phrase[:50]}...")
 
         except Exception as e:
-            print(f"Conan error: {e}")
-            await asyncio.sleep(5)
+            print(f"❌ Conan error: {e}")
+            await asyncio.sleep(60)
