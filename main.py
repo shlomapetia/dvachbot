@@ -391,10 +391,7 @@ async def auto_backup():
                         'banned': list(state['users_data']['banned']),
                     },
                     'message_counter': state['message_counter'],
-                    'settings': state['settings'],
-                    'recent_post_mappings': {
-                        str(k): v for k, v in list(post_to_messages.items())[-500:]
-                    }
+                    'settings': state['settings']
                 }, f, ensure_ascii=False, indent=2)
 
             # Пуш в GitHub
@@ -409,7 +406,7 @@ async def auto_backup():
             print(f"❌ Ошибка в auto_backup: {e}")
             # Ждем 1 минуту перед повторной попыткой
             await asyncio.sleep(60)
-
+            
 # Настройка сборщика мусора
 gc.set_threshold(
     700, 10, 10)  # Оптимальные настройки для баланса памяти/производительности
@@ -425,10 +422,7 @@ async def save_state_and_backup():
                     'banned': list(state['users_data']['banned']),
                 },
                 'message_counter': state['message_counter'],
-                'settings': state['settings'],
-                'recent_post_mappings': {
-                    str(k): v for k, v in list(post_to_messages.items())[-500:]
-                }
+                'settings': state['settings']
             }, f, ensure_ascii=False, indent=2)
         save_reply_cache()
         print("💾 Обновление state.json и reply_cache.json, пушим в GitHub...")
@@ -436,23 +430,6 @@ async def save_state_and_backup():
     except Exception as e:
         print(f"⛔ Ошибка сохранения state: {e}")
         return False
-
-async def cleanup_old_messages():
-    """Очистка постов старше 7 дней"""
-    while True:
-        await asyncio.sleep(7200)  # Каждые 1 час
-        try:
-            current_time = datetime.now(UTC)  # Используем UTC вместо MSK
-            old_posts = [
-                pnum for pnum, data in messages_storage.items()
-                if (current_time - data.get('timestamp', current_time)).days > 7
-            ]
-            for pnum in old_posts:
-                messages_storage.pop(pnum, None)
-                post_to_messages.pop(pnum, None)
-            print(f"Очищено {len(old_posts)} старых постов")
-        except Exception as e:
-            print(f"Ошибка очистки: {e}")
 
 def get_user_msgs_deque(user_id):
     """Получаем deque для юзера, ограничиваем количество юзеров в памяти"""
@@ -478,7 +455,7 @@ REST_SECONDS = 30  # время блокировки
 REPLY_CACHE = 500  # сколько постов держать
 REPLY_FILE = "reply_cache.json"  # отдельный файл для reply
 # В начале файла с константами
-MAX_MESSAGES_IN_MEMORY = 1110  # храним только последние 1000 постов
+MAX_MESSAGES_IN_MEMORY = 600  # храним только последние 600 постов
 
 
 WEEKDAYS = [
@@ -530,7 +507,7 @@ INVITE_TEXTS = [
 ]
 
 # Для /suka_blyat
-MAT_WORDS = ["сука", "блядь", "пиздец", "ебать", "нах", "пизда", "хуйня", "ебал", "блять", "отъебись", "ебаный", "еблан", "ХУЙ", "ПИЗДА"]
+MAT_WORDS = ["сука", "блядь", "пиздец", "ебать", "нах", "пизда", "хуйня", "ебал", "блять", "отъебись", "ебаный", "еблан", "ХУЙ", "ПИЗДА", "хуйло", "долбаёб", "пидорас"]
 
 # хранит 5 последних sticker_file_id для проверки «одинаковых»
 last_stickers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=5))
@@ -619,10 +596,7 @@ async def save_state():
                     'banned': list(state['users_data']['banned']),
                 },
                 'message_counter': state['message_counter'],
-                'settings': state['settings'],
-                'recent_post_mappings': {
-                    str(k): v for k, v in list(post_to_messages.items())[-500:]
-                }
+                'settings': state['settings']
             }, f, ensure_ascii=False, indent=2)
 
         # Всегда пушим при изменении
@@ -634,49 +608,56 @@ async def save_state():
         return False
 
 def save_reply_cache():
-    """Сохраняет кэш ответов только если есть изменения"""
+    """Сохраняет кэш ответов, строго ограничивая количество постов константой REPLY_CACHE."""
     try:
-        # Собираем актуальные данные
-        recent_posts = sorted(messages_storage.keys())[-REPLY_CACHE:]
+        # 1. Определяем, какие посты нужно сохранить
+        all_posts_in_memory = sorted(messages_storage.keys())
+        recent_posts_keys = all_posts_in_memory[-REPLY_CACHE:]
+        recent_posts_set = set(recent_posts_keys)
+
+        # 2. Собираем данные для сохранения только по этим постам
         new_data = {
             "post_to_messages": {
-                str(p): post_to_messages[p]
-                for p in recent_posts 
-                if p in post_to_messages
+                str(p_num): data
+                for p_num, data in post_to_messages.items()
+                if p_num in recent_posts_set
             },
             "message_to_post": {
-                f"{uid}_{mid}": p 
-                for (uid, mid), p in message_to_post.items() 
-                if p in recent_posts
+                f"{uid}_{mid}": p_num
+                for (uid, mid), p_num in message_to_post.items()
+                if p_num in recent_posts_set
             },
             "messages_storage_meta": {
-                str(p): {
-                    "author_id": messages_storage[p].get("author_id", ""),
-                    "timestamp": messages_storage[p].get("timestamp", datetime.now(UTC)).isoformat(),
-                    "author_msg": messages_storage[p].get("author_message_id")
+                str(p_num): {
+                    "author_id": messages_storage[p_num].get("author_id", ""),
+                    "timestamp": messages_storage[p_num].get("timestamp", datetime.now(UTC)).isoformat(),
+                    "author_msg": messages_storage[p_num].get("author_message_id")
                 }
-                for p in recent_posts
+                for p_num in recent_posts_keys
+                if p_num in messages_storage
             }
         }
 
-        # Проверяем существующий файл
+        # 3. Сравниваем с существующим файлом, чтобы избежать лишней записи
         old_data = {}
         if os.path.exists(REPLY_FILE):
-            with open(REPLY_FILE, 'r', encoding='utf-8') as f:
-                try:
-                    old_data = json.load(f)
-                except json.JSONDecodeError:
-                    old_data = {}
-
-        # Если данные не изменились - выходим
+            try:
+                with open(REPLY_FILE, 'r', encoding='utf-8') as f:
+                    if f.read().strip(): # Проверяем, что файл не пустой
+                        f.seek(0)
+                        old_data = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                print(f"⚠️ reply_cache.json поврежден, будет перезаписан.")
+                old_data = {}
+        
         if old_data == new_data:
-            print("ℹ️ reply_cache.json без изменений")
+            print("ℹ️ reply_cache.json без изменений, запись пропущена.")
             return True
 
-        # Сохраняем новые данные
+        # 4. Сохраняем новые данные
         with open(REPLY_FILE, 'w', encoding='utf-8') as f:
             json.dump(new_data, f, ensure_ascii=False, indent=2)
-            print("✅ reply_cache.json обновлен")
+            print(f"✅ reply_cache.json обновлен. Сохранено {len(recent_posts_keys)} постов.")
 
         return True
 
@@ -813,48 +794,55 @@ async def graceful_shutdown():
     print("✅ Все задачи остановлены, завершаем работу")
 
 async def auto_memory_cleaner():
-    """Единственная функция очистки памяти - каждые 5 минут"""
+    """Единственная унифицированная функция очистки памяти, запускается каждые 5 минут."""
     while True:
-        await asyncio.sleep(300)  # 5 минут
+        await asyncio.sleep(600)  # 10 минут
 
-        MAX_POSTS = 100  # Максимум постов в памяти
+        # 1. Очистка старых постов, если превышен лимит MAX_MESSAGES_IN_MEMORY
+        if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
+            # Определяем количество постов, которое нужно удалить
+            to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
+            
+            # Находим самые старые посты для удаления
+            oldest_post_keys = sorted(messages_storage.keys())[:to_delete_count]
+            
+            # Создаем множество для быстрой проверки
+            posts_to_delete_set = set(oldest_post_keys)
 
-        # Чистим все словари с постами
-        if len(post_to_messages) > MAX_POSTS:
-            recent = sorted(post_to_messages.keys())[-MAX_POSTS:]
-            old_posts = set(post_to_messages.keys()) - set(recent)
+            # Удаляем из messages_storage и post_to_messages
+            for post_num in oldest_post_keys:
+                messages_storage.pop(post_num, None)
+                post_to_messages.pop(post_num, None)
 
-            for post in old_posts:
-                post_to_messages.pop(post, None)
-                messages_storage.pop(post, None)
+            # Очищаем message_to_post от связей с удаленными постами
+            global message_to_post
+            message_to_post = {
+                key: post_num
+                for key, post_num in message_to_post.items()
+                if post_num not in posts_to_delete_set
+            }
+            
+            print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов.")
 
-        # Чистим message_to_post от старых
-        valid_posts = set(post_to_messages.keys())
-        message_to_post_copy = dict(message_to_post)
-        for key, post_num in message_to_post_copy.items():
-            if post_num not in valid_posts:
-                del message_to_post[key]
-
-        # Чистим счетчик сообщений - оставляем топ 100
+        # 2. Чистим счетчик сообщений - оставляем топ 100
         if len(state['message_counter']) > 100:
             top_users = sorted(state['message_counter'].items(),
                                key=lambda x: x[1],
                                reverse=True)[:100]
             state['message_counter'] = dict(top_users)
 
-        # Чистим spam_tracker от старых записей
-        now = datetime.now(UTC)  # Используем UTC вместо наивного времени
+        # 3. Чистим spam_tracker от старых записей
+        now = datetime.now(UTC)
         for user_id in list(spam_tracker.keys()):
             spam_tracker[user_id] = [
                 t for t in spam_tracker[user_id]
-                if (now - t).total_seconds() < SPAM_WINDOW  # Используем total_seconds
+                if (now - t).total_seconds() < SPAM_WINDOW
             ]
             if not spam_tracker[user_id]:
                 del spam_tracker[user_id]
 
-        # Агрессивная сборка мусора
-        for _ in range(3):
-            gc.collect()
+        # 4. Агрессивная сборка мусора
+        gc.collect()
 
 async def cleanup_old_users():
     """Чистим данные неактивных юзеров раз в час"""
@@ -907,38 +895,6 @@ async def aiogram_memory_cleaner():
             print(
                 f"Очищено {cleared} больших weakref словарей, собрано {collected} объектов"
             )
-
-async def auto_save_state():
-    """Автоматическое сохранение состояния каждые 1ч"""
-    while True:
-        try:
-            await asyncio.sleep(3600)
-
-            if is_shutting_down:
-                break
-
-            save_reply_cache()
-
-            with open('state.json', 'w', encoding='utf-8') as f:
-                json.dump({
-                    'post_counter': state['post_counter'],
-                    'users_data': {
-                        'active': list(state['users_data']['active']),
-                        'banned': list(state['users_data']['banned']),
-                    },
-                    'message_counter': state['message_counter'],
-                    'settings': state['settings'],
-                    'recent_post_mappings': {
-                        str(k): v for k, v in list(post_to_messages.items())[-500:]
-                    }
-                }, f, ensure_ascii=False, indent=2)
-
-            print("✅ Состояние сохранено")
-            await git_commit_and_push()
-
-        except Exception as e:
-            print(f"❌ Ошибка в auto_save_state: {e}")
-            await asyncio.sleep(60)
 
 async def check_spam(user_id: int, msg: Message) -> bool:
     """Проверяет спам с прогрессивным наказанием и сбросом уровня"""
@@ -1761,7 +1717,6 @@ async def message_broadcaster():
     # Создаем несколько worker'ов для параллельной обработки
     workers = [asyncio.create_task(message_worker(f"Worker-{i}")) for i in range(5)]
     await asyncio.gather(*workers)
-
 async def message_worker(worker_name: str):
     """Индивидуальный обработчик сообщений"""
     while True:
@@ -1811,10 +1766,6 @@ async def message_worker(worker_name: str):
             except Exception as e:
                 print(f"{worker_name} | ❌ Ошибка отправки #{post_num}: {str(e)[:200]}")
 
-            # Периодическая очистка памяти
-            if random.random() < 0.05:
-                self_clean_memory()
-
         except Exception as e:
             print(f"{worker_name} | ⛔ Критическая ошибка: {str(e)[:200]}")
             await asyncio.sleep(1)
@@ -1855,31 +1806,6 @@ async def process_successful_messages(post_num: int, results: list):
         else:  # Одиночное сообщение
             post_to_messages[post_num][uid] = msg.message_id
             message_to_post[(uid, msg.message_id)] = post_num
-
-def self_clean_memory():
-    """Автоматическая очистка старых сообщений"""
-    if len(post_to_messages) > MAX_MESSAGES_IN_MEMORY * 1.5:
-        # Удаляем 20% самых старых постов
-        all_posts = sorted(post_to_messages.keys())
-        to_delete = int(len(all_posts) * 0.2)
-        posts_to_delete = all_posts[:to_delete]
-
-        deleted = 0
-        for post in posts_to_delete:
-            # Удаляем из всех словарей
-            deleted += len(post_to_messages.get(post, {}))
-            post_to_messages.pop(post, None)
-            messages_storage.pop(post, None)
-
-        # Чистим message_to_post
-        global message_to_post
-        message_to_post = {
-            k: v
-            for k, v in message_to_post.items() if v not in posts_to_delete
-        }
-
-        print(f"🧹 Очистка памяти: удалено {deleted} сообщений")
-        gc.collect()
 
 async def reset_violations_after_hour(user_id: int):
     """Сбрасывает счетчик нарушений через час"""
@@ -3971,11 +3897,11 @@ async def start_background_tasks():
         )),
         asyncio.create_task(motivation_broadcaster()),
         asyncio.create_task(auto_memory_cleaner()),
-        asyncio.create_task(cleanup_old_messages()),
+        # asyncio.create_task(cleanup_old_messages()), # <--- УДАЛЕНО
         asyncio.create_task(help_broadcaster(state, message_queue, format_header)),
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
-    return tasks 
+    return tasks
 
 async def supervisor():
     # Блокировка от множественного запуска
