@@ -27,6 +27,7 @@ from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram.exceptions import TelegramRetryAfter
 from asyncio import Semaphore
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramForbiddenError,
@@ -3318,12 +3319,18 @@ async def supervisor():
         load_state()
 
         bots = {}
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновление инициализации Bot ---
+        # Создаем объект с настройками по умолчанию один раз
+        default_properties = DefaultBotProperties(parse_mode="HTML")
+        
         for board_id, config in BOARD_CONFIG.items():
             token = config.get("token")
             if token:
-                bots[board_id] = Bot(token=token, parse_mode="HTML")
+                # Используем новый синтаксис с default=...
+                bots[board_id] = Bot(token=token, default=default_properties)
             else:
                 print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         if not bots:
             print("❌ Не найдено ни одного токена бота. Завершение работы.")
@@ -3331,8 +3338,7 @@ async def supervisor():
 
         print(f"✅ Инициализировано {len(bots)} ботов: {list(bots.keys())}")
         
-        # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Обработчики сигналов перенесены сюда и исправлены ---
-        # Теперь они определяются ПОСЛЕ создания `bots` и передают его в `graceful_shutdown`
+        # Обработчики сигналов теперь определяются ПОСЛЕ создания `bots` и передают его в `graceful_shutdown`
         bots_list = list(bots.values())
         if hasattr(signal, 'SIGTERM'):
             loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown(bots_list)))
@@ -3349,7 +3355,6 @@ async def supervisor():
     except Exception as e:
         print(f"🔥 Critical error in supervisor: {e}")
     finally:
-        # Адаптация graceful_shutdown будет на следующем шаге
         if not is_shutting_down:
              await graceful_shutdown(list(bots.values()))
         if os.path.exists(lock_file):
