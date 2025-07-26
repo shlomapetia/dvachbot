@@ -48,7 +48,6 @@ from conan import conan_roaster, conan_phrase
 from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES 
 from deanonymizer import DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS, generate_deanon_info
 from help_text import HELP_TEXT
-from help_broadcaster import help_broadcaster
 
 # ========== Глобальные настройки досок ==========
 # Вставляем новую конфигурационную структуру
@@ -3282,6 +3281,9 @@ async def handle_message(message: Message):
         
 async def start_background_tasks(bots: dict[str, Bot]):
     """Поднимаем все фоновые корутины ОДИН раз за весь runtime"""
+    # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Локальный импорт для разрыва цикла ---
+    from help_broadcaster import help_broadcaster
+    
     tasks = [
         asyncio.create_task(auto_backup()),
         asyncio.create_task(message_broadcaster(bots)),
