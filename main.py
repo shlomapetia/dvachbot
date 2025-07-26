@@ -3317,11 +3317,6 @@ async def supervisor():
         restore_backup_on_start()
         load_state()
 
-        if hasattr(signal, 'SIGTERM'):
-            loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown()))
-        if hasattr(signal, 'SIGINT'):
-            loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown()))
-        
         bots = {}
         for board_id, config in BOARD_CONFIG.items():
             token = config.get("token")
@@ -3335,6 +3330,14 @@ async def supervisor():
             return
 
         print(f"✅ Инициализировано {len(bots)} ботов: {list(bots.keys())}")
+        
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Обработчики сигналов перенесены сюда и исправлены ---
+        # Теперь они определяются ПОСЛЕ создания `bots` и передают его в `graceful_shutdown`
+        bots_list = list(bots.values())
+        if hasattr(signal, 'SIGTERM'):
+            loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown(bots_list)))
+        if hasattr(signal, 'SIGINT'):
+            loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown(bots_list)))
         
         await setup_pinned_messages(bots)
         healthcheck_site = await start_healthcheck()
@@ -3351,7 +3354,7 @@ async def supervisor():
              await graceful_shutdown(list(bots.values()))
         if os.path.exists(lock_file):
             os.remove(lock_file)
-
+            
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
