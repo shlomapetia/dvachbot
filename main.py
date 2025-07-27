@@ -55,35 +55,35 @@ from help_text import HELP_TEXT
 BOARD_CONFIG = {
     'b': {
         "name": "/b/",
-        "description": "Бред - основная доска",
+        "description": "БРЕД - основная доска",
         "username": "@dvach_chatbot",
         "token": os.getenv("BOT_TOKEN"),  # Основной бот
         "admins": {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
     },
     'po': {
         "name": "/po/",
-        "description": "Политика (срачи, политач)",
+        "description": "ПОЛИТАЧ - (срачи, политач)",
         "username": "@dvach_po_chatbot",
         "token": os.getenv("PO_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("PO_ADMINS", "").split(",") if x}
     },
     'a': {
         "name": "/a/",
-        "description": "Аниме (манга, Япония, отаку)",
+        "description": "АНИМЕ - (манга, Япония, отаку)",
         "username": "@dvach_a_chatbot",
         "token": os.getenv("A_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("A_ADMINS", "").split(",") if x}
     },
     'sex': {
         "name": "/sex/",
-        "description": "Сексач (отношения, секс, тян, еот, блекпилл)",
+        "description": "СЕКСАЧ - (отношения, секс, тян, еот, блекпилл)",
         "username": "@dvach_sex_chatbot",
         "token": os.getenv("SEX_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("SEX_ADMINS", "").split(",") if x}
     },
     'vg': {
         "name": "/vg/",
-        "description": "Видеоигры (игры, хобби)",
+        "description": "ВИДЕОИГРЫ - (ПК, игры, хобби)",
         "username": "@dvach_vg_chatbot",
         "token": os.getenv("VG_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("VG_ADMINS", "").split(",") if x}
