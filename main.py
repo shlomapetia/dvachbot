@@ -62,7 +62,7 @@ BOARD_CONFIG = {
     },
     'po': {
         "name": "/po/",
-        "description": "ПОЛИТАЧ - (срачи, политач)",
+        "description": "ПОЛИТАЧ - (срачи, политика)",
         "username": "@dvach_po_chatbot",
         "token": os.getenv("PO_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("PO_ADMINS", "").split(",") if x}
