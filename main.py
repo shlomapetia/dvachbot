@@ -168,12 +168,12 @@ SPAM_RULES = {
         'penalty': [60, 300, 600]  # Шкала наказаний: [1 мин, 5мин, 10 мин]
     },
     'sticker': {
-        'max_per_window': 6,  # 5 стикеров за 15 сек
-        'window_sec': 15,
+        'max_per_window': 6,  # 6 стикеров за 18 сек
+        'window_sec': 18,
         'penalty': [60, 600, 900]  # 1мин, 10мин, 15 мин
     },
     'animation': {  # Гифки
-        'max_per_window': 5,  # 4 гифки за 30 сек
+        'max_per_window': 5,  # 5 гифки за 30 сек
         'window_sec': 24,
         'penalty': [60, 600, 900]  # 1мин, 10мин, 15 мин
     }
