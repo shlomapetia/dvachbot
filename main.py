@@ -2972,44 +2972,37 @@ async def handle_media_group_init(message: Message):
 async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bot, delay: float = 1.5):
     try:
         await asyncio.sleep(delay)
-        if media_group_id in sent_media_groups:
+
+        # Атомарно извлекаем группу из словаря.
+        # Если ее там уже нет (обработана другим таймером или ошибка), выходим.
+        group = current_media_groups.pop(media_group_id, None)
+        if not group or media_group_id in sent_media_groups:
             return
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        # Обрабатываем группу и сразу же удаляем таймер, чтобы избежать повторного вызова
-        if media_group_id in current_media_groups:
-            # Используем переданный, "живой" экземпляр бота
-            await process_complete_media_group(media_group_id, bot_instance)
-        
-        # Гарантированно удаляем таймер после обработки
-        if media_group_id in media_group_timers:
-            # Не отменяем, а просто удаляем, т.к. задача уже завершилась
-            del media_group_timers[media_group_id]
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        # Удаляем таймер, так как мы его сейчас выполним.
+        media_group_timers.pop(media_group_id, None)
+
+        # Передаем извлеченные данные в обработчик.
+        await process_complete_media_group(media_group_id, group, bot_instance)
 
     except asyncio.CancelledError:
-        # Если таймер отменили (пришло новое сообщение в группу), ничего не делаем
+        # Если таймер был отменен (пришло новое сообщение в группу),
+        # это нормальное поведение. Ничего не делаем.
         pass
-    finally:
-        # Дополнительная подстраховка: удаляем группу из current_media_groups, 
-        # если она там по какой-то причине осталась после обработки или отмены.
-        # Это предотвращает утечку памяти.
+    except Exception as e:
+        print(f"❌ Ошибка в complete_media_group_after_delay для {media_group_id}: {e}")
+        # Подчищаем в случае непредвиденной ошибки
         current_media_groups.pop(media_group_id, None)
+        media_group_timers.pop(media_group_id, None)
 
 
-async def process_complete_media_group(media_group_id: str, bot_instance: Bot):
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Используем .pop() для атомарного получения и удаления группы.
-    # Это предотвращает повторную обработку в случае гонки состояний.
-    group = current_media_groups.pop(media_group_id, None)
-    if not group or media_group_id in sent_media_groups:
-        return
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-        
-    if not group.get('media'):
+async def process_complete_media_group(media_group_id: str, group: dict, bot_instance: Bot):
+    if not group or not group.get('media'):
         return
 
+    # Добавляем в sent_media_groups, чтобы избежать повторной отправки
     sent_media_groups.add(media_group_id)
+
     post_num = group['post_num']
     user_id = group['author_id']
     board_id = group['board_id']
