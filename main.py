@@ -1451,56 +1451,35 @@ async def send_message_to_users(
     content: dict,
     reply_info: dict | None = None,
 ) -> list:
-    """Оптимизированная рассылка сообщений пользователям (без логики трансформации)."""
-    if not recipients:
+    """Оптимизированная рассылка сообщений пользователям (с динамическим вызовом)."""
+    if not recipients or not content or 'type' not in content:
         return []
 
-    if not content or 'type' not in content:
-        return []
-
-    board_id = None
-    for b_id, config in BOARD_CONFIG.items():
-        if config['token'] == bot_instance.token:
-            board_id = b_id
-            break
-    
+    board_id = next((b_id for b_id, config in BOARD_CONFIG.items() if config['token'] == bot_instance.token), None)
     if not board_id:
         print(f"КРИТИЧЕСКАЯ ОШИБКА: Не удалось найти доску для бота с токеном ...{bot_instance.token[-6:]}")
         return []
 
     b_data = board_data[board_id]
-    
-    # --- ЛОГИКА ТРАНСФОРМАЦИИ УДАЛЕНА ---
-    # Функция теперь получает уже полностью готовый 'content'.
-    # Мы оставим только логику, которая должна применяться единоразово
-    # ко всему сообщению перед рассылкой.
-    
     modified_content = content.copy()
 
-    # Эта логика должна остаться здесь, т.к. она добавляет текст ко всему сообщению,
-    # а не просто трансформирует поле, и должна применяться один раз на рассылку.
+    # Добавление фраз для режимов (эта логика остается)
     if b_data['suka_blyat_mode']:
         b_data['suka_blyat_counter'] += 1
         if b_data['suka_blyat_counter'] % 3 == 0:
-            if 'text' in modified_content and modified_content['text']:
-                modified_content['text'] += " ... СУКА БЛЯТЬ!"
-            elif 'caption' in modified_content and modified_content['caption']:
-                modified_content['caption'] += " ... СУКА БЛЯТЬ!"
-
+            if 'text' in modified_content and modified_content['text']: modified_content['text'] += " ... СУКА БЛЯТЬ!"
+            elif 'caption' in modified_content and modified_content['caption']: modified_content['caption'] += " ... СУКА БЛЯТЬ!"
     if b_data['slavaukraine_mode'] and random.random() < 0.3:
         phrase = "\n\n" + random.choice(UKRAINIAN_PHRASES)
         if 'text' in modified_content and modified_content['text']: modified_content['text'] += phrase
         elif 'caption' in modified_content and modified_content['caption']: modified_content['caption'] += phrase
-
     elif b_data['zaputin_mode'] and random.random() < 0.3:
         phrase = "\n\n" + random.choice(PATRIOTIC_PHRASES)
         if 'text' in modified_content and modified_content['text']: modified_content['text'] += phrase
         elif 'caption' in modified_content and modified_content['caption']: modified_content['caption'] += phrase
 
-
     blocked_users = set()
     active_recipients = {uid for uid in recipients if uid not in b_data['users']['banned']}
-
     if not active_recipients:
         return []
 
@@ -1511,76 +1490,53 @@ async def send_message_to_users(
             head = f"<i>{header_text}</i>"
 
             reply_to_post = modified_content.get('reply_to_post')
-            original_author = None
-            if reply_to_post and reply_to_post in messages_storage:
-                original_author = messages_storage[reply_to_post].get('author_id')
+            original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
 
             if uid == original_author:
                 head = head.replace("Пост", "🔴 Пост")
 
-            reply_text = ""
-            if reply_to_post:
-                if uid == original_author:
-                    reply_text = f">>{reply_to_post} (You)\n"
-                else:
-                    reply_text = f">>{reply_to_post}\n"
-
+            reply_text = f">>{reply_to_post} (You)\n" if uid == original_author else (f">>{reply_to_post}\n" if reply_to_post else "")
             main_text_raw = modified_content.get('text') or modified_content.get('caption') or ''
             main_text = add_you_to_my_posts(main_text_raw, uid)
             
-            full_text = f"{head}\n\n{reply_text}{main_text}" if (reply_text or main_text) else head
+            # --- НАЧАЛО РЕФАКТОРИНГА ---
 
-            if ct == "text":
-                return await bot_instance.send_message(uid, full_text, reply_to_message_id=reply_to, parse_mode="HTML")
-            
-            elif ct == "photo":
-                img_url = modified_content.get('image_url')
-                if len(full_text) > 1024: full_text = full_text[:1021] + "..."
-                if img_url:
-                    return await bot_instance.send_photo(uid, img_url, caption=full_text, reply_to_message_id=reply_to, parse_mode="HTML")
-                elif "file_id" in modified_content:
-                    return await bot_instance.send_photo(uid, modified_content["file_id"], caption=full_text, reply_to_message_id=reply_to, parse_mode="HTML")
-                else:
-                    return await bot_instance.send_message(uid, full_text, reply_to_message_id=reply_to, parse_mode="HTML")
-        
-            elif ct == "video":
-                if len(full_text) > 1024: full_text = full_text[:1021] + "..."
-                return await bot_instance.send_video(uid, modified_content["file_id"], caption=full_text, reply_to_message_id=reply_to, parse_mode="HTML")
-
-            elif ct == "media_group":
+            # 1. Отдельно обрабатываем media_group из-за его сложной логики
+            if ct == "media_group":
                 if not modified_content.get('media'): return None
                 builder = MediaGroupBuilder()
+                full_text_for_group = f"{head}\n\n{reply_text}{main_text}" if (reply_text or main_text) else head
                 for idx, media in enumerate(modified_content['media']):
-                    media_caption = None
-                    if idx == 0: media_caption = full_text
-                    if media['type'] == 'photo':
-                        builder.add_photo(media=media['file_id'], caption=media_caption, parse_mode="HTML" if media_caption else None)
-                    elif media['type'] == 'video':
-                        builder.add_video(media=media['file_id'], caption=media_caption, parse_mode="HTML" if media_caption else None)
-                    elif media['type'] == 'document':
-                        builder.add_document(media=media['file_id'], caption=media_caption, parse_mode="HTML" if media_caption else None)
+                    caption = full_text_for_group if idx == 0 else None
+                    builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
                 return await bot_instance.send_media_group(chat_id=uid, media=builder.build(), reply_to_message_id=reply_to)
+            
+            # 2. Динамический вызов для всех остальных типов
+            send_method = getattr(bot_instance, f"send_{ct}")
+            kwargs = {'reply_to_message_id': reply_to}
+            
+            full_text = f"{head}\n\n{reply_text}{main_text}" if (reply_text or main_text) else head
 
-            elif ct == "animation":
+            if ct == 'text':
+                kwargs.update(text=full_text, parse_mode="HTML")
+            elif ct in ['photo', 'video', 'animation', 'document', 'audio']:
                 if len(full_text) > 1024: full_text = full_text[:1021] + "..."
-                return await bot_instance.send_animation(uid, modified_content["file_id"], caption=full_text, reply_to_message_id=reply_to, parse_mode="HTML")
-
-            elif ct == "document":
-                if len(full_text) > 1024: full_text = full_text[:1021] + "..."
-                return await bot_instance.send_document(uid, modified_content["file_id"], caption=full_text, reply_to_message_id=reply_to, parse_mode="HTML")
-
-            elif ct == "audio":
-                if len(full_text) > 1024: full_text = full_text[:1021] + "..."
-                return await bot_instance.send_audio(uid, modified_content["file_id"], caption=full_text, reply_to_message_id=reply_to, parse_mode="HTML")
-
-            elif ct == "sticker":
-                return await bot_instance.send_sticker(uid, modified_content["file_id"], reply_to_message_id=reply_to)
-
-            elif ct == "voice":
-                return await bot_instance.send_voice(uid, modified_content["file_id"], caption=head, reply_to_message_id=reply_to, parse_mode="HTML")
-
-            elif ct == "video_note":
-                return await bot_instance.send_video_note(uid, modified_content["file_id"], reply_to_message_id=reply_to)
+                kwargs.update(caption=full_text, parse_mode="HTML")
+                file_source = modified_content.get('image_url') or modified_content.get("file_id")
+                kwargs[ct] = file_source # e.g., kwargs['photo'] = 'some_id'
+            elif ct == 'voice':
+                # У voice особая логика подписи
+                kwargs.update(caption=head, parse_mode="HTML")
+                kwargs[ct] = modified_content["file_id"]
+            elif ct in ['sticker', 'video_note']:
+                # У этих типов нет подписи
+                kwargs[ct] = modified_content["file_id"]
+            else:
+                print(f"❌ Неизвестный тип контента для отправки: {ct}")
+                return None
+                
+            return await send_method(uid, **kwargs)
+            # --- КОНЕЦ РЕФАКТОРИНГА ---
 
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
@@ -1607,9 +1563,7 @@ async def send_message_to_users(
             if not msg: continue
             messages_to_save = msg if isinstance(msg, list) else [msg]
             for m in messages_to_save:
-                if post_num not in post_to_messages:
-                    post_to_messages[post_num] = {}
-                post_to_messages[post_num][uid] = m.message_id
+                post_to_messages.setdefault(post_num, {})[uid] = m.message_id
                 message_to_post[(uid, m.message_id)] = post_num
 
     if blocked_users:
@@ -1619,7 +1573,7 @@ async def send_message_to_users(
                 print(f"🚫 [{board_id}] Пользователь {uid} заблокировал бота, удален из активных")
 
     return list(zip(active_recipients, results))
-
+    
 async def message_broadcaster(bots: dict[str, Bot]):
     """Обработчик очереди сообщений с воркерами для каждой доски."""
     tasks = [
@@ -2899,8 +2853,10 @@ async def handle_audio(message: Message):
         if reply_to_post and reply_to_post in post_to_messages:
             reply_info = post_to_messages[reply_to_post]
 
-    try: await message.delete()
-    except: pass
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass # Сообщение уже удалено или не может быть удалено, игнорируем
     
     content = {
         'type': 'audio', 'header': header, 'file_id': message.audio.file_id,
@@ -2970,8 +2926,10 @@ async def handle_voice(message: Message):
         if reply_to_post and reply_to_post in post_to_messages:
             reply_info = post_to_messages[reply_to_post]
 
-    try: await message.delete()
-    except: pass
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass # Сообщение уже удалено или не может быть удалено, игнорируем
 
     content = {
         'type': 'voice', 'header': header, 'file_id': message.voice.file_id,
@@ -3004,9 +2962,12 @@ async def handle_voice(message: Message):
 @dp.message(F.media_group_id)
 async def handle_media_group_init(message: Message):
     media_group_id = message.media_group_id
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Ранний выход для уже обработанных групп ---
+    # Ранний выход для уже обработанных групп
     if not media_group_id or media_group_id in sent_media_groups:
-        await message.delete()
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
         return
 
     user_id = message.from_user.id
@@ -3015,50 +2976,77 @@ async def handle_media_group_init(message: Message):
 
     b_data = board_data[board_id]
 
-    if user_id in b_data['users']['banned']:
-        await message.delete(); return
-    if b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC):
-        await message.delete(); return
+    # Быстрый выход для забаненных или замученных
+    if user_id in b_data['users']['banned'] or \
+       (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
+        return
     
-    # --- Проверка на спам ---
-    is_new_group = media_group_id not in current_media_groups
+    # Атомарная проверка на спам для группы
+    group = current_media_groups.get(media_group_id)
+    is_leader = False
 
-    if is_new_group:
-        # Притворяемся, что это 'animation', чтобы использовать его правила из SPAM_RULES
+    if group is None:
+        current_media_groups.setdefault(media_group_id, {'is_initializing': True})
+        group = current_media_groups[media_group_id]
+        if group.get('is_initializing'):
+            is_leader = True
+    
+    if is_leader:
+        del group['is_initializing'] 
+
         fake_animation_message = types.Message(
-            message_id=message.message_id,
-            date=message.date,
-            chat=message.chat,
-            from_user=message.from_user,
-            content_type='animation' 
+            message_id=message.message_id, date=message.date, chat=message.chat,
+            from_user=message.from_user, content_type='animation'
         )
         
-        spam_check = await check_spam(user_id, fake_animation_message, board_id)
-        if not spam_check:
-            await message.delete()
-            # Наказываем за 'animation', так как медиа-группа по сути является набором медиа
+        spam_check_passed = await check_spam(user_id, fake_animation_message, board_id)
+        
+        if not spam_check_passed:
+            current_media_groups.pop(media_group_id, None)
+            try:
+                await message.delete()
+            except TelegramBadRequest:
+                pass
             await apply_penalty(message.bot, user_id, 'animation', board_id)
             return
+        
+        reply_to_post = None
+        if message.reply_to_message:
+            lookup_key = (user_id, message.reply_to_message.message_id)
+            reply_to_post = message_to_post.get(lookup_key)
 
-    reply_to_post = None
-    if message.reply_to_message:
-        reply_mid = message.reply_to_message.message_id
-        # Эффективный поиск: используем ID пользователя, который отвечает, и ID сообщения, на которое он отвечает
-        lookup_key = (user_id, reply_mid)
-        reply_to_post = message_to_post.get(lookup_key)
-
-    if media_group_id not in current_media_groups:
         header, post_num = await format_header(board_id)
-        # Получаем оригинальную подпись без каких-либо преобразований
         caption = message.caption or ""
-
-        current_media_groups[media_group_id] = {
+        
+        group.update({
             'board_id': board_id, 'post_num': post_num, 'header': header, 'author_id': user_id,
             'timestamp': datetime.now(UTC), 'media': [], 'caption': caption,
             'reply_to_post': reply_to_post, 'processed_messages': set()
-        }
-
-    group = current_media_groups[media_group_id]
+        })
+    else:
+        while group is not None and group.get('is_initializing'):
+            await asyncio.sleep(0.05)
+            group = current_media_groups.get(media_group_id)
+        
+        if media_group_id not in current_media_groups:
+            try:
+                await message.delete()
+            except TelegramBadRequest:
+                pass
+            return
+    
+    group = current_media_groups.get(media_group_id)
+    if not group:
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
+        return
+        
     if message.message_id not in group['processed_messages']:
         media_data = {'type': message.content_type, 'file_id': None, 'message_id': message.message_id}
         if message.photo: media_data['file_id'] = message.photo[-1].file_id
@@ -3069,7 +3057,10 @@ async def handle_media_group_init(message: Message):
             group['media'].append(media_data)
             group['processed_messages'].add(message.message_id)
 
-    await message.delete()
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
 
     if media_group_id in media_group_timers:
         media_group_timers[media_group_id].cancel()
@@ -3077,7 +3068,7 @@ async def handle_media_group_init(message: Message):
     media_group_timers[media_group_id] = asyncio.create_task(
         complete_media_group_after_delay(media_group_id, message.bot, delay=1.5)
     )
-
+    
 async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bot, delay: float = 1.5):
     try:
         await asyncio.sleep(delay)
@@ -3188,11 +3179,17 @@ async def handle_message(message: Message):
                        b_data['shadow_mutes'][user_id] > datetime.now(UTC))
 
     if is_shadow_muted:
-        try: await message.delete()
-        except: pass
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass # Сообщение уже удалено или не может быть удалено, игнорируем
     
     if not message.text and not message.caption and not message.content_type:
-        if not is_shadow_muted: await message.delete()
+        if not is_shadow_muted:
+            try:
+                await message.delete()
+            except TelegramBadRequest:
+                pass # Сообщение уже удалено или не может быть удалено, игнорируем
         return
         
     if message.media_group_id:
@@ -3223,13 +3220,21 @@ async def handle_message(message: Message):
             print(f"✅ [{board_id}] Добавлен новый пользователь: ID {user_id}")
 
         if user_id in b_data['users']['banned']:
-            if not is_shadow_muted: await message.delete()
+            if not is_shadow_muted:
+                try:
+                    await message.delete()
+                except TelegramBadRequest:
+                    pass # Сообщение уже удалено или не может быть удалено, игнорируем
             return
 
         # 6. Спам-проверка
         spam_check = await check_spam(user_id, message, board_id)
         if not spam_check:
-            if not is_shadow_muted: await message.delete()
+            if not is_shadow_muted:
+                try:
+                    await message.delete()
+                except TelegramBadRequest:
+                    pass # Сообщение уже удалено или не может быть удалено, игнорируем
             msg_type = message.content_type
             if message.content_type in ['photo', 'video', 'document'] and message.caption:
                 msg_type = 'text'
@@ -3250,8 +3255,10 @@ async def handle_message(message: Message):
         # 8. Формирование заголовка и удаление исходного сообщения
         header, current_post_num = await format_header(board_id)
         if not is_shadow_muted:
-            try: await message.delete()
-            except: pass
+            try:
+                await message.delete()
+            except TelegramBadRequest:
+                pass # Сообщение уже удалено или не может быть удалено, игнорируем
 
         # 9. Формирование СЫРОГО словаря `content`
         content = {'type': message.content_type, 'header': header, 'reply_to_post': reply_to_post}
