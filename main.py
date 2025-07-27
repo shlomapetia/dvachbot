@@ -1581,28 +1581,39 @@ async def send_message_to_users(
         except TelegramForbiddenError:
             blocked_users.add(uid)
             return None
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         except TelegramBadRequest as e:
-            # Проверяем, связана ли ошибка с запретом на голосовые сообщения
             if "VOICE_MESSAGES_FORBIDDEN" in e.message and modified_content.get("type") == "voice":
                 print(f"ℹ️ Пользователь {uid} запретил голосовые. Отправляю как аудио...")
                 try:
-                    # Повторяем отправку, но уже как audio
                     return await bot_instance.send_audio(
                         chat_id=uid,
                         audio=modified_content["file_id"],
-                        caption=f"<i>{modified_content['header']}</i>", # Голосовые не имеют полного caption, только header
+                        caption=f"<i>{modified_content['header']}</i>",
                         parse_mode="HTML",
                         reply_to_message_id=reply_to
                     )
                 except Exception as audio_e:
                     print(f"❌ Не удалось отправить как аудио для {uid}: {audio_e}")
                     return None
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            elif "VIDEO_MESSAGES_FORBIDDEN" in e.message and modified_content.get("type") == "video_note":
+                print(f"ℹ️ Пользователь {uid} запретил видеосообщения. Отправляю как видео...")
+                try:
+                    # Повторяем отправку, но уже как обычное видео
+                    return await bot_instance.send_video(
+                        chat_id=uid,
+                        video=modified_content["file_id"],
+                        caption=f"<i>{modified_content['header']}</i>", # "Кружки" не имеют подписи, добавляем только заголовок
+                        parse_mode="HTML",
+                        reply_to_message_id=reply_to
+                    )
+                except Exception as video_e:
+                    print(f"❌ Не удалось отправить как видео для {uid}: {video_e}")
+                    return None
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             else:
-                # Если это другая ошибка BadRequest, логируем ее как обычно
                 print(f"❌ Ошибка отправки (BadRequest) {uid} ботом {bot_instance.id}: {e}")
                 return None
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         except Exception as e:
             print(f"❌ Ошибка отправки {uid} ботом {bot_instance.id}: {e}")
             return None
@@ -3139,16 +3150,20 @@ async def handle_media_group_init(message: Message):
             pass
         return
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Управление таймером и группой ---
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Устранение Race Condition ---
     group = current_media_groups.get(media_group_id)
-    
-    # Если это первое сообщение в группе, создаем ее
-    if group is None:
-        # Атомарное создание группы
-        current_media_groups.setdefault(media_group_id, {})
-        group = current_media_groups[media_group_id]
+    is_leader = False
 
-        # Симулируем сообщение для спам-проверки всей группы как единого действия
+    # setdefault является атомарной операцией. Первый, кто ее вызовет, создаст запись
+    # и сможет стать лидером. Остальные получат уже существующий объект.
+    if group is None:
+        group = current_media_groups.setdefault(media_group_id, {'is_initializing': True})
+        if group.get('is_initializing'):
+            is_leader = True
+    
+    # Только "лидер" выполняет этот блок для инициализации группы
+    if is_leader:
+        # Симулируем сообщение для спам-проверки
         fake_animation_message = types.Message(
             message_id=message.message_id, date=message.date, chat=message.chat,
             from_user=message.from_user, content_type='animation', media_group_id=media_group_id
@@ -3161,7 +3176,7 @@ async def handle_media_group_init(message: Message):
         spam_check_passed = await check_spam(user_id, fake_animation_message, board_id)
         
         if not spam_check_passed:
-            current_media_groups.pop(media_group_id, None)
+            current_media_groups.pop(media_group_id, None) # Удаляем группу, если спам
             try: await message.delete()
             except TelegramBadRequest: pass
             await apply_penalty(message.bot, user_id, 'animation', board_id)
@@ -3175,13 +3190,33 @@ async def handle_media_group_init(message: Message):
         header, post_num = await format_header(board_id)
         caption = message.caption or ""
         
+        # Заполняем группу данными
         group.update({
             'board_id': board_id, 'post_num': post_num, 'header': header, 'author_id': user_id,
             'timestamp': datetime.now(UTC), 'media': [], 'caption': caption,
             'reply_to_post': reply_to_post, 'processed_messages': set()
         })
+        # Снимаем флаг инициализации, разрешая остальным продолжать
+        group.pop('is_initializing', None)
+    else:
+        # "Последователи" ждут, пока "лидер" закончит инициализацию
+        while group is not None and group.get('is_initializing'):
+            await asyncio.sleep(0.05)
+            group = current_media_groups.get(media_group_id)
+        
+        # Если лидер отменил создание группы (из-за спама), выходим
+        if media_group_id not in current_media_groups:
+            try: await message.delete()
+            except TelegramBadRequest: pass
+            return
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # Добавляем медиа в группу, если его там еще нет
+    # Этот блок теперь выполняется всеми сообщениями ПОСЛЕ инициализации
+    if not group:
+        try: await message.delete()
+        except TelegramBadRequest: pass
+        return
+        
     if message.message_id not in group['processed_messages']:
         media_data = {'type': message.content_type, 'file_id': None}
         if message.photo: media_data['file_id'] = message.photo[-1].file_id
@@ -3198,14 +3233,13 @@ async def handle_media_group_init(message: Message):
     except TelegramBadRequest:
         pass
 
-    # Сбрасываем и перезапускаем таймер с каждым новым сообщением в группе
+    # Перезапускаем таймер с каждым новым сообщением
     if media_group_id in media_group_timers:
         media_group_timers[media_group_id].cancel()
     
     media_group_timers[media_group_id] = asyncio.create_task(
         complete_media_group_after_delay(media_group_id, message.bot, delay=1.5)
     )
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
 async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bot, delay: float = 1.5):
     try:
