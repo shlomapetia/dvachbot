@@ -1563,11 +1563,16 @@ async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
 
             recipients = msg_data['recipients']
             content = msg_data['content']
+            post_num = msg_data['post_num']  # Извлекаем post_num
             reply_info = msg_data.get('reply_info', {})
             active_recipients = {uid for uid in recipients if uid not in b_data['users']['banned']}
 
             if not active_recipients:
                 continue
+            
+            # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
+            # Добавляем post_num в словарь content перед отправкой
+            content['post_num'] = post_num
 
             await send_message_to_users(
                 bot_instance,
