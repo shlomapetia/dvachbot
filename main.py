@@ -288,70 +288,75 @@ async def git_commit_and_push():
 
 
 def sync_git_operations(token: str) -> bool:
-    """Синхронные Git-операции для бэкапа файлов ВСЕХ досок"""
+    """Синхронные Git-операции для бэкапа с жесткими таймаутами и подробным логированием."""
+    GIT_TIMEOUT = 20  # Секунд на каждую сетевую git-операцию
     try:
         work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot-backup.git"
 
+        # --- Клонирование или Обновление ---
         if not os.path.exists(os.path.join(work_dir, ".git")):
-            # Клонирование репозитория
-            clone_cmd = ["git", "clone", repo_url, work_dir]
-            result = subprocess.run(clone_cmd, capture_output=True, text=True)
+            clone_cmd = ["git", "clone", "--depth=1", repo_url, work_dir]
+            print(f"Git: Выполняю: {' '.join(clone_cmd)}")
+            result = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
             if result.returncode != 0:
-                print(f"❌ Ошибка клонирования: {result.stderr}")
+                print(f"❌ Ошибка клонирования (код {result.returncode}):\n--- stderr ---\n{result.stderr}\n--- stdout ---\n{result.stdout}")
                 return False
-            print("✅ Репозиторий клонирован")
+            print("✅ Git: Репозиторий успешно клонирован.")
         else:
-            # Обновление репозитория
             pull_cmd = ["git", "-C", work_dir, "pull"]
-            result = subprocess.run(pull_cmd, capture_output=True, text=True)
+            print(f"Git: Выполняю: {' '.join(pull_cmd)}")
+            result = subprocess.run(pull_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
             if result.returncode != 0:
-                print(f"⚠️ Ошибка обновления: {result.stderr}")
+                print(f"⚠️ Ошибка обновления (код {result.returncode}):\n--- stderr ---\n{result.stderr}\n--- stdout ---\n{result.stdout}")
+                # Не критично, продолжаем, но это плохой знак
 
-        # Копирование файлов всех досок
+        # --- Копирование файлов ---
         files_to_copy = glob.glob(os.path.join(os.getcwd(), "*_state.json"))
         files_to_copy += glob.glob(os.path.join(os.getcwd(), "*_reply_cache.json"))
         
         if not files_to_copy:
-            print("⚠️ Нет файлов для бэкапа")
-            return False
+            print("⚠️ Нет файлов для бэкапа, пропуск.")
+            return True # Успешное завершение, так как нет работы
 
-        copied_files = []
         for src_path in files_to_copy:
             shutil.copy2(src_path, work_dir)
-            copied_files.append(os.path.basename(src_path))
 
-        # Git операции
-        subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True)
-        subprocess.run(["git", "-C", work_dir, "config", "user.email", "backup@dvachbot.com"], check=True)
-
-        subprocess.run(["git", "-C", work_dir, "add", "."], check=True)
+        # --- Локальные Git операции (быстрые, короткий таймаут) ---
+        subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True, timeout=5)
+        subprocess.run(["git", "-C", work_dir, "config", "user.email", "backup@dvachbot.com"], check=True, timeout=5)
+        subprocess.run(["git", "-C", work_dir, "add", "."], check=True, timeout=5)
+        
+        # Проверяем, есть ли что коммитить
+        status_result = subprocess.run(["git", "-C", work_dir, "status", "--porcelain"], capture_output=True, text=True, timeout=5)
+        if not status_result.stdout:
+            print("✅ Git: Нет изменений для коммита.")
+            return True
 
         commit_msg = f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
-        # Выполняем коммит, даже если нет изменений (для фиксации времени бэкапа)
-        subprocess.run(["git", "-C", work_dir, "commit", "--allow-empty", "-m", commit_msg], check=True)
+        subprocess.run(["git", "-C", work_dir, "commit", "-m", commit_msg], check=True, timeout=5)
 
-        push_cmd = ["git", "-C", work_dir, "push", "-u", "origin", "main"]
-        result = subprocess.run(push_cmd, capture_output=True, text=True)
+        # --- Push - самая важная операция ---
+        push_cmd = ["git", "-C", work_dir, "push", "origin", "main"]
+        print(f"Git: Выполняю: {' '.join(push_cmd)}")
+        result = subprocess.run(push_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
 
-        if result.returncode != 0:
-            print(f"❌ Ошибка пуша: {result.stderr}")
-            # Попробуем сделать force push, если обычный не прошел
-            print("Попытка force push...")
-            force_push_cmd = ["git", "-C", work_dir, "push", "-f", "origin", "main"]
-            force_result = subprocess.run(force_push_cmd, capture_output=True, text=True)
-            if force_result.returncode != 0:
-                 print(f"❌ Ошибка force push: {force_result.stderr}")
-                 return False
-            
-        print(f"✅ Бекапы сохранены в GitHub: {len(copied_files)} файлов")
-        return True
+        if result.returncode == 0:
+            print(f"✅ Бекап успешно отправлен в GitHub.\n--- stdout ---\n{result.stdout}")
+            return True
+        else:
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА PUSH (код {result.returncode}):\n--- stderr ---\n{result.stderr}\n--- stdout ---\n{result.stdout}")
+            return False
 
-    except Exception as e:
-        print(f"⛔ Синхронная Git ошибка: {str(e)}")
+    except subprocess.TimeoutExpired as e:
+        print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Таймаут операции git! Команда '{' '.join(e.cmd)}' не завершилась за {e.timeout} секунд.")
+        print(f"--- stderr ---\n{e.stderr or '(пусто)'}\n--- stdout ---\n{e.stdout or '(пусто)'}")
         return False
-
+    except Exception as e:
+        print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА в sync_git_operations: {e}")
+        return False
+        
 dp = Dispatcher()
 # Настройка логирования - только важные сообщения
 logging.basicConfig(
@@ -404,7 +409,7 @@ async def auto_backup():
     """Автоматическое сохранение данных ВСЕХ досок и бэкап каждые 1 ч"""
     while True:
         try:
-            await asyncio.sleep(3600)  # 1 ч
+            await asyncio.sleep(900)  # 15 м
 
             if is_shutting_down:
                 break
@@ -466,7 +471,7 @@ ADMINS = {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
 SPAM_LIMIT = 14
 SPAM_WINDOW = 15
 STATE_FILE = 'state.json'
-SAVE_INTERVAL = 3600  # секунд
+SAVE_INTERVAL = 900  # секунд
 STICKER_WINDOW = 10  # секунд
 STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
