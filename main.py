@@ -69,7 +69,7 @@ BOARD_CONFIG = {
     },
     'a': {
         "name": "/a/",
-        "description": "АНИМЕ - (манга, Япония, отаку)",
+        "description": "АНИМЕ - (манга, Япония, хентай)",
         "username": "@dvach_a_chatbot",
         "token": os.getenv("A_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("A_ADMINS", "").split(",") if x}
