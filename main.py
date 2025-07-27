@@ -3129,10 +3129,7 @@ async def handle_media_group_init(message: Message):
     media_group_id = message.media_group_id
     # Ранний выход для уже обработанных групп
     if not media_group_id or media_group_id in sent_media_groups:
-        try:
-            await message.delete()
-        except TelegramBadRequest:
-            pass
+        # НЕ УДАЛЯЕМ СООБЩЕНИЕ, ЧТОБЫ ИЗБЕЖАТЬ FLOOD-ОШИБОК
         return
 
     user_id = message.from_user.id
@@ -3144,10 +3141,7 @@ async def handle_media_group_init(message: Message):
     # Быстрый выход для забаненных или замученных
     if user_id in b_data['users']['banned'] or \
        (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
-        try:
-            await message.delete()
-        except TelegramBadRequest:
-            pass
+        # НЕ УДАЛЯЕМ СООБЩЕНИЕ
         return
     
     group = current_media_groups.get(media_group_id)
@@ -3162,7 +3156,6 @@ async def handle_media_group_init(message: Message):
     
     # Только "лидер" выполняет этот блок для инициализации группы
     if is_leader:
-        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
         # Симулируем текстовое сообщение, чтобы применить общие лимиты частоты, а не специфичные для гифок.
         # Это предотвращает ложное срабатывание на повтор и использует более адекватные лимиты.
         fake_text_message = types.Message(
@@ -3178,12 +3171,9 @@ async def handle_media_group_init(message: Message):
         
         if not spam_check_passed:
             current_media_groups.pop(media_group_id, None) 
-            try: await message.delete()
-            except TelegramBadRequest: pass
-            # Применяем наказание за "текстовый спам", что по сути является флудом/превышением частоты.
+            # НЕ УДАЛЯЕМ СООБЩЕНИЕ
             await apply_penalty(message.bot, user_id, 'text', board_id)
             return
-        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         
         reply_to_post = None
         if message.reply_to_message:
@@ -3193,11 +3183,13 @@ async def handle_media_group_init(message: Message):
         header, post_num = await format_header(board_id)
         caption = message.caption or ""
         
-        # Заполняем группу данными
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+        # Инициализируем хранилище для ID исходных сообщений
         group.update({
             'board_id': board_id, 'post_num': post_num, 'header': header, 'author_id': user_id,
             'timestamp': datetime.now(UTC), 'media': [], 'caption': caption,
-            'reply_to_post': reply_to_post, 'processed_messages': set()
+            'reply_to_post': reply_to_post, 'processed_messages': set(),
+            'source_message_ids': set() # <--- НОВОЕ ПОЛЕ
         })
         # Снимаем флаг инициализации, разрешая остальным продолжать
         group.pop('is_initializing', None)
@@ -3209,15 +3201,15 @@ async def handle_media_group_init(message: Message):
         
         # Если лидер отменил создание группы (из-за спама), выходим
         if media_group_id not in current_media_groups:
-            try: await message.delete()
-            except TelegramBadRequest: pass
             return
 
     # Этот блок теперь выполняется всеми сообщениями ПОСЛЕ инициализации
     if not group:
-        try: await message.delete()
-        except TelegramBadRequest: pass
         return
+        
+    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+    # Собираем ID всех сообщений из группы для последующего пакетного удаления
+    group.get('source_message_ids', set()).add(message.message_id)
         
     if message.message_id not in group['processed_messages']:
         media_data = {'type': message.content_type, 'file_id': None}
@@ -3230,10 +3222,8 @@ async def handle_media_group_init(message: Message):
             group['media'].append(media_data)
             group['processed_messages'].add(message.message_id)
 
-    try:
-        await message.delete()
-    except TelegramBadRequest:
-        pass
+    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+    # Удаление отдельного сообщения убрано. Удаление будет пакетным на следующем шаге.
 
     # Перезапускаем таймер с каждым новым сообщением
     if media_group_id in media_group_timers:
@@ -3247,7 +3237,6 @@ async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bo
     try:
         await asyncio.sleep(delay)
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Атомарное извлечение группы ---
         # Атомарно извлекаем группу из словаря. Если ее там уже нет, выходим.
         group = current_media_groups.pop(media_group_id, None)
         if not group or media_group_id in sent_media_groups:
@@ -3256,9 +3245,28 @@ async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bo
         # Удаляем таймер, так как мы его сейчас выполним.
         media_group_timers.pop(media_group_id, None)
 
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Пакетное удаление ---
+        # Извлекаем ID собранных сообщений и ID автора (который является chat_id)
+        source_message_ids = group.get('source_message_ids')
+        author_id = group.get('author_id')
+
+        if source_message_ids and author_id:
+            try:
+                # Используем специальный метод API для удаления нескольких сообщений одним запросом.
+                # Это предотвращает срабатывание flood-лимитов Telegram.
+                await bot_instance.delete_messages(
+                    chat_id=author_id,
+                    message_ids=list(source_message_ids)
+                )
+            except TelegramBadRequest as e:
+                # Игнорируем ошибки, если сообщения уже удалены или слишком старые.
+                print(f"ℹ️ Не удалось выполнить пакетное удаление для media group {media_group_id}: {e}")
+            except Exception as e:
+                print(f"❌ Ошибка при пакетном удалении для media group {media_group_id}: {e}")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
         # Передаем извлеченные данные в обработчик.
         await process_complete_media_group(media_group_id, group, bot_instance)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     except asyncio.CancelledError:
         # Если таймер был отменен (пришло новое сообщение в группу) - это норма.
@@ -3268,7 +3276,6 @@ async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bo
         # Подчищаем в случае непредвиденной ошибки
         current_media_groups.pop(media_group_id, None)
         media_group_timers.pop(media_group_id, None)
-
 
 async def process_complete_media_group(media_group_id: str, group: dict, bot_instance: Bot):
     if not group or not group.get('media'):
