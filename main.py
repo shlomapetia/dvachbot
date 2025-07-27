@@ -1485,7 +1485,12 @@ async def send_message_to_users(
 
     async def really_send(uid: int, reply_to: int | None):
         try:
-            ct = modified_content["type"]
+            # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
+            ct_raw = modified_content["type"]
+            # Корректно получаем строковое значение типа, будь то enum или строка
+            ct = ct_raw.value if hasattr(ct_raw, 'value') else ct_raw
+            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+            
             header_text = modified_content['header']
             head = f"<i>{header_text}</i>"
 
@@ -1499,9 +1504,6 @@ async def send_message_to_users(
             main_text_raw = modified_content.get('text') or modified_content.get('caption') or ''
             main_text = add_you_to_my_posts(main_text_raw, uid)
             
-            # --- НАЧАЛО РЕФАКТОРИНГА ---
-
-            # 1. Отдельно обрабатываем media_group из-за его сложной логики
             if ct == "media_group":
                 if not modified_content.get('media'): return None
                 builder = MediaGroupBuilder()
@@ -1511,7 +1513,6 @@ async def send_message_to_users(
                     builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
                 return await bot_instance.send_media_group(chat_id=uid, media=builder.build(), reply_to_message_id=reply_to)
             
-            # 2. Динамический вызов для всех остальных типов
             send_method = getattr(bot_instance, f"send_{ct}")
             kwargs = {'reply_to_message_id': reply_to}
             
@@ -1523,20 +1524,17 @@ async def send_message_to_users(
                 if len(full_text) > 1024: full_text = full_text[:1021] + "..."
                 kwargs.update(caption=full_text, parse_mode="HTML")
                 file_source = modified_content.get('image_url') or modified_content.get("file_id")
-                kwargs[ct] = file_source # e.g., kwargs['photo'] = 'some_id'
+                kwargs[ct] = file_source
             elif ct == 'voice':
-                # У voice особая логика подписи
                 kwargs.update(caption=head, parse_mode="HTML")
                 kwargs[ct] = modified_content["file_id"]
             elif ct in ['sticker', 'video_note']:
-                # У этих типов нет подписи
                 kwargs[ct] = modified_content["file_id"]
             else:
                 print(f"❌ Неизвестный тип контента для отправки: {ct}")
                 return None
                 
             return await send_method(uid, **kwargs)
-            # --- КОНЕЦ РЕФАКТОРИНГА ---
 
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
@@ -1545,6 +1543,7 @@ async def send_message_to_users(
             blocked_users.add(uid)
             return None
         except Exception as e:
+            # Теперь мы будем видеть настоящую ошибку, если она не AttributeError
             print(f"❌ Ошибка отправки {uid} ботом {bot_instance.id}: {e}")
             return None
 
