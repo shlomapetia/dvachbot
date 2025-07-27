@@ -103,72 +103,77 @@ async def conan_roaster(state, messages_storage, post_to_messages, message_to_po
     """Каждые пару часов Конан отвечает рандомному посту на случайной доске."""
     while True:
         try:
-            await asyncio.sleep(secrets.randbelow(3600) + 7200)
+            # Случайная задержка от 2 до 4 часов
+            await asyncio.sleep(secrets.randbelow(7200) + 7200)
 
-            # 1. Проверяем, есть ли вообще посты с известной доской
+            # 1. Выбираем случайную доску для постинга
+            # Убеждаемся, что на доске есть активные пользователи
+            available_boards = [
+                b_id for b_id, b_data in board_data.items() 
+                if b_data['users']['active'] - b_data['users']['banned']
+            ]
+            if not available_boards:
+                continue
+            
+            board_id = random.choice(available_boards)
+            b_data = board_data[board_id]
+            recipients = b_data['users']['active'] - b_data['users']['banned']
+
+            # 2. Выбираем случайный пост из последних 50, принадлежащих ЛЮБОЙ доске
+            # Это позволяет Конану отвечать на посты с других досок
             valid_posts = [
-                p_num for p_num, p_data in messages_storage.items()
-                if p_data.get("board_id") and p_num in post_to_messages
+                p for p in messages_storage.keys() if p in post_to_messages
             ]
             if not valid_posts:
                 continue
 
-            # 2. Выбираем случайный пост из последних 50
-            post_num = secrets.choice(valid_posts[-50:] if len(valid_posts) > 50 else valid_posts)
+            post_num_to_reply = secrets.choice(valid_posts[-50:] if len(valid_posts) > 50 else valid_posts)
             
-            # 3. Получаем данные оригинального поста, включая его доску
-            original_post_data = messages_storage.get(post_num, {})
-            original_board_id = original_post_data.get('board_id')
+            original_post_data = messages_storage.get(post_num_to_reply, {})
             original_author_id = original_post_data.get('author_id')
-
-            # 4. Проверяем, что доска поста все еще существует и есть кому отвечать
-            if not original_board_id or original_board_id not in message_queues:
-                continue
             
-            b_data = board_data[original_board_id]
-            if not b_data['users']['active']:
-                continue
-            
-            reply_map = post_to_messages.get(post_num, {})
+            # Проверяем, что есть кому отвечать (карты рассылки)
+            reply_map = post_to_messages.get(post_num_to_reply, {})
             if not reply_map:
                 continue
 
-            # 5. Генерируем фразу и заголовок в контексте нужной доски
+            # 3. Генерируем фразу
             phrase = conan_phrase()
-            header, new_pnum = await format_header(original_board_id)
 
-            # 6. Сохраняем метаданные ответа, ОБЯЗАТЕЛЬНО указывая board_id
-            messages_storage[new_pnum] = {
-                'author_id': 0,  # 0 = системное сообщение
-                'timestamp': datetime.now(UTC),
-                'content': {
-                    'type': 'text',
-                    'header': header,
-                    'text': phrase
-                },
-                'reply_to': post_num,
-                'board_id': original_board_id
-            }
+            # 4. Формируем заголовок для КОНКРЕТНОЙ доски
+            header, new_pnum = await format_header(board_id)
 
-            # 7. Формируем контент для отправки
+            # 5. Формируем контент для отправки
             content = {
                 "type": "text",
                 "header": header,
                 "text": phrase,
-                "reply_to_post": post_num
+                "reply_to_post": post_num_to_reply
             }
 
-            # 8. Отправляем в очередь КОНКРЕТНОЙ доски
-            await message_queues[original_board_id].put({
-                "recipients": b_data["users"]["active"],
+            # 6. Сохраняем метаданные сообщения Конана
+            messages_storage[new_pnum] = {
+                'author_id': 0,  # 0 = системное сообщение
+                'timestamp': datetime.now(UTC),
+                'content': content,
+                'reply_to': post_num_to_reply,
+                'board_id': board_id # Указываем, на какой доске было опубликовано
+            }
+
+            # 7. Отправляем в очередь конкретной доски
+            await message_queues[board_id].put({
+                "recipients": recipients,
                 "content": content,
                 "post_num": new_pnum,
                 "reply_info": reply_map,
-                "board_id": original_board_id
+                "board_id": board_id,
+                # Передаем ID автора для корректной обработки (You) в send_message_to_users
+                # Хотя Конан отвечает на чужой пост, эта информация может быть полезна
+                "original_author": original_author_id  
             })
 
-            print(f"✅ Conan ответил на пост #{post_num} на доске /{original_board_id}/: {phrase[:50]}...")
+            print(f"✅ [{board_id}] Conan reply to #{post_num_to_reply} added to queue: {phrase[:50]}...")
 
         except Exception as e:
             print(f"❌ Conan error: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(120)
