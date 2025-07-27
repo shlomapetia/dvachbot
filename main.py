@@ -850,12 +850,14 @@ async def graceful_shutdown(bots: list[Bot]):
 
     # 3. Сохраняем и пушим данные. САМЫЙ ВАЖНЫЙ ЭТАП.
     # Принудительно ограничиваем время на бэкап, чтобы успеть до SIGKILL от хостинга.
-    print("💾 Попытка финального сохранения и бэкапа в GitHub (таймаут 25 секунд)...")
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    print("💾 Попытка финального сохранения и бэкапа в GitHub (таймаут 50 секунд)...")
     try:
-        await asyncio.wait_for(save_all_boards_and_backup(), timeout=25.0)
+        await asyncio.wait_for(save_all_boards_and_backup(), timeout=50.0)
         print("✅ Финальный бэкап успешно завершен в рамках таймаута.")
     except asyncio.TimeoutError:
-        print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Финальный бэкап не успел выполниться за 25 секунд и был прерван!")
+        print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Финальный бэкап не успел выполниться за 50 секунд и был прерван!")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     except Exception as e:
         print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Не удалось выполнить финальный бэкап: {e}")
 
@@ -1546,11 +1548,9 @@ async def send_message_to_users(
                     builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
                 return await bot_instance.send_media_group(chat_id=uid, media=builder.build(), reply_to_message_id=reply_to)
             
-            # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
             method_name = f"send_{ct}"
             if ct == 'text':
                 method_name = 'send_message'
-            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
             send_method = getattr(bot_instance, method_name)
             kwargs = {'reply_to_message_id': reply_to}
@@ -1581,6 +1581,28 @@ async def send_message_to_users(
         except TelegramForbiddenError:
             blocked_users.add(uid)
             return None
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        except TelegramBadRequest as e:
+            # Проверяем, связана ли ошибка с запретом на голосовые сообщения
+            if "VOICE_MESSAGES_FORBIDDEN" in e.message and modified_content.get("type") == "voice":
+                print(f"ℹ️ Пользователь {uid} запретил голосовые. Отправляю как аудио...")
+                try:
+                    # Повторяем отправку, но уже как audio
+                    return await bot_instance.send_audio(
+                        chat_id=uid,
+                        audio=modified_content["file_id"],
+                        caption=f"<i>{modified_content['header']}</i>", # Голосовые не имеют полного caption, только header
+                        parse_mode="HTML",
+                        reply_to_message_id=reply_to
+                    )
+                except Exception as audio_e:
+                    print(f"❌ Не удалось отправить как аудио для {uid}: {audio_e}")
+                    return None
+            else:
+                # Если это другая ошибка BadRequest, логируем ее как обычно
+                print(f"❌ Ошибка отправки (BadRequest) {uid} ботом {bot_instance.id}: {e}")
+                return None
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         except Exception as e:
             print(f"❌ Ошибка отправки {uid} ботом {bot_instance.id}: {e}")
             return None
@@ -3117,42 +3139,31 @@ async def handle_media_group_init(message: Message):
             pass
         return
     
-    # --- Атомарное избрание лидера ---
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Управление таймером и группой ---
     group = current_media_groups.get(media_group_id)
-    is_leader = False
-
-    if group is None:
-        current_media_groups.setdefault(media_group_id, {'is_initializing': True})
-        group = current_media_groups[media_group_id]
-        if group.get('is_initializing'):
-            is_leader = True
     
-    if is_leader:
-        # Только лидер выполняет этот блок
-        del group['is_initializing'] # Убираем флаг, чтобы другие обработчики не ждали
+    # Если это первое сообщение в группе, создаем ее
+    if group is None:
+        # Атомарное создание группы
+        current_media_groups.setdefault(media_group_id, {})
+        group = current_media_groups[media_group_id]
 
-        # --- НАЧАЛО ИЗМЕНЕНИЯ: Создание корректного объекта для спам-проверки ---
-        # Создаем фиктивное сообщение, чтобы медиагруппа считалась одной сущностью для спам-фильтра
+        # Симулируем сообщение для спам-проверки всей группы как единого действия
         fake_animation_message = types.Message(
             message_id=message.message_id, date=message.date, chat=message.chat,
             from_user=message.from_user, content_type='animation', media_group_id=media_group_id
         )
-        # Для прохождения проверки в check_spam, нужно создать и присвоить объект Animation.
-        # В качестве file_id используем media_group_id, т.к. он уникален для каждой группы.
         fake_animation_message.animation = types.Animation(
             file_id=media_group_id, file_unique_id=media_group_id, 
             width=1, height=1, duration=1
         )
-        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         
         spam_check_passed = await check_spam(user_id, fake_animation_message, board_id)
         
         if not spam_check_passed:
             current_media_groups.pop(media_group_id, None)
-            try:
-                await message.delete()
-            except TelegramBadRequest:
-                pass
+            try: await message.delete()
+            except TelegramBadRequest: pass
             await apply_penalty(message.bot, user_id, 'animation', board_id)
             return
         
@@ -3169,34 +3180,15 @@ async def handle_media_group_init(message: Message):
             'timestamp': datetime.now(UTC), 'media': [], 'caption': caption,
             'reply_to_post': reply_to_post, 'processed_messages': set()
         })
-    else:
-        # Остальные обработчики ждут, пока лидер завершит инициализацию
-        while group is not None and group.get('is_initializing'):
-            await asyncio.sleep(0.05)
-            group = current_media_groups.get(media_group_id)
-        
-        # Если лидер отменил создание группы (из-за спама), выходим
-        if media_group_id not in current_media_groups:
-            try:
-                await message.delete()
-            except TelegramBadRequest:
-                pass
-            return
-    
-    group = current_media_groups.get(media_group_id)
-    if not group:
-        try:
-            await message.delete()
-        except TelegramBadRequest:
-            pass
-        return
-        
+
+    # Добавляем медиа в группу, если его там еще нет
     if message.message_id not in group['processed_messages']:
-        media_data = {'type': message.content_type, 'file_id': None, 'message_id': message.message_id}
+        media_data = {'type': message.content_type, 'file_id': None}
         if message.photo: media_data['file_id'] = message.photo[-1].file_id
         elif message.video: media_data['file_id'] = message.video.file_id
         elif message.document: media_data['file_id'] = message.document.file_id
         elif message.audio: media_data['file_id'] = message.audio.file_id
+        
         if media_data['file_id']:
             group['media'].append(media_data)
             group['processed_messages'].add(message.message_id)
@@ -3206,19 +3198,21 @@ async def handle_media_group_init(message: Message):
     except TelegramBadRequest:
         pass
 
+    # Сбрасываем и перезапускаем таймер с каждым новым сообщением в группе
     if media_group_id in media_group_timers:
         media_group_timers[media_group_id].cancel()
     
     media_group_timers[media_group_id] = asyncio.create_task(
         complete_media_group_after_delay(media_group_id, message.bot, delay=1.5)
     )
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
 async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bot, delay: float = 1.5):
     try:
         await asyncio.sleep(delay)
 
-        # Атомарно извлекаем группу из словаря.
-        # Если ее там уже нет (обработана другим таймером или ошибка), выходим.
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Атомарное извлечение группы ---
+        # Атомарно извлекаем группу из словаря. Если ее там уже нет, выходим.
         group = current_media_groups.pop(media_group_id, None)
         if not group or media_group_id in sent_media_groups:
             return
@@ -3228,10 +3222,10 @@ async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bo
 
         # Передаем извлеченные данные в обработчик.
         await process_complete_media_group(media_group_id, group, bot_instance)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     except asyncio.CancelledError:
-        # Если таймер был отменен (пришло новое сообщение в группу),
-        # это нормальное поведение. Ничего не делаем.
+        # Если таймер был отменен (пришло новое сообщение в группу) - это норма.
         pass
     except Exception as e:
         print(f"❌ Ошибка в complete_media_group_after_delay для {media_group_id}: {e}")
@@ -3244,73 +3238,91 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
     if not group or not group.get('media'):
         return
 
+    # Помечаем ID как обработанный, чтобы игнорировать возможные дубликаты
     sent_media_groups.append(media_group_id)
 
-    post_num = group['post_num']
-    user_id = group['author_id']
-    board_id = group['board_id']
-    b_data = board_data[board_id]
-    
-    content = {
-        'type': 'media_group', 'header': group['header'], 'media': group['media'],
-        'caption': group.get('caption'), 'reply_to_post': group.get('reply_to_post')
-    }
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: "Нарезка" и последовательная отправка ---
+    all_media = group.get('media', [])
+    CHUNK_SIZE = 10  # Лимит API Telegram
+    media_chunks = [all_media[i:i + CHUNK_SIZE] for i in range(0, len(all_media), CHUNK_SIZE)]
 
-    content = await _apply_mode_transformations(content, board_id)
+    for i, chunk in enumerate(media_chunks):
+        if not chunk: continue
 
-    messages_storage[post_num] = {
-        'author_id': user_id, 'timestamp': group['timestamp'], 'content': content,
-        'reply_to': group.get('reply_to_post'), 'board_id': board_id
-    }
-    
-    reply_info = {} # Объявляем заранее
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    try:
-        builder = MediaGroupBuilder()
-        reply_to_message_id = None
+        user_id = group['author_id']
+        board_id = group['board_id']
+        b_data = board_data[board_id]
         
-        if group.get('reply_to_post'):
-            reply_info = post_to_messages.get(group.get('reply_to_post'), {})
-            reply_to_message_id = reply_info.get(user_id)
-            
-        header_html = f"<i>{group['header']}</i>"
-        
-        full_caption = header_html
-        if content.get('caption'):
-            full_caption += f"\n\n{content['caption']}"
+        # Первый чанк - основной пост, последующие - продолжение
+        if i == 0:
+            post_num = group['post_num']
+            header = group['header']
+            caption = group.get('caption')
+            reply_to_post = group.get('reply_to_post')
+        else:
+            header, post_num = await format_header(board_id)
+            caption = None
+            reply_to_post = None
 
-        for idx, media in enumerate(group['media']):
-            caption_for_media = full_caption if idx == 0 else None
-            if media['type'] == 'photo': builder.add_photo(media=media['file_id'], caption=caption_for_media, parse_mode="HTML" if caption_for_media else None)
-            elif media['type'] == 'video': builder.add_video(media=media['file_id'], caption=caption_for_media, parse_mode="HTML" if caption_for_media else None)
-            elif media['type'] == 'document': builder.add_document(media=media['file_id'], caption=caption_for_media, parse_mode="HTML" if caption_for_media else None)
-            elif media['type'] == 'audio': builder.add_audio(media=media['file_id'], caption=caption_for_media, parse_mode="HTML" if caption_for_media else None)
-        
-        if builder.build():
-            sent_messages = await bot_instance.send_media_group(
-                chat_id=user_id, media=builder.build(), reply_to_message_id=reply_to_message_id
-            )
-            if sent_messages:
-                messages_storage[post_num]['author_message_id'] = sent_messages[0].message_id
-                post_to_messages.setdefault(post_num, {})[user_id] = sent_messages[0].message_id
-                for msg in sent_messages: message_to_post[(user_id, msg.message_id)] = post_num
-    
-    except TelegramForbiddenError:
-        b_data['users']['active'].discard(user_id)
-        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из process_complete_media_group).")
-    except Exception as e:
-        print(f"⚠️ Ошибка отправки медиа-альбома #{post_num} автору {user_id}: {e}")
-    
-    recipients = b_data['users']['active'] - {user_id}
-    if recipients and user_id in b_data['users']['active']:
+        content = {
+            'type': 'media_group', 'header': header, 'media': chunk,
+            'caption': caption, 'reply_to_post': reply_to_post
+        }
+
+        content = await _apply_mode_transformations(content, board_id)
+
+        messages_storage[post_num] = {
+            'author_id': user_id, 'timestamp': group['timestamp'], 'content': content,
+            'reply_to': reply_to_post, 'board_id': board_id
+        }
+
+        reply_info = {}
         try:
-            await message_queues[board_id].put({
-                'recipients': recipients, 'content': content, 'post_num': post_num,
-                'reply_info': reply_info, 'board_id': board_id
-            })
+            builder = MediaGroupBuilder()
+            reply_to_message_id = None
+            if reply_to_post:
+                reply_info = post_to_messages.get(reply_to_post, {})
+                reply_to_message_id = reply_info.get(user_id)
+            
+            header_html = f"<i>{header}</i>"
+            
+            full_caption = header_html
+            # Добавляем основной текст только к первому чанку
+            if i == 0 and content.get('caption'):
+                full_caption += f"\n\n{content['caption']}"
+
+            for idx, media in enumerate(chunk):
+                caption_for_media = full_caption if idx == 0 else None
+                builder.add(type=media['type'], media=media['file_id'], caption=caption_for_media, parse_mode="HTML" if caption_for_media else None)
+            
+            if builder.build():
+                sent_messages = await bot_instance.send_media_group(
+                    chat_id=user_id, media=builder.build(), reply_to_message_id=reply_to_message_id
+                )
+                if sent_messages:
+                    messages_storage[post_num]['author_message_id'] = sent_messages[0].message_id
+                    post_to_messages.setdefault(post_num, {})[user_id] = sent_messages[0].message_id
+                    for msg in sent_messages: message_to_post[(user_id, msg.message_id)] = post_num
+        
+        except TelegramForbiddenError:
+            b_data['users']['active'].discard(user_id)
+            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (media_group).")
         except Exception as e:
-            print(f"❌ Критическая ошибка постановки в очередь медиагруппы. Пост #{post_num} удален. Ошибка: {e}")
-            messages_storage.pop(post_num, None)
+            print(f"⚠️ Ошибка отправки медиа-альбома #{post_num} автору {user_id}: {e}")
+        
+        recipients = b_data['users']['active'] - {user_id}
+        if recipients and user_id in b_data['users']['active']:
+            try:
+                await message_queues[board_id].put({
+                    'recipients': recipients, 'content': content, 'post_num': post_num,
+                    'reply_info': reply_info, 'board_id': board_id
+                })
+            except Exception as e:
+                print(f"❌ Критическая ошибка постановки в очередь медиагруппы #{post_num}: {e}")
+                messages_storage.pop(post_num, None)
+        
+        if len(media_chunks) > 1:
+            await asyncio.sleep(1) # Небольшая задержка между отправкой частей альбома
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
 @dp.message()
