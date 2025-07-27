@@ -3150,7 +3150,6 @@ async def handle_media_group_init(message: Message):
             pass
         return
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Устранение Race Condition ---
     group = current_media_groups.get(media_group_id)
     is_leader = False
 
@@ -3163,31 +3162,28 @@ async def handle_media_group_init(message: Message):
     
     # Только "лидер" выполняет этот блок для инициализации группы
     if is_leader:
-        # Симулируем сообщение для спам-проверки
-        fake_animation_message = types.Message(
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+        # Симулируем текстовое сообщение, чтобы применить общие лимиты частоты, а не специфичные для гифок.
+        # Это предотвращает ложное срабатывание на повтор и использует более адекватные лимиты.
+        fake_text_message = types.Message(
             message_id=message.message_id,
             date=message.date,
             chat=message.chat,
             from_user=message.from_user,
-            content_type='animation',
-            media_group_id=media_group_id,
-            animation=types.Animation(
-                file_id=media_group_id,
-                file_unique_id=media_group_id,
-                width=1,
-                height=1,
-                duration=1
-            )
+            content_type='text',
+            text=f"media_group_{media_group_id}" # Уникальный текст для избежания ложного детекта повторов
         )
         
-        spam_check_passed = await check_spam(user_id, fake_animation_message, board_id)
+        spam_check_passed = await check_spam(user_id, fake_text_message, board_id)
         
         if not spam_check_passed:
-            current_media_groups.pop(media_group_id, None) # Удаляем группу, если спам
+            current_media_groups.pop(media_group_id, None) 
             try: await message.delete()
             except TelegramBadRequest: pass
-            await apply_penalty(message.bot, user_id, 'animation', board_id)
+            # Применяем наказание за "текстовый спам", что по сути является флудом/превышением частоты.
+            await apply_penalty(message.bot, user_id, 'text', board_id)
             return
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         
         reply_to_post = None
         if message.reply_to_message:
@@ -3216,7 +3212,6 @@ async def handle_media_group_init(message: Message):
             try: await message.delete()
             except TelegramBadRequest: pass
             return
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     # Этот блок теперь выполняется всеми сообщениями ПОСЛЕ инициализации
     if not group:
