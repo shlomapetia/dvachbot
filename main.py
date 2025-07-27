@@ -1485,11 +1485,8 @@ async def send_message_to_users(
 
     async def really_send(uid: int, reply_to: int | None):
         try:
-            # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
             ct_raw = modified_content["type"]
-            # Корректно получаем строковое значение типа, будь то enum или строка
             ct = ct_raw.value if hasattr(ct_raw, 'value') else ct_raw
-            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
             
             header_text = modified_content['header']
             head = f"<i>{header_text}</i>"
@@ -1513,7 +1510,13 @@ async def send_message_to_users(
                     builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
                 return await bot_instance.send_media_group(chat_id=uid, media=builder.build(), reply_to_message_id=reply_to)
             
-            send_method = getattr(bot_instance, f"send_{ct}")
+            # --- НАЧАЛО ВТОРОГО ИСПРАВЛЕНИЯ ---
+            method_name = f"send_{ct}"
+            if ct == 'text':
+                method_name = 'send_message'
+            # --- КОНЕЦ ВТОРОГО ИСПРАВЛЕНИЯ ---
+
+            send_method = getattr(bot_instance, method_name)
             kwargs = {'reply_to_message_id': reply_to}
             
             full_text = f"{head}\n\n{reply_text}{main_text}" if (reply_text or main_text) else head
@@ -1543,7 +1546,6 @@ async def send_message_to_users(
             blocked_users.add(uid)
             return None
         except Exception as e:
-            # Теперь мы будем видеть настоящую ошибку, если она не AttributeError
             print(f"❌ Ошибка отправки {uid} ботом {bot_instance.id}: {e}")
             return None
 
