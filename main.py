@@ -606,15 +606,9 @@ def _sync_save_board_state(board_id: str):
         post_counter_to_save = state['post_counter'] if board_id == 'b' else None
         
         # --- ИЗМЕНЕНО: Логика подсчета постов ---
-        if board_id == 'b':
-            # Для доски 'b' количество постов равно общему счетчику
-            board_post_count = state['post_counter']
-        else:
-            # Для остальных досок считаем посты, принадлежащие им
-            board_post_count = sum(
-                1 for data in messages_storage.values() 
-                if data.get("board_id") == board_id
-            )
+        # Теперь мы не пересчитываем посты, а берем актуальное значение из памяти,
+        # которое инкрементируется в format_header.
+        board_post_count = b_data.get('board_post_count', 0)
         
         data_to_save = {
             'users_data': {
@@ -622,7 +616,7 @@ def _sync_save_board_state(board_id: str):
                 'banned': list(b_data['users']['banned']),
             },
             'message_counter': dict(b_data['message_counter']),
-            'board_post_count': board_post_count, # Записываем вычисленное значение
+            'board_post_count': board_post_count, # Записываем актуальное значение из памяти
         }
         if post_counter_to_save is not None:
             # Сохраняем 'post_counter' для 'b' для ясности и обратной совместимости
@@ -759,19 +753,29 @@ def load_state():
             b_data['users']['active'] = set(data.get('users_data', {}).get('active', []))
             b_data['users']['banned'] = set(data.get('users_data', {}).get('banned', []))
             b_data['message_counter'].update(data.get('message_counter', {}))
+            
             # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
-            b_data['board_post_count'] = data.get('board_post_count', 0)
+            loaded_post_count = data.get('board_post_count', 0)
+            
+            # Устанавливаем начальное значение для 'b', только если счетчик пуст.
+            # Это предотвращает потерю новых постов при перезапуске и
+            # гарантирует, что "добавление" произойдет только один раз.
+            if board_id == 'b' and loaded_post_count == 0:
+                b_data['board_post_count'] = 37004
+            else:
+                b_data['board_post_count'] = loaded_post_count
 
             print(f"[{board_id}] Состояние загружено: "
                   f"активных = {len(b_data['users']['active'])}, "
                   f"забаненных = {len(b_data['users']['banned'])}, "
-                  f"постов = {b_data['board_post_count']}") # <-- Добавлено в лог для наглядности
+                  f"постов = {b_data['board_post_count']}") # <-- Теперь показывает актуальное значение
 
             # Загружаем кэш ответов для этой доски
             load_reply_cache(board_id)
 
         except (json.JSONDecodeError, OSError) as e:
             print(f"Ошибка загрузки состояния для доски '{board_id}': {e}")
+            
 def load_archived_post(post_num):
     """Ищем пост в архивах"""
     for archive_file in glob.glob("archive_*.pkl.gz"):
@@ -1200,6 +1204,12 @@ async def format_header(board_id: str) -> Tuple[str, int]:
     async with post_counter_lock:
         state['post_counter'] += 1
         post_num = state['post_counter']
+        
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+        # Инкрементируем счетчик постов для конкретной доски
+        # Это обеспечивает актуальность счетчика в памяти в реальном времени
+        board_data[board_id].setdefault('board_post_count', 0)
+        board_data[board_id]['board_post_count'] += 1
     
     b_data = board_data[board_id]
 
@@ -3089,7 +3099,10 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
             reply_to_message_id = reply_info.get(user_id)
             
         header_html = f"<i>{group['header']}</i>"
+        
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
         # Формируем подпись для автора с "чистым" текстом и экранируем его
+        # Добавляем \n\n чтобы отделить заголовок от подписи
         full_caption = header_html
         if group.get('caption'):
             full_caption += f"\n\n{escape_html(group['caption'])}"
@@ -3118,7 +3131,6 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
             'recipients': recipients, 'content': content, 'post_num': post_num,
             'reply_info': reply_info, 'board_id': board_id
         })
-
             
 @dp.message()
 async def handle_message(message: Message):
@@ -3286,11 +3298,16 @@ async def handle_message(message: Message):
                 sent_to_author = await message.bot.send_message(user_id, full_text, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
             
             elif content.get('type') in ['photo', 'video', 'animation', 'document', 'audio']:
+                # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
                 caption_for_author = header_text
                 if reply_text:
                     caption_for_author += f"\n\n{reply_text}"
                 if content.get('caption'):
-                    caption_for_author += escape_html(content['caption'])
+                    # Добавляем двойной перенос строки, если есть и reply и caption
+                    if reply_text:
+                        caption_for_author += f"{escape_html(content['caption'])}"
+                    else:
+                        caption_for_author += f"\n\n{escape_html(content['caption'])}"
                 
                 media_to_send = content.get('image_url') or content.get('file_id')
                 
