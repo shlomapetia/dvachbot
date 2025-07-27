@@ -3165,12 +3165,19 @@ async def handle_media_group_init(message: Message):
     if is_leader:
         # Симулируем сообщение для спам-проверки
         fake_animation_message = types.Message(
-            message_id=message.message_id, date=message.date, chat=message.chat,
-            from_user=message.from_user, content_type='animation', media_group_id=media_group_id
-        )
-        fake_animation_message.animation = types.Animation(
-            file_id=media_group_id, file_unique_id=media_group_id, 
-            width=1, height=1, duration=1
+            message_id=message.message_id,
+            date=message.date,
+            chat=message.chat,
+            from_user=message.from_user,
+            content_type='animation',
+            media_group_id=media_group_id,
+            animation=types.Animation(
+                file_id=media_group_id,
+                file_unique_id=media_group_id,
+                width=1,
+                height=1,
+                duration=1
+            )
         )
         
         spam_check_passed = await check_spam(user_id, fake_animation_message, board_id)
