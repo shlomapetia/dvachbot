@@ -118,7 +118,7 @@ board_data = defaultdict(lambda: {
     # --- Данные пользователей для спам-фильтров ---
     'last_texts': defaultdict(lambda: deque(maxlen=5)),
     'last_stickers': defaultdict(lambda: deque(maxlen=5)),
-    'sticker_times': defaultdict(list),
+    'last_animations': defaultdict(lambda: deque(maxlen=5)),
     'spam_violations': defaultdict(dict),
     'spam_tracker': defaultdict(list),
     # --- Муты и баны ---
@@ -151,7 +151,7 @@ message_to_post = {}
 last_messages = deque(maxlen=300) # Используется для генерации сообщений, можно оставить общим
 last_activity_time = datetime.now()
 daily_log = io.StringIO()
-sent_media_groups = set()
+sent_media_groups = deque(maxlen=1000)
 current_media_groups = {}
 media_group_timers = {}
 
@@ -179,9 +179,6 @@ SPAM_RULES = {
     }
 }
 
-
-# Добавьте рядом с другими глобальными переменными
-sent_media_groups = set()  # Для отслеживания уже отправленных медиа-групп
 
 # Хранит информацию о текущих медиа-группах: media_group_id -> данные
 current_media_groups = {}
@@ -507,17 +504,11 @@ INVITE_TEXTS = [
 # Для /suka_blyat
 MAT_WORDS = ["сука", "блядь", "пиздец", "ебать", "нах", "пизда", "хуйня", "ебал", "блять", "отъебись", "ебаный", "еблан", "ХУЙ", "ПИЗДА", "хуйло", "долбаёб", "пидорас"]
 
-# хранит 5 последних sticker_file_id для проверки «одинаковых»
-last_stickers: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=5))
-
-# тайм-штампы всех пришедших стикеров за последние 15 c
-sticker_times: dict[int, list[datetime]] = defaultdict(list)
-
 # Временная зона МСК
 MSK = timezone(timedelta(hours=3))
 
 # ─── Глобальный error-handler ──────────────────────────────────
-@dp.errors()
+
 @dp.errors()
 async def global_error_handler(event: types.ErrorEvent) -> bool:
     """Улучшенный обработчик ошибок для aiogram (адаптирован для досок)."""
@@ -908,7 +899,7 @@ async def auto_memory_cleaner():
     while True:
         await asyncio.sleep(600)  # 10 минут
 
-        # 1. Очистка старых постов (ОБЩАЯ ЛОГИКА, НЕ МЕНЯЕТСЯ)
+        # 1. Очистка старых постов (ОБЩАЯ ЛОГИКА)
         if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
             to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
             oldest_post_keys = sorted(messages_storage.keys())[:to_delete_count]
@@ -918,16 +909,21 @@ async def auto_memory_cleaner():
                 messages_storage.pop(post_num, None)
                 post_to_messages.pop(post_num, None)
 
-            global message_to_post
-            message_to_post = {
-                key: post_num
-                for key, post_num in message_to_post.items()
-                if post_num not in posts_to_delete_set
-            }
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Эффективное удаление ---
+            # Вместо полного пересоздания словаря, итеративно удаляем устаревшие ключи.
+            # Это значительно эффективнее по памяти и CPU при больших размерах словаря.
+            keys_to_delete_from_m2p = [
+                key for key, post_num in message_to_post.items()
+                if post_num in posts_to_delete_set
+            ]
+            for key in keys_to_delete_from_m2p:
+                message_to_post.pop(key, None)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов.")
 
         # 2. Очистка данных для КАЖДОЙ ДОСКИ
+        now_utc = datetime.now(UTC)
         for board_id in BOARDS:
             b_data = board_data[board_id]
 
@@ -941,12 +937,11 @@ async def auto_memory_cleaner():
 
 
             # 2.2. Чистим spam_tracker доски от старых записей
-            now = datetime.now(UTC)
             spam_tracker_board = b_data['spam_tracker']
             for user_id in list(spam_tracker_board.keys()):
                 # Окно для спам-трекера берем из общей конфигурации
                 window_sec = SPAM_RULES.get('text', {}).get('window_sec', 15)
-                window_start = now - timedelta(seconds=window_sec)
+                window_start = now_utc - timedelta(seconds=window_sec)
                 
                 spam_tracker_board[user_id] = [
                     t for t in spam_tracker_board[user_id]
@@ -954,86 +949,102 @@ async def auto_memory_cleaner():
                 ]
                 if not spam_tracker_board[user_id]:
                     del spam_tracker_board[user_id]
+            
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            # 2.3. Чистим spam_violations от давно неактивных пользователей
+            inactive_threshold = now_utc - timedelta(hours=24) # Порог неактивности - 24 часа
+            spam_violations_board = b_data['spam_violations']
+            
+            # Собираем ID пользователей для удаления, чтобы не изменять словарь во время итерации
+            users_to_purge = [
+                user_id for user_id, data in spam_violations_board.items()
+                if data.get('last_reset', now_utc) < inactive_threshold
+            ]
+            
+            if users_to_purge:
+                for user_id in users_to_purge:
+                    spam_violations_board.pop(user_id, None)
+                print(f"🧹 [{board_id}] Очистка spam_violations: удалено {len(users_to_purge)} записей старых пользователей.")
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         # 3. Агрессивная сборка мусора (ОБЩАЯ)
         gc.collect()
 
-
 async def board_statistics_broadcaster():
-    """Раз в 1-2 часа рассылает на каждую доску общую статистику по всем доскам."""
-    await asyncio.sleep(60) # Начальная задержка
+    """Раз в час собирает общую статистику и рассылает на каждую доску."""
+    await asyncio.sleep(300)  # Начальная задержка 5 минут
 
-    async def board_stats_worker(board_id: str):
-        """Индивидуальный воркер для рассылки статистики на одну доску."""
-        while True:
-            try:
-                # Случайная задержка от 1 до 2 часов
-                delay = random.randint(3600, 7200)
-                await asyncio.sleep(delay)
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Выполняется раз в час
 
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            # 1. Сбор статистики по постам за последний час
+            now = datetime.now(UTC)
+            hour_ago = now - timedelta(hours=1)
+            
+            # Структура для хранения почасовой статистики
+            posts_per_hour = defaultdict(int)
+
+            for post_data in messages_storage.values():
+                b_id = post_data.get('board_id')
+                if b_id and post_data.get('timestamp', now) > hour_ago:
+                    posts_per_hour[b_id] += 1
+            
+            # 2. Формирование единого текста сообщения
+            stats_lines = []
+            for b_id, config in BOARD_CONFIG.items():
+                # Берем почасовую статистику из посчитанного
+                hour_stat = posts_per_hour[b_id]
+                # Берем ОБЩУЮ статистику из надежного счетчика доски
+                total_stat = board_data[b_id].get('board_post_count', 0)
+                
+                stats_lines.append(
+                    f"<b>{config['name']}</b> - {hour_stat} пст/час, всего: {total_stat}"
+                )
+            full_stats_text = "📊 Статистика досок:\n" + "\n".join(stats_lines)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+            # 3. Рассылка готового сообщения по очередям всех досок
+            header = "### Статистика ###"
+            for board_id in BOARDS:
                 b_data = board_data[board_id]
                 recipients = b_data['users']['active'] - b_data['users']['banned']
 
                 if not recipients:
                     continue
 
-                # --- Сбор статистики по всем доскам ---
-                stats_lines = []
-                now = datetime.now(UTC)
-                
-                for b_id, config in BOARD_CONFIG.items():
-                    # Количество постов за последний час
-                    hour_ago = now - timedelta(hours=1)
-                    posts_last_hour = sum(
-                        1 for post_data in messages_storage.values()
-                        if post_data.get('board_id') == b_id and post_data.get('timestamp') > hour_ago
-                    )
-                    
-                    # Общее количество постов на доске
-                    total_posts_on_board = sum(
-                        1 for post_data in messages_storage.values()
-                        if post_data.get('board_id') == b_id
-                    )
-                    
-                    stats_lines.append(
-                        f"<b>{config['name']}</b> - {posts_last_hour} пст/час, всего: {total_posts_on_board}"
-                    )
-                
-                full_stats_text = "📊 Статистика досок:\n" + "\n".join(stats_lines)
-
-                # --- Отправка ---
-                header = "### Статистика ###"
                 _, post_num = await format_header(board_id)
-
                 content = {
                     "type": "text",
                     "header": header,
                     "text": full_stats_text,
                     "is_system_message": True
                 }
-
-                await message_queues[board_id].put({
-                    "recipients": recipients,
-                    "content": content,
-                    "post_num": post_num,
-                    "board_id": board_id
-                })
-
+                
+                # --- НАЧАЛО ИЗМЕНЕНИЙ: Сохранение поста в хранилище ---
+                # Важно: системное сообщение тоже должно быть в базе
                 messages_storage[post_num] = {
                     'author_id': 0,
                     'timestamp': now,
                     'content': content,
                     'board_id': board_id
                 }
-
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                
+                # Постановка в очередь
+                await message_queues[board_id].put({
+                    "recipients": recipients,
+                    "content": content,
+                    "post_num": post_num,
+                    "board_id": board_id
+                })
+                
                 print(f"✅ [{board_id}] Статистика досок #{post_num} добавлена в очередь.")
 
-            except Exception as e:
-                print(f"❌ [{board_id}] Ошибка в board_statistics_broadcaster: {e}")
-                await asyncio.sleep(120)
-
-    tasks = [asyncio.create_task(board_stats_worker(bid)) for bid in BOARDS]
-    await asyncio.gather(*tasks)
+        except Exception as e:
+            print(f"❌ Ошибка в board_statistics_broadcaster: {e}")
+            await asyncio.sleep(120)
     
 async def setup_pinned_messages(bots: dict[str, Bot]):
     """Устанавливает или обновляет закрепленное сообщение для каждого бота."""
@@ -1060,29 +1071,6 @@ async def setup_pinned_messages(bots: dict[str, Bot]):
         b_data['start_message_text'] = help_with_boards
         
         print(f"📌 [{board_id}] Текст для команды /start и закрепа подготовлен.")
-
-async def aiogram_memory_cleaner():
-    """Очищает кэш aiogram каждые 5 минут"""
-    while True:
-        await asyncio.sleep(300)  # 5 минут
-        # Очищаем большие weakref словари
-        cleared = 0
-        for obj in gc.get_objects():
-            if isinstance(obj, dict) and len(obj) > 700:
-                try:
-                    sample = next(iter(obj.values()), None) if obj else None
-                    if isinstance(sample,
-                                  (weakref.ref, weakref.ReferenceType)):
-                        obj.clear()
-                        cleared += 1
-                except:
-                    pass
-
-        if cleared > 0:
-            collected = gc.collect()
-            print(
-                f"Очищено {cleared} больших weakref словарей, собрано {collected} объектов"
-            )
 
 async def check_spam(user_id: int, msg: Message, board_id: str) -> bool:
     """Проверяет спам с прогрессивным наказанием и сбросом уровня (с поддержкой досок)"""
@@ -1127,8 +1115,10 @@ async def check_spam(user_id: int, msg: Message, board_id: str) -> bool:
     if msg_type == 'text' and content:
         b_data['spam_violations'][user_id]['last_contents'].append(content)
         # 3 одинаковых подряд
-        if len(b_data['spam_violations'][user_id]['last_contents']) == rules['max_repeats']:
-            if len(set(b_data['spam_violations'][user_id]['last_contents'])) == 1:
+        if len(b_data['spam_violations'][user_id]['last_contents']) >= 3:
+            # --- ИЗМЕНЕНИЕ ЛОГИКИ: Проверяем последние 3 элемента ---
+            last_three = list(b_data['spam_violations'][user_id]['last_contents'])[-3:]
+            if len(set(last_three)) == 1:
                 b_data['spam_violations'][user_id]['level'] = min(
                     b_data['spam_violations'][user_id]['level'] + 1,
                     len(rules['penalty']) - 1)
@@ -1145,6 +1135,38 @@ async def check_spam(user_id: int, msg: Message, board_id: str) -> bool:
                         b_data['spam_violations'][user_id]['level'] + 1,
                         len(rules['penalty']) - 1)
                     return False
+
+    # Проверка на повтор стикеров
+    elif msg_type == 'sticker':
+        last_items = b_data['last_stickers'][user_id]
+        last_items.append(msg.sticker.file_id)
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        # 3 одинаковых подряд
+        if len(last_items) >= 3:
+            # Проверяем только последние 3 элемента
+            last_three = list(last_items)[-3:]
+            if len(set(last_three)) == 1:
+                b_data['spam_violations'][user_id]['level'] = min(
+                    b_data['spam_violations'][user_id]['level'] + 1,
+                    len(rules['penalty']) - 1)
+                return False
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
+    # Проверка на повтор гифок
+    elif msg_type == 'animation':
+        last_items = b_data['last_animations'][user_id]
+        last_items.append(msg.animation.file_id)
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        # 3 одинаковых подряд
+        if len(last_items) >= 3:
+            # Проверяем только последние 3 элемента
+            last_three = list(last_items)[-3:]
+            if len(set(last_three)) == 1:
+                b_data['spam_violations'][user_id]['level'] = min(
+                    b_data['spam_violations'][user_id]['level'] + 1,
+                    len(rules['penalty']) - 1)
+                return False
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     # Проверка лимита по времени
     window_start = now - timedelta(seconds=rules['window_sec'])
@@ -1290,8 +1312,8 @@ async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes
         posts_to_delete = []
         deleted_messages = 0
 
-        # Находим посты за период ТОЛЬКО НА УКАЗАННОЙ ДОСКЕ
-        for post_num, post_data in list(messages_storage.items()):
+        # Итерируемся напрямую по .items(), избегая создания полной копии словаря в памяти.
+        for post_num, post_data in messages_storage.items():
             post_time = post_data.get('timestamp')
             if not post_time:
                 continue
@@ -1300,6 +1322,9 @@ async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes
                 post_data.get('board_id') == board_id and
                 post_time >= time_threshold):
                 posts_to_delete.append(post_num)
+        
+        if not posts_to_delete:
+            return 0
 
         # Собираем ВСЕ сообщения для удаления
         messages_to_delete = []
@@ -1311,7 +1336,6 @@ async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes
         # Удаляем каждое сообщение с повторными попытками
         for (uid, mid) in messages_to_delete:
             try:
-                # Используем переданный bot_instance
                 await bot_instance.delete_message(uid, mid)
                 deleted_messages += 1
             except (TelegramBadRequest, TelegramForbiddenError):
@@ -1320,24 +1344,31 @@ async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes
             except Exception as e:
                 print(f"Ошибка удаления {mid} у {uid}: {e}")
 
-        # Удаляем записи из хранилищ
-        for post_num in posts_to_delete:
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Эффективная очистка хранилищ ---
+        # 1. Удаляем записи из message_to_post, используя уже собранные ключи (uid, mid).
+        #    Это намного эффективнее, чем полный перебор всего словаря.
+        for uid, mid in messages_to_delete:
+            message_to_post.pop((uid, mid), None)
+            
+        # 2. Удаляем посты из остальных хранилищ.
+        posts_to_delete_set = set(posts_to_delete)
+        for post_num in posts_to_delete_set:
             post_to_messages.pop(post_num, None)
             messages_storage.pop(post_num, None)
-            global message_to_post
-            message_to_post = {k: v for k, v in message_to_post.items() if v != post_num}
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         return deleted_messages
     except Exception as e:
         print(f"Ошибка в delete_user_posts: {e}")
         return 0
-
+        
 async def delete_single_post(post_num: int, bot_instance: Bot) -> int:
     """Удаляет один конкретный пост (и все его копии у пользователей)."""
     if post_num not in post_to_messages:
         return 0
 
     deleted_count = 0
+    # Собираем копии для удаления, messages_to_delete - это список кортежей (uid, mid)
     messages_to_delete = list(post_to_messages.get(post_num, {}).items())
 
     for uid, mid in messages_to_delete:
@@ -1349,13 +1380,18 @@ async def delete_single_post(post_num: int, bot_instance: Bot) -> int:
         except Exception as e:
             print(f"Ошибка при удалении сообщения {mid} у {uid}: {e}")
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Эффективное удаление из message_to_post ---
     # Очистка глобальных хранилищ
     messages_storage.pop(post_num, None)
     post_to_messages.pop(post_num, None)
 
-    global message_to_post
-    message_to_post = {k: v for k, v in message_to_post.items() if v != post_num}
-
+    # Вместо полного перебора `message_to_post`, мы теперь используем
+    # собранный ранее список `messages_to_delete` для точечного удаления.
+    # Ключ для `message_to_post` - это кортеж (uid, mid).
+    for uid, mid in messages_to_delete:
+        message_to_post.pop((uid, mid), None)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
     return deleted_count
     
 async def send_moderation_notice(user_id: int, action: str, board_id: str, duration: str = None, deleted_posts: int = 0):
@@ -1510,11 +1546,11 @@ async def send_message_to_users(
                     builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
                 return await bot_instance.send_media_group(chat_id=uid, media=builder.build(), reply_to_message_id=reply_to)
             
-            # --- НАЧАЛО ВТОРОГО ИСПРАВЛЕНИЯ ---
+            # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
             method_name = f"send_{ct}"
             if ct == 'text':
                 method_name = 'send_message'
-            # --- КОНЕЦ ВТОРОГО ИСПРАВЛЕНИЯ ---
+            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
             send_method = getattr(bot_instance, method_name)
             kwargs = {'reply_to_message_id': reply_to}
@@ -1657,25 +1693,6 @@ async def process_successful_messages(post_num: int, results: list):
         else:  # Одиночное сообщение
             post_to_messages[post_num][uid] = msg.message_id
             message_to_post[(uid, msg.message_id)] = post_num
-
-async def reset_violations_after_hour(user_id: int, board_id: str):
-    """
-    Сбрасывает счетчик спам-нарушений для пользователя на конкретной доске через час.
-    Адаптирована для новой архитектуры, но в текущей логике не вызывается,
-    поскольку сброс происходит автоматически в функции check_spam.
-    """
-    await asyncio.sleep(3600)  # 1 час
-    
-    b_data = board_data.get(board_id)
-    if not b_data:
-        return
-
-    spam_violations_for_board = b_data.get('spam_violations')
-    if spam_violations_for_board and user_id in spam_violations_for_board:
-        # Безопасный способ сброса - удалить запись о нарушениях пользователя.
-        # При его следующем сообщении запись будет создана заново с нулевыми значениями.
-        # Это не конфликтует с основной логикой сброса в check_spam.
-        del spam_violations_for_board[user_id]
 
 async def fetch_dvach_thread(board: str, only_new: bool = False):
     """Получает случайный тред с двача"""
@@ -2038,17 +2055,28 @@ async def cmd_slavaukraine(message: types.Message):
         "Хто не скаже 'Путін хуйло' - той москаль і підар!"
     )
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    content = {
+        "type": "text",
+        "header": header,
+        "text": activation_text
+    }
+
+    messages_storage[pnum] = {
+        'author_id': 0,
+        'timestamp': datetime.now(UTC),
+        'content': content,
+        'board_id': board_id
+    }
+
     await message_queues[board_id].put({
         "recipients": b_data['users']['active'],
-        "content": {
-            "type": "text",
-            "header": header,
-            "text": activation_text
-        },
+        "content": content,
         "post_num": pnum,
     })
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    asyncio.create_task(disable_slavaukraine_mode(300, board_id))
+    asyncio.create_task(disable_slavaukraine_mode(310, board_id))
     await message.delete()
 
 
@@ -2065,16 +2093,28 @@ async def disable_slavaukraine_mode(delay: int, board_id: str):
         "💀 Визг хохлов закончен!\n\n"
         "Украинский режим отключен. Возвращаемся к обычному трёпу."
     )
-
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    content = {
+        "type": "text",
+        "header": header,
+        "text": end_text
+    }
+    
+    messages_storage[pnum] = {
+        'author_id': 0, # Системное сообщение
+        'timestamp': datetime.now(UTC),
+        'content': content,
+        'board_id': board_id
+    }
+    
     await message_queues[board_id].put({
         "recipients": b_data['users']['active'],
-        "content": {
-            "type": "text",
-            "header": header,
-            "text": end_text
-        },
+        "content": content,
         "post_num": pnum,
     })
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
 @dp.message(Command("stop"))
 async def cmd_stop(message: types.Message):
     """Остановка любых активных режимов на текущей доске."""
@@ -2181,17 +2221,28 @@ async def cmd_anime(message: types.Message):
         "^_^"
     )
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    content = {
+        "type": "text",
+        "header": header,
+        "text": activation_text
+    }
+
+    messages_storage[pnum] = {
+        'author_id': 0,
+        'timestamp': datetime.now(UTC),
+        'content': content,
+        'board_id': board_id
+    }
+
     await message_queues[board_id].put({
         "recipients": b_data['users']['active'],
-        "content": {
-            "type": "text",
-            "header": header,
-            "text": activation_text
-        },
+        "content": content,
         "post_num": pnum,
     })
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    asyncio.create_task(disable_anime_mode(300, board_id))
+    asyncio.create_task(disable_anime_mode(330, board_id))
     await message.delete()
 
 
@@ -2209,15 +2260,26 @@ async def disable_anime_mode(delay: int, board_id: str):
         "通常のチャットに戻ります！"
     )
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    content = {
+        "type": "text",
+        "header": header,
+        "text": end_text
+    }
+
+    messages_storage[pnum] = {
+        'author_id': 0, # Системное сообщение
+        'timestamp': datetime.now(UTC),
+        'content': content,
+        'board_id': board_id
+    }
+
     await message_queues[board_id].put({
         "recipients": b_data['users']['active'],
-        "content": {
-            "type": "text",
-            "header": header,
-            "text": end_text
-        },
+        "content": content,
         "post_num": pnum,
     })
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: Message):
@@ -2302,19 +2364,29 @@ async def cmd_zaputin(message: types.Message):
         "Активирован режим кремлеботов! Все несогласные будут приравнены к пидорасам и укронацистам!"
     )
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    content = {
+        "type": "text",
+        "header": header,
+        "text": activation_text
+    }
+
+    messages_storage[pnum] = {
+        'author_id': 0,
+        'timestamp': datetime.now(UTC),
+        'content': content,
+        'board_id': board_id
+    }
+
     await message_queues[board_id].put({
         "recipients": b_data['users']['active'],
-        "content": {
-            "type": "text",
-            "header": header,
-            "text": activation_text
-        },
+        "content": content,
         "post_num": pnum,
     })
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    asyncio.create_task(disable_zaputin_mode(300, board_id))
+    asyncio.create_task(disable_zaputin_mode(309, board_id))
     await message.delete()
-
 
 
 async def disable_zaputin_mode(delay: int, board_id: str):
@@ -2327,15 +2399,26 @@ async def disable_zaputin_mode(delay: int, board_id: str):
 
     end_text = "💀 Бунт кремлеботов окончился. Всем спасибо, все свободны."
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    content = {
+        "type": "text",
+        "header": header,
+        "text": end_text
+    }
+
+    messages_storage[pnum] = {
+        'author_id': 0, # Системное сообщение
+        'timestamp': datetime.now(UTC),
+        'content': content,
+        'board_id': board_id
+    }
+
     await message_queues[board_id].put({
         "recipients": b_data['users']['active'],
-        "content": {
-            "type": "text",
-            "header": header,
-            "text": end_text
-        },
+        "content": content,
         "post_num": pnum,
     })
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---```
 
 @dp.message(Command("suka_blyat"))
 async def cmd_suka_blyat(message: types.Message):
@@ -2361,17 +2444,28 @@ async def cmd_suka_blyat(message: types.Message):
         "Всех нахуй разъебало!"
     )
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    content = {
+        "type": "text",
+        "header": header,
+        "text": activation_text
+    }
+    
+    messages_storage[pnum] = {
+        'author_id': 0,
+        'timestamp': datetime.now(UTC),
+        'content': content,
+        'board_id': board_id
+    }
+
     await message_queues[board_id].put({
         "recipients": b_data['users']['active'],
-        "content": {
-            "type": "text",
-            "header": header,
-            "text": activation_text
-        },
+        "content": content,
         "post_num": pnum,
     })
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    asyncio.create_task(disable_suka_blyat_mode(300, board_id))
+    asyncio.create_task(disable_suka_blyat_mode(303, board_id))
     await message.delete()
 
 
@@ -2385,15 +2479,26 @@ async def disable_suka_blyat_mode(delay: int, board_id: str):
 
     end_text = "💀 СУКА БЛЯТЬ КОНЧИЛОСЬ. Теперь можно и помолчать."
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    content = {
+        "type": "text",
+        "header": header,
+        "text": end_text
+    }
+
+    messages_storage[pnum] = {
+        'author_id': 0, # Системное сообщение
+        'timestamp': datetime.now(UTC),
+        'content': content,
+        'board_id': board_id
+    }
+
     await message_queues[board_id].put({
         "recipients": b_data['users']['active'],
-        "content": {
-            "type": "text",
-            "header": header,
-            "text": end_text
-        },
+        "content": content,
         "post_num": pnum,
     })
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
 # ========== АДМИН КОМАНДЫ ==========
 
@@ -2484,7 +2589,6 @@ def get_author_id_by_reply(msg: types.Message) -> int | None:
 
     return None
 
-# ===== /id ==========================================================
 @dp.message(Command("id"))
 async def cmd_get_id(message: types.Message):
     """ /id — вывести ID и инфу автора реплай-поста или свою, если без reply """
@@ -2496,23 +2600,29 @@ async def cmd_get_id(message: types.Message):
         await message.delete()
         return
 
-    # По умолчанию показываем ID того, кто вызвал команду
     target_id = message.from_user.id
+    info_header = "🆔 <b>Информация о вас:</b>\n\n"
     
-    # Если есть ответ на сообщение, пытаемся найти ID автора того сообщения
     if message.reply_to_message:
         replied_author_id = get_author_id_by_reply(message)
-        # Если удалось найти автора, используем его ID
+        
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        if replied_author_id == 0:
+            await message.answer("ℹ️ Вы ответили на системное сообщение (автор: бот).")
+            await message.delete()
+            return
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
         if replied_author_id:
             target_id = replied_author_id
-        # Если не удалось (ответ на системное сообщение и т.д.), 
-        # target_id останется равным ID админа, и команда покажет его инфу.
+            info_header = "🆔 <b>Информация о пользователе:</b>\n\n"
+        # Если replied_author_id is None, target_id останется равным ID админа,
+        # и команда покажет его инфу (например, при ответе на чужую копию).
 
     try:
-        # Используем message.bot для выполнения запроса
         user_chat_info = await message.bot.get_chat(target_id)
         
-        info = "🆔 <b>Информация о пользователе:</b>\n\n"
+        info = info_header
         info += f"ID: <code>{target_id}</code>\n"
         if user_chat_info.first_name:
             info += f"Имя: {escape_html(user_chat_info.first_name)}\n"
@@ -2521,7 +2631,6 @@ async def cmd_get_id(message: types.Message):
         if user_chat_info.username:
             info += f"Username: @{user_chat_info.username}\n"
 
-        # Проверяем статус пользователя на ТЕКУЩЕЙ доске
         b_data = board_data[board_id]
         if target_id in b_data['users']['banned']:
             info += f"\n⛔️ Статус на доске {BOARD_CONFIG[board_id]['name']}: ЗАБАНЕН"
@@ -2533,7 +2642,6 @@ async def cmd_get_id(message: types.Message):
         await message.answer(info, parse_mode="HTML")
 
     except Exception:
-        # Если не удалось получить инфу - показываем только ID
         await message.answer(f"ID пользователя: <code>{target_id}</code>", parse_mode="HTML")
     
     await message.delete()
@@ -2864,8 +2972,6 @@ async def handle_audio(message: Message):
         'caption': message.caption or "", 'reply_to_post': reply_to_post
     }
 
-    # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
-    # Применяем трансформации ДО отправки автору и ДО постановки в очередь
     content = await _apply_mode_transformations(content, board_id)
 
     messages_storage[current_post_num] = {
@@ -2873,29 +2979,41 @@ async def handle_audio(message: Message):
         'reply_to': reply_to_post, 'board_id': board_id
     }
 
-    reply_to_message_id = reply_info.get(user_id)
-    
-    # Формируем подпись для автора, используя уже обработанный текст
-    caption_text = f"<i>{header}</i>"
-    if content['caption']: 
-        caption_text += f"\n\n{content['caption']}"
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    try:
+        reply_to_message_id = reply_info.get(user_id)
+        
+        caption_text = f"<i>{header}</i>"
+        if content['caption']: 
+            caption_text += f"\n\n{content['caption']}"
 
-    sent_to_author = await message.bot.send_audio(
-        user_id, message.audio.file_id, caption=caption_text,
-        reply_to_message_id=reply_to_message_id, parse_mode="HTML"
-    )
+        sent_to_author = await message.bot.send_audio(
+            user_id, message.audio.file_id, caption=caption_text,
+            reply_to_message_id=reply_to_message_id, parse_mode="HTML"
+        )
 
-    if sent_to_author:
-        messages_storage[current_post_num]['author_message_id'] = sent_to_author.message_id
-        post_to_messages.setdefault(current_post_num, {})[user_id] = sent_to_author.message_id
-        message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
+        if sent_to_author:
+            messages_storage[current_post_num]['author_message_id'] = sent_to_author.message_id
+            post_to_messages.setdefault(current_post_num, {})[user_id] = sent_to_author.message_id
+            message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
+
+    except TelegramForbiddenError:
+        b_data['users']['active'].discard(user_id)
+        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из handle_audio).")
+    except Exception as e:
+        print(f"⚠️ Ошибка отправки аудио-поста #{current_post_num} автору {user_id}: {e}")
 
     recipients = b_data['users']['active'] - {user_id}
-    if recipients:
-        await message_queues[board_id].put({
-            'recipients': recipients, 'content': content, 'post_num': current_post_num,
-            'reply_info': reply_info, 'board_id': board_id
-        })
+    if recipients and user_id in b_data['users']['active']:
+        try:
+            await message_queues[board_id].put({
+                'recipients': recipients, 'content': content, 'post_num': current_post_num,
+                'reply_info': reply_info, 'board_id': board_id
+            })
+        except Exception as e:
+            print(f"❌ Критическая ошибка постановки в очередь аудио-поста. Пост #{current_post_num} удален. Ошибка: {e}")
+            messages_storage.pop(current_post_num, None)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 
 @dp.message(F.voice)
@@ -2942,23 +3060,36 @@ async def handle_voice(message: Message):
         'reply_to': reply_to_post, 'board_id': board_id
     }
 
-    reply_to_message_id = reply_info.get(user_id)
-    sent_to_author = await message.bot.send_voice(
-        user_id, message.voice.file_id, caption=f"<i>{header}</i>",
-        reply_to_message_id=reply_to_message_id, parse_mode="HTML"
-    )
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    try:
+        reply_to_message_id = reply_info.get(user_id)
+        sent_to_author = await message.bot.send_voice(
+            user_id, message.voice.file_id, caption=f"<i>{header}</i>",
+            reply_to_message_id=reply_to_message_id, parse_mode="HTML"
+        )
 
-    if sent_to_author:
-        messages_storage[current_post_num]['author_message_id'] = sent_to_author.message_id
-        post_to_messages.setdefault(current_post_num, {})[user_id] = sent_to_author.message_id
-        message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
+        if sent_to_author:
+            messages_storage[current_post_num]['author_message_id'] = sent_to_author.message_id
+            post_to_messages.setdefault(current_post_num, {})[user_id] = sent_to_author.message_id
+            message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
+
+    except TelegramForbiddenError:
+        b_data['users']['active'].discard(user_id)
+        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из handle_voice).")
+    except Exception as e:
+        print(f"⚠️ Ошибка отправки голосового поста #{current_post_num} автору {user_id}: {e}")
 
     recipients = b_data['users']['active'] - {user_id}
-    if recipients:
-        await message_queues[board_id].put({
-            'recipients': recipients, 'content': content, 'post_num': current_post_num,
-            'reply_info': reply_info, 'board_id': board_id
-        })
+    if recipients and user_id in b_data['users']['active']:
+        try:
+            await message_queues[board_id].put({
+                'recipients': recipients, 'content': content, 'post_num': current_post_num,
+                'reply_info': reply_info, 'board_id': board_id
+            })
+        except Exception as e:
+            print(f"❌ Критическая ошибка постановки в очередь голосового поста. Пост #{current_post_num} удален. Ошибка: {e}")
+            messages_storage.pop(current_post_num, None)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
 @dp.message(F.media_group_id)
 async def handle_media_group_init(message: Message):
@@ -2986,7 +3117,7 @@ async def handle_media_group_init(message: Message):
             pass
         return
     
-    # Атомарная проверка на спам для группы
+    # --- Атомарное избрание лидера ---
     group = current_media_groups.get(media_group_id)
     is_leader = False
 
@@ -2997,12 +3128,22 @@ async def handle_media_group_init(message: Message):
             is_leader = True
     
     if is_leader:
-        del group['is_initializing'] 
+        # Только лидер выполняет этот блок
+        del group['is_initializing'] # Убираем флаг, чтобы другие обработчики не ждали
 
+        # --- НАЧАЛО ИЗМЕНЕНИЯ: Создание корректного объекта для спам-проверки ---
+        # Создаем фиктивное сообщение, чтобы медиагруппа считалась одной сущностью для спам-фильтра
         fake_animation_message = types.Message(
             message_id=message.message_id, date=message.date, chat=message.chat,
-            from_user=message.from_user, content_type='animation'
+            from_user=message.from_user, content_type='animation', media_group_id=media_group_id
         )
+        # Для прохождения проверки в check_spam, нужно создать и присвоить объект Animation.
+        # В качестве file_id используем media_group_id, т.к. он уникален для каждой группы.
+        fake_animation_message.animation = types.Animation(
+            file_id=media_group_id, file_unique_id=media_group_id, 
+            width=1, height=1, duration=1
+        )
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         
         spam_check_passed = await check_spam(user_id, fake_animation_message, board_id)
         
@@ -3029,10 +3170,12 @@ async def handle_media_group_init(message: Message):
             'reply_to_post': reply_to_post, 'processed_messages': set()
         })
     else:
+        # Остальные обработчики ждут, пока лидер завершит инициализацию
         while group is not None and group.get('is_initializing'):
             await asyncio.sleep(0.05)
             group = current_media_groups.get(media_group_id)
         
+        # Если лидер отменил создание группы (из-за спама), выходим
         if media_group_id not in current_media_groups:
             try:
                 await message.delete()
@@ -3101,7 +3244,7 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
     if not group or not group.get('media'):
         return
 
-    sent_media_groups.add(media_group_id)
+    sent_media_groups.append(media_group_id)
 
     post_num = group['post_num']
     user_id = group['author_id']
@@ -3113,27 +3256,25 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
         'caption': group.get('caption'), 'reply_to_post': group.get('reply_to_post')
     }
 
-    # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ (1) ---
-    # Применяем трансформации ДО отправки автору и ДО постановки в очередь
     content = await _apply_mode_transformations(content, board_id)
 
     messages_storage[post_num] = {
         'author_id': user_id, 'timestamp': group['timestamp'], 'content': content,
         'reply_to': group.get('reply_to_post'), 'board_id': board_id
     }
-
+    
+    reply_info = {} # Объявляем заранее
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     try:
         builder = MediaGroupBuilder()
         reply_to_message_id = None
-        reply_info = {}
+        
         if group.get('reply_to_post'):
             reply_info = post_to_messages.get(group.get('reply_to_post'), {})
             reply_to_message_id = reply_info.get(user_id)
             
         header_html = f"<i>{group['header']}</i>"
         
-        # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ (2) ---
-        # Формируем подпись для автора, используя уже обработанный текст
         full_caption = header_html
         if content.get('caption'):
             full_caption += f"\n\n{content['caption']}"
@@ -3153,15 +3294,24 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
                 messages_storage[post_num]['author_message_id'] = sent_messages[0].message_id
                 post_to_messages.setdefault(post_num, {})[user_id] = sent_messages[0].message_id
                 for msg in sent_messages: message_to_post[(user_id, msg.message_id)] = post_num
+    
+    except TelegramForbiddenError:
+        b_data['users']['active'].discard(user_id)
+        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из process_complete_media_group).")
     except Exception as e:
-        print(f"Ошибка отправки медиа-альбома автору: {e}")
-
+        print(f"⚠️ Ошибка отправки медиа-альбома #{post_num} автору {user_id}: {e}")
+    
     recipients = b_data['users']['active'] - {user_id}
-    if recipients:
-        await message_queues[board_id].put({
-            'recipients': recipients, 'content': content, 'post_num': post_num,
-            'reply_info': reply_info, 'board_id': board_id
-        })
+    if recipients and user_id in b_data['users']['active']:
+        try:
+            await message_queues[board_id].put({
+                'recipients': recipients, 'content': content, 'post_num': post_num,
+                'reply_info': reply_info, 'board_id': board_id
+            })
+        except Exception as e:
+            print(f"❌ Критическая ошибка постановки в очередь медиагруппы. Пост #{post_num} удален. Ошибка: {e}")
+            messages_storage.pop(post_num, None)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
 @dp.message()
 async def handle_message(message: Message):
@@ -3281,7 +3431,6 @@ async def handle_message(message: Message):
             file_id = getattr(message, message.content_type)
             content['file_id'] = file_id.file_id
 
-        # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ (1) ---
         # Применяем трансформации ДО отправки автору и ДО постановки в очередь
         content = await _apply_mode_transformations(content, board_id)
 
@@ -3291,21 +3440,21 @@ async def handle_message(message: Message):
             'reply_to': reply_to_post, 'author_message_id': None, 'board_id': board_id
         }
 
-        # 11. Отправка сообщения автору (уже с трансформированным текстом)
-        reply_to_message_id = reply_info.get(user_id)
-        sent_to_author = None
-        header_text = f"<i>{header}</i>"
-        reply_text = f">>{reply_to_post}\n" if reply_to_post else ""
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Изоляция отправки автору от основной рассылки ---
 
+        # 11. Отправка сообщения автору в изолированном блоке
         try:
+            reply_to_message_id = reply_info.get(user_id)
+            sent_to_author = None
+            header_text = f"<i>{header}</i>"
+            reply_text = f">>{reply_to_post}\n" if reply_to_post else ""
+
             if content.get('type') == 'text':
                 full_text = f"{header_text}\n\n{reply_text}{content['text']}"
                 sent_to_author = await message.bot.send_message(user_id, full_text, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
             
             elif content.get('type') in ['photo', 'video', 'animation', 'document', 'audio']:
                 caption_for_author = header_text
-                # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ (2) ---
-                # Используем уже готовый caption из content без повторного экранирования
                 final_caption = content.get('caption', '')
                 if reply_text or final_caption:
                     caption_for_author += f"\n\n{reply_text}{final_caption}"
@@ -3314,7 +3463,6 @@ async def handle_message(message: Message):
                 
                 if content['type'] == 'photo':
                     sent_to_author = await message.bot.send_photo(user_id, media_to_send, caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
-                # ... (аналогичные вызовы для video, animation и т.д. остаются)
                 elif content['type'] == 'video':
                     sent_to_author = await message.bot.send_video(user_id, content['file_id'], caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
                 elif content['type'] == 'animation':
@@ -3324,7 +3472,6 @@ async def handle_message(message: Message):
                 elif content['type'] == 'audio':
                     sent_to_author = await message.bot.send_audio(user_id, content['file_id'], caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
 
-            # ... (остальные типы контента: sticker, voice, video_note)
             elif content['type'] == 'sticker':
                 sent_to_author = await message.bot.send_sticker(user_id, content['file_id'], reply_to_message_id=reply_to_message_id)
             elif content['type'] == 'voice':
@@ -3337,15 +3484,26 @@ async def handle_message(message: Message):
                 post_to_messages.setdefault(current_post_num, {})[user_id] = sent_to_author.message_id
                 message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
 
-            if not is_shadow_muted and recipients:
+        except TelegramForbiddenError:
+            b_data['users']['active'].discard(user_id)
+            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из handle_message).")
+        except Exception as e:
+            # Логируем ошибку, но НЕ удаляем пост из хранилища.
+            print(f"⚠️ Ошибка отправки поста #{current_post_num} автору {user_id}: {e}")
+
+        # 12. Постановка в очередь для остальных. Выполняется всегда, если отправка автору не привела к его деактивации.
+        if not is_shadow_muted and recipients and user_id in b_data['users']['active']:
+            try:
                 await message_queues[board_id].put({
                     'recipients': recipients, 'content': content, 'post_num': current_post_num,
                     'reply_info': reply_info if reply_info else None, 'board_id': board_id
                 })
-
-        except Exception as e:
-            print(f"Ошибка при отправке или постановке в очередь: {e}")
-            messages_storage.pop(current_post_num, None)
+            except Exception as e:
+                # Если ошибка тут (например, очередь переполнена), то пост нужно удалить
+                print(f"❌ Критическая ошибка постановки в очередь. Пост #{current_post_num} удален. Ошибка: {e}")
+                messages_storage.pop(current_post_num, None)
+        
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     except Exception as e:
         print(f"Критическая ошибка в handle_message: {e}")
