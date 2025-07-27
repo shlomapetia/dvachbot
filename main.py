@@ -1396,20 +1396,68 @@ async def send_moderation_notice(user_id: int, action: str, board_id: str, durat
         "board_id": board_id
     })
 
+async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
+    """
+    Централизованно применяет все трансформации режимов (аниме, и т.д.)
+    к полям 'text' и 'caption' в словаре content.
+    """
+    b_data = board_data[board_id]
+    modified_content = content.copy()
+
+    # --- Применение трансформаций к 'text' ---
+    if 'text' in modified_content and modified_content['text']:
+        text = modified_content['text']
+        if b_data['anime_mode']:
+            text = anime_transform(text)
+        elif b_data['slavaukraine_mode']:
+            text = ukrainian_transform(text)
+        elif b_data['zaputin_mode']:
+            text = zaputin_transform(text)
+        elif b_data['suka_blyat_mode']:
+            words = text.split()
+            for i in range(len(words)):
+                if random.random() < 0.3: words[i] = random.choice(MAT_WORDS)
+            text = ' '.join(words)
+            # Счетчик и добавочная фраза для suka_blyat обрабатываются в send_message_to_users,
+            # так как они должны применяться один раз на всё сообщение.
+        modified_content['text'] = text
+
+    # --- Применение трансформаций к 'caption' ---
+    if 'caption' in modified_content and modified_content['caption']:
+        caption = modified_content['caption']
+        if b_data['anime_mode']:
+            caption = anime_transform(caption)
+        elif b_data['slavaukraine_mode']:
+            caption = ukrainian_transform(caption)
+        elif b_data['zaputin_mode']:
+            caption = zaputin_transform(caption)
+        elif b_data['suka_blyat_mode']:
+            words = caption.split()
+            for i in range(len(words)):
+                if random.random() < 0.3: words[i] = random.choice(MAT_WORDS)
+            caption = ' '.join(words)
+        modified_content['caption'] = caption
+
+    # --- Добавление фраз для режимов ---
+    # Эта логика останется в send_message_to_users, так как она добавляет текст
+    # ко всему сообщению, а не просто трансформирует поле.
+    # Но основные преобразования текста/подписи сделаны здесь.
+
+    return modified_content
+
 async def send_message_to_users(
     bot_instance: Bot,
     recipients: set[int],
     content: dict,
     reply_info: dict | None = None,
 ) -> list:
-    """Оптимизированная рассылка сообщений пользователям с поддержкой режимов (с конкретным ботом)."""
+    """Оптимизированная рассылка сообщений пользователям (без логики трансформации)."""
     if not recipients:
         return []
 
     if not content or 'type' not in content:
         return []
 
-    # Определяем доску по переданному экземпляру бота
     board_id = None
     for b_id, config in BOARD_CONFIG.items():
         if config['token'] == bot_instance.token:
@@ -1421,32 +1469,23 @@ async def send_message_to_users(
         return []
 
     b_data = board_data[board_id]
+    
+    # --- ЛОГИКА ТРАНСФОРМАЦИИ УДАЛЕНА ---
+    # Функция теперь получает уже полностью готовый 'content'.
+    # Мы оставим только логику, которая должна применяться единоразово
+    # ко всему сообщению перед рассылкой.
+    
     modified_content = content.copy()
 
-    # Применяем модификации режимов в зависимости от доски
-    if 'text' in modified_content and modified_content['text']:
-        if b_data['anime_mode']: modified_content['text'] = anime_transform(modified_content['text'])
-        elif b_data['slavaukraine_mode']: modified_content['text'] = ukrainian_transform(modified_content['text'])
-        elif b_data['zaputin_mode']: modified_content['text'] = zaputin_transform(modified_content['text'])
-        elif b_data['suka_blyat_mode']:
-            words = modified_content['text'].split()
-            for i in range(len(words)):
-                if random.random() < 0.3: words[i] = random.choice(MAT_WORDS)
-            modified_content['text'] = ' '.join(words)
-            b_data['suka_blyat_counter'] += 1
-            if b_data['suka_blyat_counter'] % 3 == 0: modified_content['text'] += " ... СУКА БЛЯТЬ!"
-    
-    if 'caption' in modified_content and modified_content['caption']:
-        if b_data['anime_mode']: modified_content['caption'] = anime_transform(modified_content['caption'])
-        elif b_data['slavaukraine_mode']: modified_content['caption'] = ukrainian_transform(modified_content['caption'])
-        elif b_data['zaputin_mode']: modified_content['caption'] = zaputin_transform(modified_content['caption'])
-        elif b_data['suka_blyat_mode']:
-            words = modified_content['caption'].split()
-            for i in range(len(words)):
-                if random.random() < 0.3: words[i] = random.choice(MAT_WORDS)
-            modified_content['caption'] = ' '.join(words)
-            b_data['suka_blyat_counter'] += 1
-            if b_data['suka_blyat_counter'] % 3 == 0: modified_content['caption'] += " ... СУКА БЛЯТЬ!"
+    # Эта логика должна остаться здесь, т.к. она добавляет текст ко всему сообщению,
+    # а не просто трансформирует поле, и должна применяться один раз на рассылку.
+    if b_data['suka_blyat_mode']:
+        b_data['suka_blyat_counter'] += 1
+        if b_data['suka_blyat_counter'] % 3 == 0:
+            if 'text' in modified_content and modified_content['text']:
+                modified_content['text'] += " ... СУКА БЛЯТЬ!"
+            elif 'caption' in modified_content and modified_content['caption']:
+                modified_content['caption'] += " ... СУКА БЛЯТЬ!"
 
     if b_data['slavaukraine_mode'] and random.random() < 0.3:
         phrase = "\n\n" + random.choice(UKRAINIAN_PHRASES)
@@ -1458,8 +1497,8 @@ async def send_message_to_users(
         if 'text' in modified_content and modified_content['text']: modified_content['text'] += phrase
         elif 'caption' in modified_content and modified_content['caption']: modified_content['caption'] += phrase
 
+
     blocked_users = set()
-    # Фильтруем получателей по банам на КОНКРЕТНОЙ доске
     active_recipients = {uid for uid in recipients if uid not in b_data['users']['banned']}
 
     if not active_recipients:
@@ -1487,10 +1526,8 @@ async def send_message_to_users(
                     reply_text = f">>{reply_to_post}\n"
 
             main_text_raw = modified_content.get('text') or modified_content.get('caption') or ''
-            # Применяем add_you_to_my_posts для КАЖДОГО пользователя индивидуально
             main_text = add_you_to_my_posts(main_text_raw, uid)
             
-            # Экранирование УДАЛЕНО. Функция доверяет входящему тексту.
             full_text = f"{head}\n\n{reply_text}{main_text}" if (reply_text or main_text) else head
 
             if ct == "text":
@@ -1570,7 +1607,6 @@ async def send_message_to_users(
             if not msg: continue
             messages_to_save = msg if isinstance(msg, list) else [msg]
             for m in messages_to_save:
-                # Проверяем что у поста есть словарь для маппинга
                 if post_num not in post_to_messages:
                     post_to_messages[post_num] = {}
                 post_to_messages[post_num][uid] = m.message_id
@@ -1583,7 +1619,6 @@ async def send_message_to_users(
                 print(f"🚫 [{board_id}] Пользователь {uid} заблокировал бота, удален из активных")
 
     return list(zip(active_recipients, results))
-
 
 async def message_broadcaster(bots: dict[str, Bot]):
     """Обработчик очереди сообщений с воркерами для каждой доски."""
@@ -2858,7 +2893,6 @@ async def handle_audio(message: Message):
 
     if message.reply_to_message:
         reply_mid = message.reply_to_message.message_id
-        # Эффективный поиск: используем ID пользователя, который отвечает, и ID сообщения, на которое он отвечает
         lookup_key = (user_id, reply_mid)
         reply_to_post = message_to_post.get(lookup_key)
         
@@ -2868,13 +2902,14 @@ async def handle_audio(message: Message):
     try: await message.delete()
     except: pass
     
-    # Получаем оригинальную подпись без преобразований
-    caption = message.caption or ""
-
     content = {
         'type': 'audio', 'header': header, 'file_id': message.audio.file_id,
-        'caption': caption, 'reply_to_post': reply_to_post
+        'caption': message.caption or "", 'reply_to_post': reply_to_post
     }
+
+    # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
+    # Применяем трансформации ДО отправки автору и ДО постановки в очередь
+    content = await _apply_mode_transformations(content, board_id)
 
     messages_storage[current_post_num] = {
         'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
@@ -2882,9 +2917,11 @@ async def handle_audio(message: Message):
     }
 
     reply_to_message_id = reply_info.get(user_id)
-    # Формируем подпись для автора с оригинальным текстом
+    
+    # Формируем подпись для автора, используя уже обработанный текст
     caption_text = f"<i>{header}</i>"
-    if caption: caption_text += f"\n\n{escape_html(caption)}"
+    if content['caption']: 
+        caption_text += f"\n\n{content['caption']}"
 
     sent_to_author = await message.bot.send_audio(
         user_id, message.audio.file_id, caption=caption_text,
@@ -2898,7 +2935,6 @@ async def handle_audio(message: Message):
 
     recipients = b_data['users']['active'] - {user_id}
     if recipients:
-        # Отправляем в очередь контент с оригинальной подписью
         await message_queues[board_id].put({
             'recipients': recipients, 'content': content, 'post_num': current_post_num,
             'reply_info': reply_info, 'board_id': board_id
@@ -3073,7 +3109,6 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
     if not group or not group.get('media'):
         return
 
-    # Добавляем в sent_media_groups, чтобы избежать повторной отправки
     sent_media_groups.add(media_group_id)
 
     post_num = group['post_num']
@@ -3085,6 +3120,11 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
         'type': 'media_group', 'header': group['header'], 'media': group['media'],
         'caption': group.get('caption'), 'reply_to_post': group.get('reply_to_post')
     }
+
+    # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ (1) ---
+    # Применяем трансформации ДО отправки автору и ДО постановки в очередь
+    content = await _apply_mode_transformations(content, board_id)
+
     messages_storage[post_num] = {
         'author_id': user_id, 'timestamp': group['timestamp'], 'content': content,
         'reply_to': group.get('reply_to_post'), 'board_id': board_id
@@ -3100,12 +3140,11 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
             
         header_html = f"<i>{group['header']}</i>"
         
-        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-        # Формируем подпись для автора с "чистым" текстом и экранируем его
-        # Добавляем \n\n чтобы отделить заголовок от подписи
+        # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ (2) ---
+        # Формируем подпись для автора, используя уже обработанный текст
         full_caption = header_html
-        if group.get('caption'):
-            full_caption += f"\n\n{escape_html(group['caption'])}"
+        if content.get('caption'):
+            full_caption += f"\n\n{content['caption']}"
 
         for idx, media in enumerate(group['media']):
             caption_for_media = full_caption if idx == 0 else None
@@ -3145,28 +3184,22 @@ async def handle_message(message: Message):
     b_data = board_data[board_id]
 
     # 3. Проверка shadow-мута на конкретной доске.
-    # Мы просто устанавливаем флаг, а не дублируем всю логику отправки.
     is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
                        b_data['shadow_mutes'][user_id] > datetime.now(UTC))
 
     if is_shadow_muted:
-        # В режиме теневого мута мы просто удаляем исходное сообщение и продолжаем
-        # выполнение, чтобы имитировать отправку. Рассылка будет заблокирована позже.
-        try:
-            await message.delete()
-        except:
-            pass
+        try: await message.delete()
+        except: pass
     
     if not message.text and not message.caption and not message.content_type:
-        if not is_shadow_muted: # Если не шадоумут, то сообщения нет, удаляем
-            await message.delete()
+        if not is_shadow_muted: await message.delete()
         return
         
     if message.media_group_id:
         return
         
     try:
-        # 4. Проверка обычного мута на конкретной доске
+        # 4. Проверка обычного мута
         until = b_data['mutes'].get(user_id)
         if until and until > datetime.now(UTC):
             left = until - datetime.now(UTC)
@@ -3179,26 +3212,21 @@ async def handle_message(message: Message):
                     f"🔇 Эй пидор, ты в муте на доске {BOARD_CONFIG[board_id]['name']} ещё {minutes}м {seconds}с\nСпамишь дальше - получишь бан",
                     parse_mode="HTML"
                 )
-            except:
-                pass
+            except: pass
             return
         elif until:
             b_data['mutes'].pop(user_id, None)
 
-        # 5. Автоматически добавляем в active на конкретной доске
+        # 5. Добавление/проверка пользователя
         if user_id not in b_data['users']['active']:
             b_data['users']['active'].add(user_id)
             print(f"✅ [{board_id}] Добавлен новый пользователь: ID {user_id}")
 
-        # 6. Проверка бана на конкретной доске
         if user_id in b_data['users']['banned']:
             if not is_shadow_muted: await message.delete()
             return
 
-        # 7. Сохраняем объект сообщения для удаления (в контексте доски)
-        get_user_msgs_deque(user_id, board_id).append(message)
-
-        # 8. Спам-проверка (в контексте доски)
+        # 6. Спам-проверка
         spam_check = await check_spam(user_id, message, board_id)
         if not spam_check:
             if not is_shadow_muted: await message.delete()
@@ -3208,111 +3236,77 @@ async def handle_message(message: Message):
             await apply_penalty(message.bot, user_id, msg_type, board_id)
             return
         
-        # 9. Получатели (только с текущей доски)
+        # 7. Получение информации об ответе
         recipients = b_data['users']['active'] - {user_id}
-
-        reply_to_post = None
-        reply_info = {}
+        reply_to_post, reply_info = None, {}
         if message.reply_to_message:
-            reply_mid = message.reply_to_message.message_id
-            # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Эффективный поиск ---
-            lookup_key = (user_id, reply_mid)
+            lookup_key = (user_id, message.reply_to_message.message_id)
             reply_to_post = message_to_post.get(lookup_key)
-            
             if reply_to_post and reply_to_post in post_to_messages:
                 reply_info = post_to_messages[reply_to_post]
             else:
-                reply_to_post = None # Сбрасываем, если пост не найден или для него нет данных
+                reply_to_post = None
 
-        # 10. Форматируем заголовок (в контексте доски)
+        # 8. Формирование заголовка и удаление исходного сообщения
         header, current_post_num = await format_header(board_id)
-
-        if message.text:
-            daily_log.write(
-                f"[{datetime.now(timezone.utc).isoformat()}] [{board_id}] {message.text}\n"
-            )
-
-        content_type = message.content_type
         if not is_shadow_muted:
-            try:
-                await message.delete()
+            try: await message.delete()
             except: pass
 
-        # 11. ПЕРВЫЙ БЛОК: Формирование словаря `content`
-        content = {'type': content_type, 'header': header, 'reply_to_post': reply_to_post}
-
-        if content_type == 'text':
-            # Логика экранирования теперь здесь.
-            # Если есть entities, доверяем тексту (html_text), иначе - экранируем.
+        # 9. Формирование СЫРОГО словаря `content`
+        content = {'type': message.content_type, 'header': header, 'reply_to_post': reply_to_post}
+        if message.content_type == 'text':
             text_content = message.html_text if message.entities else escape_html(message.text)
-            
             if b_data['anime_mode'] and random.random() < 0.41:
                 anime_img_url = await get_random_anime_image()
                 if anime_img_url:
                     content.update({'type': 'photo', 'caption': text_content, 'image_url': anime_img_url})
                 else: 
-                    content.update({'type': 'text', 'text': text_content})
+                    content.update({'text': text_content})
             else: 
-                content.update({'type': 'text', 'text': text_content})
+                content.update({'text': text_content})
+        elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio']:
+            file_id = getattr(message, message.content_type, [])
+            if isinstance(file_id, list): file_id = file_id[-1]
+            content.update({'file_id': file_id.file_id, 'caption': escape_html(message.caption or "")})
+        elif message.content_type in ['sticker', 'voice', 'video_note']:
+            file_id = getattr(message, message.content_type)
+            content['file_id'] = file_id.file_id
 
-        elif content_type in ['photo', 'video', 'animation', 'document', 'audio']:
-            file_id = None
-            # Экранируем caption здесь
-            caption = escape_html(message.caption) if message.caption else ""
-            
-            if content_type == 'photo': file_id = message.photo[-1].file_id
-            elif content_type == 'video': file_id = message.video.file_id
-            elif content_type == 'animation': file_id = message.animation.file_id
-            elif content_type == 'document': file_id = message.document.file_id
-            elif content_type == 'audio': file_id = message.audio.file_id
+        # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ (1) ---
+        # Применяем трансформации ДО отправки автору и ДО постановки в очередь
+        content = await _apply_mode_transformations(content, board_id)
 
-            content.update({'file_id': file_id, 'caption': caption})
-        
-        elif content_type == 'sticker':
-            content['file_id'] = message.sticker.file_id 
-        elif content_type == 'voice':
-            content['file_id'] = message.voice.file_id
-        elif content_type == 'video_note':
-            content['file_id'] = message.video_note.file_id
-
-        # 12. Инициализация записи в хранилище (с board_id)
+        # 10. Сохранение в хранилище
         messages_storage[current_post_num] = {
-            'author_id': user_id,
-            'timestamp': datetime.now(UTC),
-            'content': content,
-            'reply_to': reply_to_post,
-            'author_message_id': None,
-            'board_id': board_id
+            'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
+            'reply_to': reply_to_post, 'author_message_id': None, 'board_id': board_id
         }
 
-        # 13. ВТОРОЙ БЛОК: Отправка сообщения автору
-        reply_to_message_id = reply_info.get(user_id) if reply_info else None
+        # 11. Отправка сообщения автору (уже с трансформированным текстом)
+        reply_to_message_id = reply_info.get(user_id)
         sent_to_author = None
         header_text = f"<i>{header}</i>"
         reply_text = f">>{reply_to_post}\n" if reply_to_post else ""
 
         try:
-            # Отправка автору теперь использует НЕПРЕОБРАЗОВАННЫЙ текст
             if content.get('type') == 'text':
-                full_text = f"{header_text}\n\n{reply_text}{content['text']}" if reply_text else f"{header_text}\n\n{content['text']}"
+                full_text = f"{header_text}\n\n{reply_text}{content['text']}"
                 sent_to_author = await message.bot.send_message(user_id, full_text, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
             
             elif content.get('type') in ['photo', 'video', 'animation', 'document', 'audio']:
-                # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
                 caption_for_author = header_text
-                if reply_text:
-                    caption_for_author += f"\n\n{reply_text}"
-                if content.get('caption'):
-                    # Добавляем двойной перенос строки, если есть и reply и caption
-                    if reply_text:
-                        caption_for_author += f"{escape_html(content['caption'])}"
-                    else:
-                        caption_for_author += f"\n\n{escape_html(content['caption'])}"
+                # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ (2) ---
+                # Используем уже готовый caption из content без повторного экранирования
+                final_caption = content.get('caption', '')
+                if reply_text or final_caption:
+                    caption_for_author += f"\n\n{reply_text}{final_caption}"
                 
                 media_to_send = content.get('image_url') or content.get('file_id')
                 
                 if content['type'] == 'photo':
                     sent_to_author = await message.bot.send_photo(user_id, media_to_send, caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
+                # ... (аналогичные вызовы для video, animation и т.д. остаются)
                 elif content['type'] == 'video':
                     sent_to_author = await message.bot.send_video(user_id, content['file_id'], caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
                 elif content['type'] == 'animation':
@@ -3322,6 +3316,7 @@ async def handle_message(message: Message):
                 elif content['type'] == 'audio':
                     sent_to_author = await message.bot.send_audio(user_id, content['file_id'], caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
 
+            # ... (остальные типы контента: sticker, voice, video_note)
             elif content['type'] == 'sticker':
                 sent_to_author = await message.bot.send_sticker(user_id, content['file_id'], reply_to_message_id=reply_to_message_id)
             elif content['type'] == 'voice':
@@ -3329,26 +3324,20 @@ async def handle_message(message: Message):
             elif content['type'] == 'video_note':
                 sent_to_author = await message.bot.send_video_note(user_id, content['file_id'], reply_to_message_id=reply_to_message_id)
 
-            # 14. Сохранение связей после успешной отправки автору
             if sent_to_author:
                 messages_storage[current_post_num]['author_message_id'] = sent_to_author.message_id
                 post_to_messages.setdefault(current_post_num, {})[user_id] = sent_to_author.message_id
                 message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
 
-            # 15. Отправка в очередь для рассылки остальным (БЛОКИРУЕТСЯ ДЛЯ SHADOWMUTE)
             if not is_shadow_muted and recipients:
                 await message_queues[board_id].put({
-                    'recipients': recipients,
-                    'content': content,
-                    'post_num': current_post_num,
-                    'reply_info': reply_info if reply_info else None,
-                    'board_id': board_id
+                    'recipients': recipients, 'content': content, 'post_num': current_post_num,
+                    'reply_info': reply_info if reply_info else None, 'board_id': board_id
                 })
 
         except Exception as e:
             print(f"Ошибка при отправке или постановке в очередь: {e}")
-            if current_post_num in messages_storage:
-                del messages_storage[current_post_num]
+            messages_storage.pop(current_post_num, None)
 
     except Exception as e:
         print(f"Критическая ошибка в handle_message: {e}")
