@@ -100,6 +100,7 @@ message_queues = {board: asyncio.Queue(maxsize=9000) for board in BOARDS}
 is_shutting_down = False
 git_executor = ThreadPoolExecutor(max_workers=1)
 send_executor = ThreadPoolExecutor(max_workers=100)
+save_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 1) # Executor для сохранения файлов
 git_semaphore = asyncio.Semaphore(1)
 post_counter_lock = asyncio.Lock()
 
@@ -425,32 +426,6 @@ async def auto_backup():
 gc.set_threshold(
     700, 10, 10)  # Оптимальные настройки для баланса памяти/производительности
 
-async def save_board_state(board_id: str):
-    """Сохраняет state.json для конкретной доски."""
-    state_file = f"{board_id}_state.json"
-    b_data = board_data[board_id]
-    
-    try:
-        with open(state_file, 'w', encoding='utf-8') as f:
-            # В state.json доски 'b' также сохраняем общий счетчик постов
-            post_counter_to_save = state['post_counter'] if board_id == 'b' else None
-            
-            data_to_save = {
-                'users_data': {
-                    'active': list(b_data['users']['active']),
-                    'banned': list(b_data['users']['banned']),
-                },
-                'message_counter': b_data['message_counter'],
-            }
-            if post_counter_to_save is not None:
-                data_to_save['post_counter'] = post_counter_to_save
-
-            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        print(f"⛔ [{board_id}] Ошибка сохранения state: {e}")
-        return False
-
 
 def get_user_msgs_deque(user_id: int, board_id: str):
     """Получаем deque для юзера на конкретной доске, ограничиваем количество юзеров в памяти"""
@@ -622,12 +597,65 @@ def is_admin(uid: int, board_id: str) -> bool:
         return False
     return uid in BOARD_CONFIG.get(board_id, {}).get('admins', set())
     
+def _sync_save_board_state(board_id: str):
+    """Синхронная, блокирующая функция для сохранения state.json."""
+    state_file = f"{board_id}_state.json"
+    b_data = board_data[board_id]
+    
+    try:
+        post_counter_to_save = state['post_counter'] if board_id == 'b' else None
+        
+        # --- ИЗМЕНЕНО: Логика подсчета постов ---
+        if board_id == 'b':
+            # Для доски 'b' количество постов равно общему счетчику
+            board_post_count = state['post_counter']
+        else:
+            # Для остальных досок считаем посты, принадлежащие им
+            board_post_count = sum(
+                1 for data in messages_storage.values() 
+                if data.get("board_id") == board_id
+            )
+        
+        data_to_save = {
+            'users_data': {
+                'active': list(b_data['users']['active']),
+                'banned': list(b_data['users']['banned']),
+            },
+            'message_counter': dict(b_data['message_counter']),
+            'board_post_count': board_post_count, # Записываем вычисленное значение
+        }
+        if post_counter_to_save is not None:
+            # Сохраняем 'post_counter' для 'b' для ясности и обратной совместимости
+            data_to_save['post_counter'] = post_counter_to_save
+
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"⛔ [{board_id}] Ошибка в потоке сохранения state: {e}")
+        return False
+
+async def save_board_state(board_id: str):
+    """Асинхронная обертка для неблокирующего сохранения state.json."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        save_executor,
+        _sync_save_board_state,
+        board_id
+    )
+
 async def save_all_boards_and_backup():
-    """Сохраняет данные ВСЕХ досок и делает один общий бэкап в Git."""
-    print("💾 Запуск полного сохранения и бэкапа...")
+    """Сохраняет данные ВСЕХ досок параллельно и делает один общий бэкап в Git."""
+    print("💾 Запуск параллельного сохранения и бэкапа...")
+
+    # 1. Создаем задачи для параллельного сохранения всех файлов
+    save_tasks = []
     for board_id in BOARDS:
-        await save_board_state(board_id)
-        save_reply_cache(board_id)
+        save_tasks.append(save_board_state(board_id))
+        save_tasks.append(save_reply_cache(board_id))
+    
+    # 2. Запускаем все задачи сохранения одновременно и ждем их завершения
+    await asyncio.gather(*save_tasks)
     
     print("💾 Все файлы состояний обновлены, пушим в GitHub...")
     success = await git_commit_and_push()
@@ -637,8 +665,8 @@ async def save_all_boards_and_backup():
         print("❌ Не удалось отправить бэкап в GitHub.")
     return success
 
-def save_reply_cache(board_id: str):
-    """Сохраняет кэш ответов для КОНКРЕТНОЙ доски, строго ограничивая количество постов."""
+def _sync_save_reply_cache(board_id: str):
+    """Синхронная, блокирующая функция для сохранения кэша. Выполняется в отдельном потоке."""
     reply_file = f"{board_id}_reply_cache.json"
     try:
         # 1. Определяем посты, принадлежащие ТОЛЬКО этой доске
@@ -647,17 +675,16 @@ def save_reply_cache(board_id: str):
             if data.get("board_id") == board_id
         }
         
-        # 2. Ограничиваем количество постов для сохранения
+        # 2. Ограничиваем количество постов для сохранения (медленная операция)
         recent_board_posts = sorted(list(board_post_keys))[-REPLY_CACHE:]
         recent_posts_set = set(recent_board_posts)
 
         if not recent_posts_set:
-            # Если у доски нет постов, можно удалить старый кэш, если он есть
             if os.path.exists(reply_file):
                 os.remove(reply_file)
             return True
 
-        # 3. Собираем данные для сохранения только по этим постам
+        # 3. Собираем данные для сохранения
         new_data = {
             "post_to_messages": {
                 str(p_num): data
@@ -681,16 +708,24 @@ def save_reply_cache(board_id: str):
             }
         }
 
-        # 4. Сохраняем новые данные
+        # 4. Сохраняем новые данные (блокирующая операция I/O)
         with open(reply_file, 'w', encoding='utf-8') as f:
             json.dump(new_data, f, ensure_ascii=False, indent=2)
-            # print(f"[{board_id}] reply_cache.json обновлен. Сохранено {len(recent_board_posts)} постов.")
 
         return True
 
     except Exception as e:
-        print(f"⛔ [{board_id}] Ошибка сохранения reply_cache: {str(e)[:200]}")
+        print(f"⛔ [{board_id}] Ошибка в потоке сохранения reply_cache: {str(e)[:200]}")
         return False
+
+async def save_reply_cache(board_id: str):
+    """Асинхронная обертка для неблокирующего сохранения кэша ответов."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        save_executor, 
+        _sync_save_reply_cache, 
+        board_id
+    )
 
 def load_state():
     """Загружает состояния для ВСЕХ досок в board_data."""
@@ -724,17 +759,19 @@ def load_state():
             b_data['users']['active'] = set(data.get('users_data', {}).get('active', []))
             b_data['users']['banned'] = set(data.get('users_data', {}).get('banned', []))
             b_data['message_counter'].update(data.get('message_counter', {}))
+            # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
+            b_data['board_post_count'] = data.get('board_post_count', 0)
 
             print(f"[{board_id}] Состояние загружено: "
                   f"активных = {len(b_data['users']['active'])}, "
-                  f"забаненных = {len(b_data['users']['banned'])}")
+                  f"забаненных = {len(b_data['users']['banned'])}, "
+                  f"постов = {b_data['board_post_count']}") # <-- Добавлено в лог для наглядности
 
             # Загружаем кэш ответов для этой доски
             load_reply_cache(board_id)
 
         except (json.JSONDecodeError, OSError) as e:
             print(f"Ошибка загрузки состояния для доски '{board_id}': {e}")
-
 def load_archived_post(post_num):
     """Ищем пост в архивах"""
     for archive_file in glob.glob("archive_*.pkl.gz"):
@@ -2094,7 +2131,9 @@ async def cmd_stats(message: types.Message):
     
     b_data = board_data[board_id]
     total_users_on_board = len(b_data['users']['active'])
-    total_posts_on_board = sum(1 for p_data in messages_storage.values() if p_data.get('board_id') == board_id)
+    
+    # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Замена медленного подсчета на быстрый доступ ---
+    total_posts_on_board = b_data.get('board_post_count', 0)
     
     # Получаем общее количество уникальных пользователей с доски 'b'
     total_users_b = len(board_data['b']['users']['active'])
