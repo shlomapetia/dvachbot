@@ -161,10 +161,10 @@ os.environ["AIORGRAM_DISABLE_SIGNAL_HANDLERS"] = "1"
 
 SPAM_RULES = {
     'text': {
-        'max_repeats': 3,  # Макс одинаковых текстов подряд
+        'max_repeats': 5,  # Макс одинаковых текстов подряд
         'min_length': 2,  # Минимальная длина текста
         'window_sec': 15,  # Окно для проверки (сек)
-        'max_per_window': 6,  # Макс сообщений в окне
+        'max_per_window': 7,  # Макс сообщений в окне
         'penalty': [60, 300, 600]  # Шкала наказаний: [1 мин, 5мин, 10 мин]
     },
     'sticker': {
@@ -174,7 +174,7 @@ SPAM_RULES = {
     },
     'animation': {  # Гифки
         'max_per_window': 5,  # 5 гифки за 30 сек
-        'window_sec': 24,
+        'window_sec': 20,
         'penalty': [60, 600, 900]  # 1мин, 10мин, 15 мин
     }
 }
@@ -1117,9 +1117,9 @@ async def check_spam(user_id: int, msg: Message, board_id: str) -> bool:
     if msg_type == 'text' and content:
         b_data['spam_violations'][user_id]['last_contents'].append(content)
         # 3 одинаковых подряд
-        if len(b_data['spam_violations'][user_id]['last_contents']) >= 3:
+        if len(b_data['spam_violations'][user_id]['last_contents']) >= 4:
             # --- ИЗМЕНЕНИЕ ЛОГИКИ: Проверяем последние 3 элемента ---
-            last_three = list(b_data['spam_violations'][user_id]['last_contents'])[-3:]
+            last_three = list(b_data['spam_violations'][user_id]['last_contents'])[-4:]
             if len(set(last_three)) == 1:
                 b_data['spam_violations'][user_id]['level'] = min(
                     b_data['spam_violations'][user_id]['level'] + 1,
@@ -1144,9 +1144,9 @@ async def check_spam(user_id: int, msg: Message, board_id: str) -> bool:
         last_items.append(msg.sticker.file_id)
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         # 3 одинаковых подряд
-        if len(last_items) >= 3:
+        if len(last_items) >= 4:
             # Проверяем только последние 3 элемента
-            last_three = list(last_items)[-3:]
+            last_three = list(last_items)[-4:]
             if len(set(last_three)) == 1:
                 b_data['spam_violations'][user_id]['level'] = min(
                     b_data['spam_violations'][user_id]['level'] + 1,
@@ -1408,8 +1408,7 @@ async def send_moderation_notice(user_id: int, action: str, board_id: str, durat
     if action == "ban":
         text = (f"🚨 Хуесос был забанен за спам. Помянем.")
     elif action == "mute":
-        text = (f"🔇 Ебаного пидораса замутили на {duration}. "
-               "Хорош спамить, хуйло ебаное!")
+        text = (f"🔇 Пидораса замутили ненадолго")
     else:
         return
 
