@@ -49,6 +49,7 @@ from conan import conan_roaster, conan_phrase
 from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES 
 from deanonymizer import DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS, generate_deanon_info
 from help_text import HELP_TEXT
+from ghost_machine import ghost_poster
 
 # ========== Глобальные настройки досок ==========
 # Вставляем новую конфигурационную структуру
@@ -148,7 +149,7 @@ state = {
 messages_storage = {}
 post_to_messages = {}
 message_to_post = {}
-last_messages = deque(maxlen=300) # Используется для генерации сообщений, можно оставить общим
+last_messages = deque(maxlen=500) # Используется для генерации сообщений, можно оставить общим
 last_activity_time = datetime.now()
 daily_log = io.StringIO()
 sent_media_groups = deque(maxlen=1000)
@@ -472,14 +473,14 @@ MOTIVATIONAL_MESSAGES = [
     "Анонимусы не размножаются почкованием. Зови новых",
     "Скучно? Позови анонов, будет веселее",
     "Маленький чат = мёртвый чат. Действуй",
-    "Анонимность - это не только анонимность. Это и дружба",
+    "Анонимность - это не только анонимность. Это и мужской эротический флирт.",
     "Абу сосет хуй. Зови друзей",
     "Тгач - это не только чат. Это аноны",
     "Возрождаем сосач. Аноны, зовите друзей",
     "Добро пожаловать. Снова",
     "Привет, анон. Ты не один. Зови друзей",
     "Да ты заебал, приглашай анонов",
-    "Пора бы пропиарить тгач. Разошли в свои конфы",
+    "Пора бы пропиарить тгач. Эй уёбок, разошли в свои конфы",
 ]
 
 # Тексты для копирования
@@ -1299,7 +1300,7 @@ async def format_header(board_id: str) -> Tuple[str, int]:
     elif rand_prefix < 0.040:
         prefix = "### ЧЕЧЕНЕЦ ### "
     elif rand_prefix < 0.042:
-        prefix = "Томоко Куроки - "
+        prefix = "АААААААА - "
     elif rand_prefix < 0.044:
         prefix = "### Аниме девочка ### "
 
@@ -3606,6 +3607,15 @@ async def start_background_tasks(bots: dict[str, Bot]):
         asyncio.create_task(auto_memory_cleaner()),
         asyncio.create_task(help_broadcaster()),
         asyncio.create_task(board_statistics_broadcaster()),
+        asyncio.create_task(ghost_poster( # <--- ОБНОВИТЕ ЭТОТ БЛОК
+            last_messages,
+            message_queues,
+            messages_storage,
+            post_to_messages, # <--- ДОБАВЬТЕ ЭТОТ АРГУМЕНТ
+            format_header,
+            board_data,
+            BOARDS
+        )),
         # asyncio.create_task(dvach_thread_poster()), ПОКА НЕ НАДО
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
