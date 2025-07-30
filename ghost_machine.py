@@ -1,7 +1,7 @@
 import asyncio
 import random
 import re
-from collections import deque
+from collections import deque, defaultdict
 from datetime import datetime, UTC
 
 from japanese_translator import get_random_anime_image, anime_transform
@@ -16,7 +16,7 @@ except ImportError:
 
 from typing import TYPE_CHECKING, List
 if TYPE_CHECKING:
-    from collections import defaultdict
+    pass  # Теперь defaultdict импортируется напрямую выше
 
 # --- Константы ---
 MIN_MESSAGES_FOR_TRAINING = 50
@@ -177,4 +177,4 @@ async def ghost_poster(
         except Exception as e:
             import traceback
             print(f"❌ КРИТИЧЕСКАЯ ОШИБКА в ghost_poster: {e}\n{traceback.format_exc()}")
-            await asyncio.sleep(900)
+            await asyncio.sleep(900)```
