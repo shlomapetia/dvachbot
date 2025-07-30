@@ -177,4 +177,4 @@ async def ghost_poster(
         except Exception as e:
             import traceback
             print(f"❌ КРИТИЧЕСКАЯ ОШИБКА в ghost_poster: {e}\n{traceback.format_exc()}")
-            await asyncio.sleep(900)```
+            await asyncio.sleep(900)
