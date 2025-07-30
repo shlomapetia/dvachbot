@@ -6,3 +6,4 @@ Pillow
 future
 python-dotenv
 gitpython
+markovify
