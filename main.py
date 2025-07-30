@@ -3367,6 +3367,27 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
             await asyncio.sleep(1) # Небольшая задержка между отправкой частей альбома
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
+def apply_greentext_formatting(text: str) -> str:
+    """
+    Применяет форматирование 'Greentext' к строкам, начинающимся с '>'.
+    Работает с уже HTML-экранированным текстом.
+    """
+    if not text:
+        return text
+
+    processed_lines = []
+    lines = text.split('\n')
+    for line in lines:
+        # Проверяем, начинается ли строка (без ведущих пробелов) с HTML-сущности '>'
+        if line.lstrip().startswith('>'):
+            # Оборачиваем всю строку в тег <code> для моноширинного зеленого текста
+            processed_lines.append(f"<code>{line}</code>")
+        else:
+            processed_lines.append(line)
+            
+    return '\n'.join(processed_lines)
+
+
 @dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
@@ -3467,8 +3488,15 @@ async def handle_message(message: Message):
 
         # 9. Формирование СЫРОГО словаря `content`
         content = {'type': message.content_type, 'header': header, 'reply_to_post': reply_to_post}
+        
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        
         if message.content_type == 'text':
             text_content = message.html_text if message.entities else escape_html(message.text)
+            
+            # Применяем Greentext форматирование
+            text_content = apply_greentext_formatting(text_content)
+
             if b_data['anime_mode'] and random.random() < 0.41:
                 anime_img_url = await get_random_anime_image()
                 if anime_img_url:
@@ -3477,15 +3505,24 @@ async def handle_message(message: Message):
                     content.update({'text': text_content})
             else: 
                 content.update({'text': text_content})
+                
         elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio']:
             file_id = getattr(message, message.content_type, [])
             if isinstance(file_id, list): file_id = file_id[-1]
-            content.update({'file_id': file_id.file_id, 'caption': escape_html(message.caption or "")})
+            
+            # Экранируем и применяем Greentext к подписи
+            caption_content = escape_html(message.caption or "")
+            caption_content = apply_greentext_formatting(caption_content)
+            
+            content.update({'file_id': file_id.file_id, 'caption': caption_content})
+            
         elif message.content_type in ['sticker', 'voice', 'video_note']:
             file_id = getattr(message, message.content_type)
             content['file_id'] = file_id.file_id
 
-        # Применяем трансформации ДО отправки автору и ДО постановки в очередь
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+        # Применяем трансформации режимов ДО отправки автору и ДО постановки в очередь
         content = await _apply_mode_transformations(content, board_id)
 
         # 10. Сохранение в хранилище
@@ -3494,15 +3531,13 @@ async def handle_message(message: Message):
             'reply_to': reply_to_post, 'author_message_id': None, 'board_id': board_id
         }
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Изоляция отправки автору от основной рассылки ---
+        # 11. Отправка сообщения автору (уже с трансформированным текстом)
+        reply_to_message_id = reply_info.get(user_id)
+        sent_to_author = None
+        header_text = f"<i>{header}</i>"
+        reply_text = f">>{reply_to_post}\n" if reply_to_post else ""
 
-        # 11. Отправка сообщения автору в изолированном блоке
         try:
-            reply_to_message_id = reply_info.get(user_id)
-            sent_to_author = None
-            header_text = f"<i>{header}</i>"
-            reply_text = f">>{reply_to_post}\n" if reply_to_post else ""
-
             if content.get('type') == 'text':
                 full_text = f"{header_text}\n\n{reply_text}{content['text']}"
                 sent_to_author = await message.bot.send_message(user_id, full_text, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
@@ -3538,26 +3573,19 @@ async def handle_message(message: Message):
                 post_to_messages.setdefault(current_post_num, {})[user_id] = sent_to_author.message_id
                 message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
 
-        except TelegramForbiddenError:
-            b_data['users']['active'].discard(user_id)
-            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из handle_message).")
-        except Exception as e:
-            # Логируем ошибку, но НЕ удаляем пост из хранилища.
-            print(f"⚠️ Ошибка отправки поста #{current_post_num} автору {user_id}: {e}")
-
-        # 12. Постановка в очередь для остальных. Выполняется всегда, если отправка автору не привела к его деактивации.
-        if not is_shadow_muted and recipients and user_id in b_data['users']['active']:
-            try:
+            if not is_shadow_muted and recipients:
                 await message_queues[board_id].put({
                     'recipients': recipients, 'content': content, 'post_num': current_post_num,
                     'reply_info': reply_info if reply_info else None, 'board_id': board_id
                 })
-            except Exception as e:
-                # Если ошибка тут (например, очередь переполнена), то пост нужно удалить
-                print(f"❌ Критическая ошибка постановки в очередь. Пост #{current_post_num} удален. Ошибка: {e}")
-                messages_storage.pop(current_post_num, None)
-        
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+        except TelegramForbiddenError:
+            # Пользователь заблокировал бота, удаляем его из активных
+            b_data['users']['active'].discard(user_id)
+            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из handle_message).")
+        except Exception as e:
+            print(f"Ошибка при отправке или постановке в очередь: {e}")
+            messages_storage.pop(current_post_num, None)
 
     except Exception as e:
         print(f"Критическая ошибка в handle_message: {e}")
