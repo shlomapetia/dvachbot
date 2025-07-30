@@ -165,20 +165,23 @@ SPAM_RULES = {
         'max_repeats': 5,  # Макс одинаковых текстов подряд
         'min_length': 2,  # Минимальная длина текста
         'window_sec': 15,  # Окно для проверки (сек)
-        'max_per_window': 7,  # Макс сообщений в окне
+        'max_per_window': 6,  # Макс сообщений в окне
         'penalty': [60, 300, 600]  # Шкала наказаний: [1 мин, 5мин, 10 мин]
     },
     'sticker': {
+        'max_repeats': 4, # <-- ДОБАВЛЕНО
         'max_per_window': 6,  # 6 стикеров за 18 сек
         'window_sec': 18,
         'penalty': [60, 600, 900]  # 1мин, 10мин, 15 мин
     },
     'animation': {  # Гифки
-        'max_per_window': 5,  # 5 гифки за 30 сек
-        'window_sec': 20,
+        'max_repeats': 3, # <-- ДОБАВЛЕНО
+        'max_per_window': 5,  # 5 гифки за 24 сек
+        'window_sec': 24,
         'penalty': [60, 600, 900]  # 1мин, 10мин, 15 мин
     }
 }
+
 
 
 # Хранит информацию о текущих медиа-группах: media_group_id -> данные
@@ -1085,101 +1088,72 @@ async def check_spam(user_id: int, msg: Message, board_id: str) -> bool:
         content = msg.text
     elif msg.content_type == 'sticker':
         msg_type = 'sticker'
-        content = None
+        content = msg.sticker.file_id # <-- ИЗМЕНЕНО: Сразу получаем ID
     elif msg.content_type == 'animation':
         msg_type = 'animation'
-        content = None
+        content = msg.animation.file_id # <-- ИЗМЕНЕНО: Сразу получаем ID
     elif msg.content_type in ['photo', 'video', 'document'] and msg.caption:
         msg_type = 'text'
         content = msg.caption
     else:
-        return True
+        return True # Неизвестный тип для спам-фильтра
 
     rules = SPAM_RULES.get(msg_type)
     if not rules:
         return True
 
     now = datetime.now(UTC)
-    # Инициализация данных пользователя в контексте доски
-    if user_id not in b_data['spam_violations'] or not b_data['spam_violations'][user_id]:
-        b_data['spam_violations'][user_id] = {
-            'level': 0,
-            'last_reset': now,
-            'last_contents': deque(maxlen=4)
-        }
+    violations = b_data['spam_violations'].setdefault(user_id, {'level': 0, 'last_reset': now})
+
     # Сброс уровня, если прошло больше 1 часа
-    if (now - b_data['spam_violations'][user_id]['last_reset']) > timedelta(hours=1):
-        b_data['spam_violations'][user_id] = {
-            'level': 0,
-            'last_reset': now,
-            'last_contents': deque(maxlen=4)
-        }
-    # Проверка повторяющихся текстов/подписей
-    if msg_type == 'text' and content:
-        b_data['spam_violations'][user_id]['last_contents'].append(content)
-        # 3 одинаковых подряд
-        if len(b_data['spam_violations'][user_id]['last_contents']) >= 4:
-            # --- ИЗМЕНЕНИЕ ЛОГИКИ: Проверяем последние 3 элемента ---
-            last_three = list(b_data['spam_violations'][user_id]['last_contents'])[-4:]
-            if len(set(last_three)) == 1:
-                b_data['spam_violations'][user_id]['level'] = min(
-                    b_data['spam_violations'][user_id]['level'] + 1,
-                    len(rules['penalty']) - 1)
-                return False
-        # Чередование двух текстов
-        if len(b_data['spam_violations'][user_id]['last_contents']) == 4:
-            unique = set(b_data['spam_violations'][user_id]['last_contents'])
-            if len(unique) == 2:
-                contents = list(b_data['spam_violations'][user_id]['last_contents'])
-                p1 = [contents[0], contents[1]] * 2
-                p2 = [contents[1], contents[0]] * 2
-                if contents == p1 or contents == p2:
-                    b_data['spam_violations'][user_id]['level'] = min(
-                        b_data['spam_violations'][user_id]['level'] + 1,
-                        len(rules['penalty']) - 1)
-                    return False
+    if (now - violations['last_reset']) > timedelta(hours=1):
+        violations['level'] = 0
+        violations['last_reset'] = now
+    
+    # --- НАЧАЛО РЕФАКТОРИНГА: Унифицированная проверка на повторы ---
+    max_repeats = rules.get('max_repeats')
+    if max_repeats and content:
+        # Определяем, какую очередь использовать
+        if msg_type == 'text':
+            last_items_deque = b_data['last_texts'][user_id]
+        elif msg_type == 'sticker':
+            last_items_deque = b_data['last_stickers'][user_id]
+        elif msg_type == 'animation':
+            last_items_deque = b_data['last_animations'][user_id]
+        else:
+            last_items_deque = None
 
-    # Проверка на повтор стикеров
-    elif msg_type == 'sticker':
-        last_items = b_data['last_stickers'][user_id]
-        last_items.append(msg.sticker.file_id)
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        # 3 одинаковых подряд
-        if len(last_items) >= 4:
-            # Проверяем только последние 3 элемента
-            last_three = list(last_items)[-4:]
-            if len(set(last_three)) == 1:
-                b_data['spam_violations'][user_id]['level'] = min(
-                    b_data['spam_violations'][user_id]['level'] + 1,
-                    len(rules['penalty']) - 1)
-                return False
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        if last_items_deque is not None:
+            last_items_deque.append(content)
             
-    # Проверка на повтор гифок
-    elif msg_type == 'animation':
-        last_items = b_data['last_animations'][user_id]
-        last_items.append(msg.animation.file_id)
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        # 3 одинаковых подряд
-        if len(last_items) >= 3:
-            # Проверяем только последние 3 элемента
-            last_three = list(last_items)[-3:]
-            if len(set(last_three)) == 1:
-                b_data['spam_violations'][user_id]['level'] = min(
-                    b_data['spam_violations'][user_id]['level'] + 1,
-                    len(rules['penalty']) - 1)
-                return False
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            # Проверка на N одинаковых подряд
+            if len(last_items_deque) >= max_repeats:
+                if len(set(last_items_deque)) == 1:
+                    violations['level'] = min(violations['level'] + 1, len(rules['penalty']) - 1)
+                    last_items_deque.clear() # Очищаем очередь после нарушения
+                    return False
+            
+            # Проверка на чередование для текста (оставляем специфичной)
+            if msg_type == 'text' and len(last_items_deque) == 4:
+                if len(set(last_items_deque)) == 2:
+                    contents = list(last_items_deque)
+                    p1 = [contents[0], contents[1]] * 2
+                    p2 = [contents[1], contents[0]] * 2
+                    if contents == p1 or contents == p2:
+                        violations['level'] = min(violations['level'] + 1, len(rules['penalty']) - 1)
+                        last_items_deque.clear() # Очищаем очередь
+                        return False
+    # --- КОНЕЦ РЕФАКТОРИНГА ---
 
-    # Проверка лимита по времени
+    # Проверка лимита по времени (без изменений)
     window_start = now - timedelta(seconds=rules['window_sec'])
     b_data['spam_tracker'][user_id] = [t for t in b_data['spam_tracker'][user_id] if t > window_start]
     b_data['spam_tracker'][user_id].append(now)
+
     if len(b_data['spam_tracker'][user_id]) >= rules['max_per_window']:
-        b_data['spam_violations'][user_id]['level'] = min(
-            b_data['spam_violations'][user_id]['level'] + 1,
-            len(rules['penalty']) - 1)
+        violations['level'] = min(violations['level'] + 1, len(rules['penalty']) - 1)
         return False
+        
     return True
 
 async def apply_penalty(bot_instance: Bot, user_id: int, msg_type: str, board_id: str):
