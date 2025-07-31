@@ -3642,24 +3642,19 @@ async def supervisor():
         restore_backup_on_start()
         load_state()
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        # 1. Импортируем необходимый класс сессии
         from aiogram.client.session.aiohttp import AiohttpSession
 
-        # 2. Создаем ЕДИНЫЙ экземпляр сессии AiohttpSession с нужным таймаутом.
-        #    Он будет управлять своим внутренним aiohttp.ClientSession и будет
-        #    передан всем ботам.
+        # 1. <--- ИСПРАВЛЕНИЕ TypeError: unsupported operand type(s) for +: 'ClientTimeout' and 'int'
+        # Передаем таймаут как число, а не объект ClientTimeout.
         session = AiohttpSession(
-            timeout=aiohttp.ClientTimeout(total=60)
+            timeout=60
         )
         
-        # 3. Задаем свойства по умолчанию
         default_properties = DefaultBotProperties(parse_mode="HTML")
         
         for board_id, config in BOARD_CONFIG.items():
             token = config.get("token")
             if token:
-                # 4. Передаем в конструктор Bot ОДНУ И ТУ ЖЕ сессию
                 bots[board_id] = Bot(
                     token=token, 
                     default=default_properties, 
@@ -3667,11 +3662,10 @@ async def supervisor():
                 )
             else:
                 print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         if not bots:
             print("❌ Не найдено ни одного токена бота. Завершение работы.")
-            if session and not session.closed:
+            if session:
                 await session.close()
             return
 
@@ -3697,8 +3691,10 @@ async def supervisor():
         if not is_shutting_down:
              await graceful_shutdown(list(bots.values()))
         
-        # Закрываем созданную сессию Aiogram
-        if session and not session.closed:
+        # 2. <--- ИСПРАВЛЕНИЕ AttributeError: 'AiohttpSession' object has no attribute 'closed'
+        # Убрана проверка session.closed, так как у объекта сессии нет такого атрибута.
+        # Метод close() можно безопасно вызывать, даже если сессия уже закрыта.
+        if session:
             print("Закрытие общей HTTP сессии...")
             await session.close()
         
