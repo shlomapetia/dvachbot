@@ -2965,12 +2965,13 @@ async def cmd_unshadowmute(message: Message):
         return
 
     target_id = None
-    if message.reply_to_message:
+    parts = message.text.split()
+    # Сначала проверяем, указан ли ID в аргументах команды
+    if len(parts) >= 2 and parts[1].isdigit():
+        target_id = int(parts[1])
+    # Если ID не указан, тогда проверяем, является ли сообщение ответом
+    elif message.reply_to_message:
         target_id = get_author_id_by_reply(message)
-    else:
-        parts = message.text.split()
-        if len(parts) >= 2 and parts[1].isdigit():
-            target_id = int(parts[1])
 
     if not target_id:
         await message.answer("Использование: /unshadowmute <user_id> или ответ на сообщение.")
