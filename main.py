@@ -3642,25 +3642,36 @@ async def supervisor():
         restore_backup_on_start()
         load_state()
 
-        # --- НАЧАЛО КЛЮЧЕВЫХ ИЗМЕНЕНИЙ ---
-        # УДАЛЕНО ручное создание aiohttp.ClientSession.
-        # Вместо этого таймаут задается через DefaultBotProperties.
-        default_properties = DefaultBotProperties(
-            parse_mode="HTML",
-            request_timeout=60  # Устанавливаем таймаут 60 секунд
-        )
+        # --- НАЧАЛО КОРРЕКТНОГО ИСПРАВЛЕНИЯ ---
+        # 1. Импортируем необходимый класс-обертку сессии
+        from aiogram.client.session.aiohttp import AiohttpSession
+
+        # 2. Создаем базовую aiohttp сессию с нужным таймаутом
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
+        
+        # 3. Создаем обертку сессии, которую понимает Aiogram
+        aiogram_session_wrapper = AiohttpSession(session=session)
+
+        # 4. Задаем свойства по умолчанию (БЕЗ таймаута)
+        default_properties = DefaultBotProperties(parse_mode="HTML")
         
         for board_id, config in BOARD_CONFIG.items():
             token = config.get("token")
             if token:
-                # Bot теперь сам управляет своей сессией, используя заданные default_properties.
-                bots[board_id] = Bot(token=token, default=default_properties)
+                # 5. Передаем в конструктор Bot обертку сессии
+                bots[board_id] = Bot(
+                    token=token, 
+                    default=default_properties, 
+                    session=aiogram_session_wrapper
+                )
             else:
                 print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
-        # --- КОНЕЦ КЛЮЧЕВЫХ ИЗМЕНЕНИЙ ---
+        # --- КОНЕЦ КОРРЕКТНОГО ИСПРАВЛЕНИЯ ---
         
         if not bots:
             print("❌ Не найдено ни одного токена бота. Завершение работы.")
+            if session and not session.closed:
+                await session.close()
             return
 
         print(f"✅ Инициализировано {len(bots)} ботов: {list(bots.keys())}")
@@ -3685,13 +3696,11 @@ async def supervisor():
         if not is_shutting_down:
              await graceful_shutdown(list(bots.values()))
         
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Корректное закрытие сессий ботов ---
-        print("Закрытие сессий ботов...")
-        for bot in bots.values():
-            if bot.session and not bot.session.closed:
-                await bot.session.close()
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+        # Закрываем базовую aiohttp сессию, которую мы создали
+        if session and not session.closed:
+            print("Закрытие основной HTTP сессии...")
+            await session.close()
+        
         if os.path.exists(lock_file):
             os.remove(lock_file)
             
