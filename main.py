@@ -3641,7 +3641,6 @@ async def supervisor():
         load_state()
 
         bots = {}
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Увеличение таймаута сессии ---
         # Создаем сессию с увеличенным таймаутом один раз
         session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
         default_properties = DefaultBotProperties(parse_mode="HTML")
@@ -3649,11 +3648,11 @@ async def supervisor():
         for board_id, config in BOARD_CONFIG.items():
             token = config.get("token")
             if token:
-                # Передаем созданную сессию в каждый экземпляр бота
+                # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+                # Убраны лишние скобки. Мы передаем созданный объект session, а не вызываем его.
                 bots[board_id] = Bot(token=token, default=default_properties, session=session)
             else:
                 print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         if not bots:
             print("❌ Не найдено ни одного токена бота. Завершение работы.")
@@ -3681,10 +3680,9 @@ async def supervisor():
     finally:
         if not is_shutting_down:
              await graceful_shutdown(list(bots.values()))
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Закрытие сессии ---
+        # Закрытие сессии
         if 'session' in locals() and session and not session.closed:
             await session.close()
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         if os.path.exists(lock_file):
             os.remove(lock_file)
             
