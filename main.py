@@ -3642,31 +3642,32 @@ async def supervisor():
         restore_backup_on_start()
         load_state()
 
-        # --- НАЧАЛО КОРРЕКТНОГО ИСПРАВЛЕНИЯ ---
-        # 1. Импортируем необходимый класс-обертку сессии
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        # 1. Импортируем необходимый класс сессии
         from aiogram.client.session.aiohttp import AiohttpSession
 
-        # 2. Создаем базовую aiohttp сессию с нужным таймаутом
-        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
+        # 2. Создаем ЕДИНЫЙ экземпляр сессии AiohttpSession с нужным таймаутом.
+        #    Он будет управлять своим внутренним aiohttp.ClientSession и будет
+        #    передан всем ботам.
+        session = AiohttpSession(
+            timeout=aiohttp.ClientTimeout(total=60)
+        )
         
-        # 3. Создаем обертку сессии, которую понимает Aiogram
-        aiogram_session_wrapper = AiohttpSession(session=session)
-
-        # 4. Задаем свойства по умолчанию (БЕЗ таймаута)
+        # 3. Задаем свойства по умолчанию
         default_properties = DefaultBotProperties(parse_mode="HTML")
         
         for board_id, config in BOARD_CONFIG.items():
             token = config.get("token")
             if token:
-                # 5. Передаем в конструктор Bot обертку сессии
+                # 4. Передаем в конструктор Bot ОДНУ И ТУ ЖЕ сессию
                 bots[board_id] = Bot(
                     token=token, 
                     default=default_properties, 
-                    session=aiogram_session_wrapper
+                    session=session
                 )
             else:
                 print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
-        # --- КОНЕЦ КОРРЕКТНОГО ИСПРАВЛЕНИЯ ---
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         if not bots:
             print("❌ Не найдено ни одного токена бота. Завершение работы.")
@@ -3696,9 +3697,9 @@ async def supervisor():
         if not is_shutting_down:
              await graceful_shutdown(list(bots.values()))
         
-        # Закрываем базовую aiohttp сессию, которую мы создали
+        # Закрываем созданную сессию Aiogram
         if session and not session.closed:
-            print("Закрытие основной HTTP сессии...")
+            print("Закрытие общей HTTP сессии...")
             await session.close()
         
         if os.path.exists(lock_file):
