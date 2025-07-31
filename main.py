@@ -3433,14 +3433,8 @@ async def handle_message(message: Message):
         return 
     b_data = board_data[board_id]
 
-    # 2. Блок предварительных проверок с немедленным выходом (Early Exit)
-    # Эти проверки выполняются до любой обработки сообщения.
+    # --- ПРОВЕРКИ, КОТОРЫЕ ПОЛНОСТЬЮ БЛОКИРУЮТ ПОЛЬЗОВАТЕЛЯ ---
     try:
-        # Проверка на shadow-мут. Если да - молча удаляем сообщение и выходим.
-        if user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC):
-            await message.delete()
-            return
-
         # Проверка на обычный мут. Если да - удаляем, уведомляем и выходим.
         mute_until = b_data['mutes'].get(user_id)
         if mute_until and mute_until > datetime.now(UTC):
@@ -3459,23 +3453,27 @@ async def handle_message(message: Message):
         if user_id in b_data['users']['banned']:
             await message.delete()
             return
-            
-        # Игнорируем технические сообщения и медиагруппы (у них свой обработчик)
+
+        # Игнорируем технические сообщения и медиагруппы
         if message.media_group_id or not (message.text or message.caption or message.content_type):
             return
-
-    except TelegramBadRequest:
-        return # Сообщение уже удалено, прекращаем обработку
+            
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return # Не удалось что-то сделать, прекращаем
     except Exception as e:
-        print(f"Ошибка на этапе предварительной проверки для user {user_id}: {e}")
+        print(f"Ошибка на этапе блочных проверок для user {user_id}: {e}")
         return
 
-    # 3. Добавление пользователя, если его нет
+    # --- ПРОВЕРКА НА ШЕДОУМУТ (не прерывает выполнение, а влияет на рассылку) ---
+    is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
+                       b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+
+    # Добавление пользователя, если его нет
     if user_id not in b_data['users']['active']:
         b_data['users']['active'].add(user_id)
         print(f"✅ [{board_id}] Добавлен новый пользователь: ID {user_id}")
 
-    # 4. Спам-проверка
+    # Спам-проверка
     if not await check_spam(user_id, message, board_id):
         try:
             await message.delete()
@@ -3483,13 +3481,13 @@ async def handle_message(message: Message):
             if msg_type in ['photo', 'video', 'document'] and message.caption:
                 msg_type = 'text'
             await apply_penalty(message.bot, user_id, msg_type, board_id)
-        except TelegramBadRequest:
-            pass # Если не смогли удалить спам-сообщение, ничего страшного
+        except TelegramBadRequest: pass
         return
 
-    # --- Если все проверки пройдены, начинаем основную обработку ---
+    # --- ЕСЛИ ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ, НАЧИНАЕТСЯ ОБРАБОТКА И СОЗДАНИЕ ПОСТА ---
+    # Этот блок выполняется ДЛЯ ВСЕХ, включая тех, кто в шедоумуте.
     try:
-        # 5. Получение информации об ответе
+        # Получение информации об ответе
         reply_to_post, reply_info = None, {}
         if message.reply_to_message:
             lookup_key = (user_id, message.reply_to_message.message_id)
@@ -3499,11 +3497,10 @@ async def handle_message(message: Message):
             else:
                 reply_to_post = None
 
-        # 6. Формирование заголовка и удаление исходного сообщения
         header, current_post_num = await format_header(board_id)
         await message.delete()
 
-        # 7. Формирование сырого словаря `content`
+        # Формирование словаря `content`
         content = {'type': message.content_type, 'header': header, 'reply_to_post': reply_to_post}
         text_for_corpus = None
 
@@ -3516,24 +3513,19 @@ async def handle_message(message: Message):
             if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
             content.update({'file_id': file_id_obj.file_id, 'caption': message.caption or ""})
         
-        if text_for_corpus:
-            last_messages.append(text_for_corpus)
+        if text_for_corpus: last_messages.append(text_for_corpus)
 
-        # Применяем трансформации режимов (аниме, путин и т.д.)
         content = await _apply_mode_transformations(content, board_id)
 
-        # 8. Сохранение поста в хранилище
+        # Сохранение поста в хранилище
         messages_storage[current_post_num] = {
             'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
             'reply_to': reply_to_post, 'author_message_id': None, 'board_id': board_id
         }
 
-        # 9. Отправка сообщения автору и постановка в очередь для остальных
+        # Отправка сообщения обратно автору (для всех)
         results = await send_message_to_users(
-            bot_instance=message.bot,
-            recipients={user_id},
-            content=content,
-            reply_info=reply_info
+            bot_instance=message.bot, recipients={user_id}, content=content, reply_info=reply_info
         )
         if results and results[0] and results[0][1]:
             sent_to_author = results[0][1]
@@ -3543,24 +3535,24 @@ async def handle_message(message: Message):
                 post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
                 message_to_post[(user_id, m.message_id)] = current_post_num
 
-        recipients = b_data['users']['active'] - {user_id}
-        if recipients:
-            await message_queues[board_id].put({
-                'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                'reply_info': reply_info if reply_info else None, 'board_id': board_id
-            })
+        # !!! --- КЛЮЧЕВОЙ МОМЕНТ ЛОГИКИ ШЕДОУМУТА --- !!!
+        # В очередь на рассылку остальным отправляем, только если юзер НЕ в муте.
+        if not is_shadow_muted:
+            recipients = b_data['users']['active'] - {user_id}
+            if recipients:
+                await message_queues[board_id].put({
+                    'recipients': recipients, 'content': content, 'post_num': current_post_num,
+                    'reply_info': reply_info if reply_info else None, 'board_id': board_id
+                })
 
     except TelegramForbiddenError:
         b_data['users']['active'].discard(user_id)
         print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота.")
     except TelegramBadRequest:
-        # Эта ошибка может возникнуть, если исходное сообщение уже было удалено. 
-        # Просто игнорируем, так как основная цель (удалить) достигнута.
         pass
     except Exception as e:
         import traceback
         print(f"Критическая ошибка в основной обработке handle_message для user {user_id}: {e}\n{traceback.format_exc()}")
-        # Если что-то пошло не так, удаляем пост из хранилища, чтобы не было мусора
         if 'current_post_num' in locals():
             messages_storage.pop(current_post_num, None)
         
