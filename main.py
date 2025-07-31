@@ -3464,12 +3464,11 @@ async def handle_message(message: Message):
         # 9. Формирование СЫРОГО словаря `content`
         content = {'type': message.content_type, 'header': header, 'reply_to_post': reply_to_post}
         
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        text_for_corpus = None
         
         if message.content_type == 'text':
+            text_for_corpus = message.text
             text_content = message.html_text if message.entities else escape_html(message.text)
-            
-            # Применяем Greentext форматирование
             text_content = apply_greentext_formatting(text_content)
 
             if b_data['anime_mode'] and random.random() < 0.41:
@@ -3482,19 +3481,21 @@ async def handle_message(message: Message):
                 content.update({'text': text_content})
                 
         elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio']:
+            text_for_corpus = message.caption
             file_id = getattr(message, message.content_type, [])
             if isinstance(file_id, list): file_id = file_id[-1]
-            
-            # Экранируем и применяем Greentext к подписи
             caption_content = escape_html(message.caption or "")
             caption_content = apply_greentext_formatting(caption_content)
-            
             content.update({'file_id': file_id.file_id, 'caption': caption_content})
             
         elif message.content_type in ['sticker', 'voice', 'video_note']:
             file_id = getattr(message, message.content_type)
             content['file_id'] = file_id.file_id
 
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        # Пополняем корпус для Призрака, если есть текст
+        if text_for_corpus:
+            last_messages.append(text_for_corpus)
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         # Применяем трансформации режимов ДО отправки автору и ДО постановки в очередь
