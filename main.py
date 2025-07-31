@@ -3427,83 +3427,69 @@ def apply_greentext_formatting(text: str) -> str:
 async def handle_message(message: Message):
     user_id = message.from_user.id
     
-    # 1. Определяем доску, с которой пришло сообщение
+    # 1. Определяем доску и получаем её данные
     board_id = get_board_id(message)
     if not board_id:
-        return # Не обрабатываем сообщения от незарегистрированных ботов
-    
-    # 2. Получаем срез данных для текущей доски
+        return 
     b_data = board_data[board_id]
 
-    # 3. Проверка shadow-мута на конкретной доске.
-    is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
-                       b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+    # 2. Блок предварительных проверок с немедленным выходом (Early Exit)
+    # Эти проверки выполняются до любой обработки сообщения.
+    try:
+        # Проверка на shadow-мут. Если да - молча удаляем сообщение и выходим.
+        if user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC):
+            await message.delete()
+            return
 
-    if is_shadow_muted:
+        # Проверка на обычный мут. Если да - удаляем, уведомляем и выходим.
+        mute_until = b_data['mutes'].get(user_id)
+        if mute_until and mute_until > datetime.now(UTC):
+            left = mute_until - datetime.now(UTC)
+            await message.delete()
+            await message.bot.send_message(
+                user_id, 
+                f"🔇 Эй пидор, ты в муте на доске {BOARD_CONFIG[board_id]['name']} ещё {int(left.total_seconds() // 60)}м {int(left.total_seconds() % 60)}с",
+                parse_mode="HTML"
+            )
+            return
+        elif mute_until: # Если мут истек, удаляем его
+             b_data['mutes'].pop(user_id, None)
+
+        # Проверка на бан. Если да - удаляем и выходим.
+        if user_id in b_data['users']['banned']:
+            await message.delete()
+            return
+            
+        # Игнорируем технические сообщения и медиагруппы (у них свой обработчик)
+        if message.media_group_id or not (message.text or message.caption or message.content_type):
+            return
+
+    except TelegramBadRequest:
+        return # Сообщение уже удалено, прекращаем обработку
+    except Exception as e:
+        print(f"Ошибка на этапе предварительной проверки для user {user_id}: {e}")
+        return
+
+    # 3. Добавление пользователя, если его нет
+    if user_id not in b_data['users']['active']:
+        b_data['users']['active'].add(user_id)
+        print(f"✅ [{board_id}] Добавлен новый пользователь: ID {user_id}")
+
+    # 4. Спам-проверка
+    if not await check_spam(user_id, message, board_id):
         try:
             await message.delete()
-        except TelegramBadRequest:
-            pass # Сообщение уже удалено или не может быть удалено, игнорируем
-    
-    if not message.text and not message.caption and not message.content_type:
-        if not is_shadow_muted:
-            try:
-                await message.delete()
-            except TelegramBadRequest:
-                pass # Сообщение уже удалено или не может быть удалено, игнорируем
-        return
-        
-    if message.media_group_id:
-        return
-        
-    try:
-        # 4. Проверка обычного мута
-        until = b_data['mutes'].get(user_id)
-        if until and until > datetime.now(UTC):
-            left = until - datetime.now(UTC)
-            minutes = int(left.total_seconds() // 60)
-            seconds = int(left.total_seconds() % 60)
-            try:
-                await message.delete()
-                await message.bot.send_message(
-                    user_id, 
-                    f"🔇 Эй пидор, ты в муте на доске {BOARD_CONFIG[board_id]['name']} ещё {minutes}м {seconds}с\nСпамишь дальше - получишь бан",
-                    parse_mode="HTML"
-                )
-            except: pass
-            return
-        elif until:
-            b_data['mutes'].pop(user_id, None)
-
-        # 5. Добавление/проверка пользователя
-        if user_id not in b_data['users']['active']:
-            b_data['users']['active'].add(user_id)
-            print(f"✅ [{board_id}] Добавлен новый пользователь: ID {user_id}")
-
-        if user_id in b_data['users']['banned']:
-            if not is_shadow_muted:
-                try:
-                    await message.delete()
-                except TelegramBadRequest:
-                    pass # Сообщение уже удалено или не может быть удалено, игнорируем
-            return
-
-        # 6. Спам-проверка
-        spam_check = await check_spam(user_id, message, board_id)
-        if not spam_check:
-            if not is_shadow_muted:
-                try:
-                    await message.delete()
-                except TelegramBadRequest:
-                    pass # Сообщение уже удалено или не может быть удалено, игнорируем
             msg_type = message.content_type
-            if message.content_type in ['photo', 'video', 'document'] and message.caption:
+            if msg_type in ['photo', 'video', 'document'] and message.caption:
                 msg_type = 'text'
             await apply_penalty(message.bot, user_id, msg_type, board_id)
-            return
-        
-        # 7. Получение информации об ответе
-        recipients = b_data['users']['active'] - {user_id}
+        except TelegramBadRequest:
+            pass # Если не смогли удалить спам-сообщение, ничего страшного
+        return
+
+    # --- Если все проверки пройдены, начинаем основную обработку ---
+    try:
+        # 5. Получение информации об ответе
         reply_to_post, reply_info = None, {}
         if message.reply_to_message:
             lookup_key = (user_id, message.reply_to_message.message_id)
@@ -3513,83 +3499,70 @@ async def handle_message(message: Message):
             else:
                 reply_to_post = None
 
-        # 8. Формирование заголовка и удаление исходного сообщения
+        # 6. Формирование заголовка и удаление исходного сообщения
         header, current_post_num = await format_header(board_id)
-        if not is_shadow_muted:
-            try:
-                await message.delete()
-            except TelegramBadRequest:
-                pass # Сообщение уже удалено или не может быть удалено, игнорируем
+        await message.delete()
 
-        # 9. Формирование СЫРОГО словаря `content`
+        # 7. Формирование сырого словаря `content`
         content = {'type': message.content_type, 'header': header, 'reply_to_post': reply_to_post}
-        
         text_for_corpus = None
-        
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        # Логика режима АНИМЕ была удалена отсюда и перенесена в _apply_mode_transformations
+
         if message.content_type == 'text':
             text_for_corpus = message.text
-            text_content = message.text
-            content.update({'text': text_content})
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-                
-        elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio']:
+            content.update({'text': message.text})
+        elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio', 'sticker', 'voice', 'video_note']:
             text_for_corpus = message.caption
-            file_id = getattr(message, message.content_type, [])
-            if isinstance(file_id, list): file_id = file_id[-1]
-            # --- ИЗМЕНЕНИЕ: Убираем отсюда форматирование и экранирование ---
-            caption_content = message.caption or ""
-            content.update({'file_id': file_id.file_id, 'caption': caption_content})
-            
-        elif message.content_type in ['sticker', 'voice', 'video_note']:
-            file_id = getattr(message, message.content_type)
-            content['file_id'] = file_id.file_id
-
+            file_id_obj = getattr(message, message.content_type, [])
+            if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
+            content.update({'file_id': file_id_obj.file_id, 'caption': message.caption or ""})
+        
         if text_for_corpus:
             last_messages.append(text_for_corpus)
 
+        # Применяем трансформации режимов (аниме, путин и т.д.)
         content = await _apply_mode_transformations(content, board_id)
 
-        # 10. Сохранение в хранилище
+        # 8. Сохранение поста в хранилище
         messages_storage[current_post_num] = {
             'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
             'reply_to': reply_to_post, 'author_message_id': None, 'board_id': board_id
         }
 
-        # 11. Отправка сообщения автору
-        try:
-            # --- ИЗМЕНЕНИЕ: Отправка самому себе тоже идет через центральную функцию ---
-            results = await send_message_to_users(
-                bot_instance=message.bot,
-                recipients={user_id},
-                content=content,
-                reply_info=reply_info
-            )
-            # Если отправка успешна, сохраняем message_id
-            if results and results[0] and results[0][1]:
-                sent_to_author = results[0][1]
-                messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
-                for m in messages_to_save:
-                    messages_storage[current_post_num]['author_message_id'] = m.message_id
-                    post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
-                    message_to_post[(user_id, m.message_id)] = current_post_num
+        # 9. Отправка сообщения автору и постановка в очередь для остальных
+        results = await send_message_to_users(
+            bot_instance=message.bot,
+            recipients={user_id},
+            content=content,
+            reply_info=reply_info
+        )
+        if results and results[0] and results[0][1]:
+            sent_to_author = results[0][1]
+            messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
+            for m in messages_to_save:
+                messages_storage[current_post_num]['author_message_id'] = m.message_id
+                post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
+                message_to_post[(user_id, m.message_id)] = current_post_num
 
-            if not is_shadow_muted and recipients:
-                await message_queues[board_id].put({
-                    'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                    'reply_info': reply_info if reply_info else None, 'board_id': board_id
-                })
+        recipients = b_data['users']['active'] - {user_id}
+        if recipients:
+            await message_queues[board_id].put({
+                'recipients': recipients, 'content': content, 'post_num': current_post_num,
+                'reply_info': reply_info if reply_info else None, 'board_id': board_id
+            })
 
-        except TelegramForbiddenError:
-            b_data['users']['active'].discard(user_id)
-            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из handle_message).")
-        except Exception as e:
-            print(f"Ошибка при отправке или постановке в очередь: {e}")
-            messages_storage.pop(current_post_num, None)
-
+    except TelegramForbiddenError:
+        b_data['users']['active'].discard(user_id)
+        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота.")
+    except TelegramBadRequest:
+        # Эта ошибка может возникнуть, если исходное сообщение уже было удалено. 
+        # Просто игнорируем, так как основная цель (удалить) достигнута.
+        pass
     except Exception as e:
-        print(f"Критическая ошибка в handle_message: {e}")
+        import traceback
+        print(f"Критическая ошибка в основной обработке handle_message для user {user_id}: {e}\n{traceback.format_exc()}")
+        # Если что-то пошло не так, удаляем пост из хранилища, чтобы не было мусора
+        if 'current_post_num' in locals():
+            messages_storage.pop(current_post_num, None)
         
 async def start_background_tasks(bots: dict[str, Bot]):
     """Поднимаем все фоновые корутины ОДИН раз за весь runtime"""
