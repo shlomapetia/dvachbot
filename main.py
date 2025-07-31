@@ -854,14 +854,12 @@ async def graceful_shutdown(bots: list[Bot]):
 
     # 3. Сохраняем и пушим данные. САМЫЙ ВАЖНЫЙ ЭТАП.
     # Принудительно ограничиваем время на бэкап, чтобы успеть до SIGKILL от хостинга.
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     print("💾 Попытка финального сохранения и бэкапа в GitHub (таймаут 50 секунд)...")
     try:
         await asyncio.wait_for(save_all_boards_and_backup(), timeout=50.0)
         print("✅ Финальный бэкап успешно завершен в рамках таймаута.")
     except asyncio.TimeoutError:
         print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Финальный бэкап не успел выполниться за 50 секунд и был прерван!")
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     except Exception as e:
         print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Не удалось выполнить финальный бэкап: {e}")
 
@@ -883,11 +881,11 @@ async def graceful_shutdown(bots: list[Bot]):
         if hasattr(dp, 'storage') and dp.storage:
             await dp.storage.close()
         
-        # Закрываем сессию каждого бота
-        for bot_instance in bots:
-            if bot_instance.session:
-                await bot_instance.session.close()
-        print("✅ Все сессии ботов закрыты.")
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        # Удален цикл закрытия сессий, так как сессия теперь общая и
+        # закрывается в блоке finally функции supervisor.
+        print("✅ Сессии ботов будут закрыты централизованно.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     except Exception as e:
         print(f"Error during final shutdown procedures: {e}")
@@ -1416,46 +1414,88 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     b_data = board_data[board_id]
     modified_content = content.copy()
 
-    # --- Применение трансформаций к 'text' ---
-    if 'text' in modified_content and modified_content['text']:
-        text = modified_content['text']
-        if b_data['anime_mode']:
-            text = anime_transform(text)
-        elif b_data['slavaukraine_mode']:
-            text = ukrainian_transform(text)
-        elif b_data['zaputin_mode']:
-            text = zaputin_transform(text)
-        elif b_data['suka_blyat_mode']:
-            words = text.split()
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # 1. Единый блок для режима 'anime'
+    if b_data['anime_mode']:
+        # 1a. Преобразование текста в японский стиль
+        if 'text' in modified_content and modified_content['text']:
+            modified_content['text'] = anime_transform(modified_content['text'])
+        if 'caption' in modified_content and modified_content['caption']:
+            modified_content['caption'] = anime_transform(modified_content['caption'])
+        
+        # 1b. Добавление случайного изображения к ТЕКСТОВЫМ постам.
+        # Срабатывает с шансом 41% только для постов, которые изначально были текстовыми.
+        if modified_content.get('type') == 'text' and random.random() < 0.41:
+            anime_img_url = await get_random_anime_image()
+            if anime_img_url:
+                # Трансформируем сообщение из текстового в фото
+                text_content = modified_content.pop('text', '')
+                modified_content.update({
+                    'type': 'photo',
+                    'caption': text_content,
+                    'image_url': anime_img_url
+                })
+
+    # 2. Остальные режимы
+    elif b_data['slavaukraine_mode']:
+        if 'text' in modified_content and modified_content['text']:
+            modified_content['text'] = ukrainian_transform(modified_content['text'])
+        if 'caption' in modified_content and modified_content['caption']:
+            modified_content['caption'] = ukrainian_transform(modified_content['caption'])
+            
+    elif b_data['zaputin_mode']:
+        if 'text' in modified_content and modified_content['text']:
+            modified_content['text'] = zaputin_transform(modified_content['text'])
+        if 'caption' in modified_content and modified_content['caption']:
+            modified_content['caption'] = zaputin_transform(modified_content['caption'])
+            
+    elif b_data['suka_blyat_mode']:
+        if 'text' in modified_content and modified_content['text']:
+            words = modified_content['text'].split()
             for i in range(len(words)):
                 if random.random() < 0.3: words[i] = random.choice(MAT_WORDS)
-            text = ' '.join(words)
-            # Счетчик и добавочная фраза для suka_blyat обрабатываются в send_message_to_users,
-            # так как они должны применяться один раз на всё сообщение.
-        modified_content['text'] = text
-
-    # --- Применение трансформаций к 'caption' ---
-    if 'caption' in modified_content and modified_content['caption']:
-        caption = modified_content['caption']
-        if b_data['anime_mode']:
-            caption = anime_transform(caption)
-        elif b_data['slavaukraine_mode']:
-            caption = ukrainian_transform(caption)
-        elif b_data['zaputin_mode']:
-            caption = zaputin_transform(caption)
-        elif b_data['suka_blyat_mode']:
+            modified_content['text'] = ' '.join(words)
+        if 'caption' in modified_content and modified_content['caption']:
+            caption = modified_content['caption']
             words = caption.split()
             for i in range(len(words)):
                 if random.random() < 0.3: words[i] = random.choice(MAT_WORDS)
-            caption = ' '.join(words)
-        modified_content['caption'] = caption
-
-    # --- Добавление фраз для режимов ---
-    # Эта логика останется в send_message_to_users, так как она добавляет текст
-    # ко всему сообщению, а не просто трансформирует поле.
-    # Но основные преобразования текста/подписи сделаны здесь.
-
+            modified_content['caption'] = ' '.join(words)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
     return modified_content
+
+async def _format_message_body(content: dict, user_id_for_context: int) -> str:
+    """
+    Формирует и форматирует тело сообщения (reply, greentext, (You)).
+    Вынесено в отдельную функцию для переиспользования.
+    
+    :param content: Словарь с данными поста ('reply_to_post', 'text', 'caption').
+    :param user_id_for_context: ID пользователя, для которого форматируется сообщение (для '(You)').
+    :return: Готовая к отправке HTML-форматированная строка.
+    """
+    reply_to_post = content.get('reply_to_post')
+    
+    # 1. Формируем сырой текст ответа (reply) и основной текст (caption/text).
+    reply_text_raw = ""
+    if reply_to_post:
+        original_author = messages_storage.get(reply_to_post, {}).get('author_id')
+        # Добавляем (You) к ответу, если пользователь отвечает на свой же пост.
+        you_marker = " (You)" if user_id_for_context == original_author else ""
+        reply_text_raw = f">>{reply_to_post}{you_marker}\n"
+
+    main_text_raw = content.get('text') or content.get('caption') or ''
+    
+    # 2. Объединяем их, чтобы обработать как единое целое.
+    combined_raw_text = reply_text_raw + main_text_raw
+    
+    # 3. Добавляем "(You)" к упоминаниям своих постов в основном тексте.
+    combined_text_with_you = add_you_to_my_posts(combined_raw_text, user_id_for_context)
+
+    # 4. Применяем Greentext и экранирование ко ВСЕМУ тексту сообщения.
+    formatted_body = apply_greentext_formatting(combined_text_with_you)
+    
+    return formatted_body
 
 async def send_message_to_users(
     bot_instance: Bot,
@@ -1501,7 +1541,7 @@ async def send_message_to_users(
             ct = ct_raw.value if hasattr(ct_raw, 'value') else ct_raw
             
             header_text = modified_content['header']
-            head = f"<i>{header_text}</i>"
+            head = f"<i>{escape_html(header_text)}</i>"
 
             reply_to_post = modified_content.get('reply_to_post')
             original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
@@ -1509,14 +1549,15 @@ async def send_message_to_users(
             if uid == original_author:
                 head = head.replace("Пост", "🔴 Пост")
 
-            reply_text = f">>{reply_to_post} (You)\n" if uid == original_author else (f">>{reply_to_post}\n" if reply_to_post else "")
-            main_text_raw = modified_content.get('text') or modified_content.get('caption') or ''
-            main_text = add_you_to_my_posts(main_text_raw, uid)
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем новую общую функцию ---
+            formatted_body = await _format_message_body(modified_content, uid)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             if ct == "media_group":
                 if not modified_content.get('media'): return None
                 builder = MediaGroupBuilder()
-                full_text_for_group = f"{head}\n\n{reply_text}{main_text}" if (reply_text or main_text) else head
+                # Собираем подпись для медиа-группы, используя уже отформатированный текст
+                full_text_for_group = f"{head}\n\n{formatted_body}" if formatted_body else head
                 for idx, media in enumerate(modified_content['media']):
                     caption = full_text_for_group if idx == 0 else None
                     builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
@@ -1529,7 +1570,8 @@ async def send_message_to_users(
             send_method = getattr(bot_instance, method_name)
             kwargs = {'reply_to_message_id': reply_to}
             
-            full_text = f"{head}\n\n{reply_text}{main_text}" if (reply_text or main_text) else head
+            # Собираем финальное сообщение для всех остальных типов
+            full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
 
             if ct == 'text':
                 kwargs.update(text=full_text, parse_mode="HTML")
@@ -1562,29 +1604,26 @@ async def send_message_to_users(
                     return await bot_instance.send_audio(
                         chat_id=uid,
                         audio=modified_content["file_id"],
-                        caption=f"<i>{modified_content['header']}</i>",
+                        caption=f"<i>{escape_html(modified_content['header'])}</i>",
                         parse_mode="HTML",
                         reply_to_message_id=reply_to
                     )
                 except Exception as audio_e:
                     print(f"❌ Не удалось отправить как аудио для {uid}: {audio_e}")
                     return None
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
             elif "VIDEO_MESSAGES_FORBIDDEN" in e.message and modified_content.get("type") == "video_note":
                 print(f"ℹ️ Пользователь {uid} запретил видеосообщения. Отправляю как видео...")
                 try:
-                    # Повторяем отправку, но уже как обычное видео
                     return await bot_instance.send_video(
                         chat_id=uid,
                         video=modified_content["file_id"],
-                        caption=f"<i>{modified_content['header']}</i>", # "Кружки" не имеют подписи, добавляем только заголовок
+                        caption=f"<i>{escape_html(modified_content['header'])}</i>",
                         parse_mode="HTML",
                         reply_to_message_id=reply_to
                     )
                 except Exception as video_e:
                     print(f"❌ Не удалось отправить как видео для {uid}: {video_e}")
                     return None
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             else:
                 print(f"❌ Ошибка отправки (BadRequest) {uid} ботом {bot_instance.id}: {e}")
                 return None
@@ -1650,8 +1689,13 @@ async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
             if not active_recipients:
                 continue
             
-            # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
-            # Добавляем post_num в словарь content перед отправкой
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            # Применяем трансформации режимов ко ВСЕМ сообщениям из очереди,
+            # включая сообщения от Призрака и системные уведомления.
+            content = await _apply_mode_transformations(content, board_id)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
+            # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Добавляем post_num в словарь content перед отправкой
             content['post_num'] = post_num
 
             await send_message_to_users(
@@ -2950,6 +2994,8 @@ async def handle_audio(message: Message):
     
     b_data = board_data[board_id]
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Полная унификация с handle_message ---
+    # Блок проверок (бан, мут) идентичен основному обработчику
     if user_id in b_data['users']['banned']:
         await message.delete()
         return
@@ -2958,68 +3004,76 @@ async def handle_audio(message: Message):
         await message.delete()
         return
 
-    header, current_post_num = await format_header(board_id)
-    reply_to_post, reply_info = None, {}
-
-    if message.reply_to_message:
-        reply_mid = message.reply_to_message.message_id
-        lookup_key = (user_id, reply_mid)
-        reply_to_post = message_to_post.get(lookup_key)
+    # Спам-проверку для аудио и других медиа лучше делать по caption,
+    # поэтому используем логику из handle_message
+    spam_check = await check_spam(user_id, message, board_id)
+    if not spam_check:
+        try:
+            await message.delete()
+        except TelegramBadRequest: pass
+        msg_type = 'text' if message.caption else 'animation' # Считаем аудио как анимацию для штрафа
+        await apply_penalty(message.bot, user_id, msg_type, board_id)
+        return
         
+    recipients = b_data['users']['active'] - {user_id}
+    reply_to_post, reply_info = None, {}
+    if message.reply_to_message:
+        lookup_key = (user_id, message.reply_to_message.message_id)
+        reply_to_post = message_to_post.get(lookup_key)
         if reply_to_post and reply_to_post in post_to_messages:
             reply_info = post_to_messages[reply_to_post]
-
+        else:
+            reply_to_post = None
+            
+    header, current_post_num = await format_header(board_id)
     try:
         await message.delete()
-    except TelegramBadRequest:
-        pass # Сообщение уже удалено или не может быть удалено, игнорируем
+    except TelegramBadRequest: pass
     
+    caption_content = message.caption or ""
+    if caption_content:
+        last_messages.append(caption_content)
+        
     content = {
         'type': 'audio', 'header': header, 'file_id': message.audio.file_id,
-        'caption': message.caption or "", 'reply_to_post': reply_to_post
+        'caption': caption_content, 'reply_to_post': reply_to_post
     }
 
     content = await _apply_mode_transformations(content, board_id)
 
     messages_storage[current_post_num] = {
         'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
-        'reply_to': reply_to_post, 'board_id': board_id
+        'reply_to': reply_to_post, 'board_id': board_id, 'author_message_id': None
     }
-
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    
     try:
-        reply_to_message_id = reply_info.get(user_id)
-        
-        caption_text = f"<i>{header}</i>"
-        if content['caption']: 
-            caption_text += f"\n\n{content['caption']}"
-
-        sent_to_author = await message.bot.send_audio(
-            user_id, message.audio.file_id, caption=caption_text,
-            reply_to_message_id=reply_to_message_id, parse_mode="HTML"
+        # Используем единую функцию отправки, как в handle_message
+        results = await send_message_to_users(
+            bot_instance=message.bot,
+            recipients={user_id},
+            content=content,
+            reply_info=reply_info
         )
+        if results and results[0] and results[0][1]:
+            sent_to_author = results[0][1]
+            messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
+            for m in messages_to_save:
+                messages_storage[current_post_num]['author_message_id'] = m.message_id
+                post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
+                message_to_post[(user_id, m.message_id)] = current_post_num
 
-        if sent_to_author:
-            messages_storage[current_post_num]['author_message_id'] = sent_to_author.message_id
-            post_to_messages.setdefault(current_post_num, {})[user_id] = sent_to_author.message_id
-            message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
-
+        if recipients and user_id in b_data['users']['active']:
+            await message_queues[board_id].put({
+                'recipients': recipients, 'content': content, 'post_num': current_post_num,
+                'reply_info': reply_info if reply_info else None, 'board_id': board_id
+            })
+            
     except TelegramForbiddenError:
         b_data['users']['active'].discard(user_id)
         print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из handle_audio).")
     except Exception as e:
-        print(f"⚠️ Ошибка отправки аудио-поста #{current_post_num} автору {user_id}: {e}")
-
-    recipients = b_data['users']['active'] - {user_id}
-    if recipients and user_id in b_data['users']['active']:
-        try:
-            await message_queues[board_id].put({
-                'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                'reply_info': reply_info, 'board_id': board_id
-            })
-        except Exception as e:
-            print(f"❌ Критическая ошибка постановки в очередь аудио-поста. Пост #{current_post_num} удален. Ошибка: {e}")
-            messages_storage.pop(current_post_num, None)
+        print(f"❌ Критическая ошибка постановки в очередь аудио-поста. Пост #{current_post_num} удален. Ошибка: {e}")
+        messages_storage.pop(current_post_num, None)
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 
@@ -3032,6 +3086,7 @@ async def handle_voice(message: Message):
         
     b_data = board_data[board_id]
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Полная унификация с handle_message ---
     if user_id in b_data['users']['banned']:
         await message.delete()
         return
@@ -3040,62 +3095,72 @@ async def handle_voice(message: Message):
         await message.delete()
         return
 
+    # Проводим спам-проверку для голосовых сообщений
+    spam_check = await check_spam(user_id, message, board_id)
+    if not spam_check:
+        try:
+            await message.delete()
+        except TelegramBadRequest: pass
+        # Для голосовых нет caption, поэтому используем тип 'animation' для правил спама
+        await apply_penalty(message.bot, user_id, 'animation', board_id)
+        return
+
     header, current_post_num = await format_header(board_id)
     reply_to_post, reply_info = None, {}
 
     if message.reply_to_message:
-        reply_mid = message.reply_to_message.message_id
-        # Эффективный поиск: используем ID пользователя, который отвечает, и ID сообщения, на которое он отвечает
-        lookup_key = (user_id, reply_mid)
+        lookup_key = (user_id, message.reply_to_message.message_id)
         reply_to_post = message_to_post.get(lookup_key)
         
         if reply_to_post and reply_to_post in post_to_messages:
             reply_info = post_to_messages[reply_to_post]
+        else:
+            reply_to_post = None
 
     try:
         await message.delete()
-    except TelegramBadRequest:
-        pass # Сообщение уже удалено или не может быть удалено, игнорируем
+    except TelegramBadRequest: pass
 
     content = {
         'type': 'voice', 'header': header, 'file_id': message.voice.file_id,
         'reply_to_post': reply_to_post
     }
 
+    # Для голосовых нет текста, поэтому трансформация не нужна, но структура сохраняется
     messages_storage[current_post_num] = {
         'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
-        'reply_to': reply_to_post, 'board_id': board_id
+        'reply_to': reply_to_post, 'board_id': board_id, 'author_message_id': None
     }
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     try:
-        reply_to_message_id = reply_info.get(user_id)
-        sent_to_author = await message.bot.send_voice(
-            user_id, message.voice.file_id, caption=f"<i>{header}</i>",
-            reply_to_message_id=reply_to_message_id, parse_mode="HTML"
+        # Используем единую функцию отправки
+        results = await send_message_to_users(
+            bot_instance=message.bot,
+            recipients={user_id},
+            content=content,
+            reply_info=reply_info
         )
-
-        if sent_to_author:
-            messages_storage[current_post_num]['author_message_id'] = sent_to_author.message_id
-            post_to_messages.setdefault(current_post_num, {})[user_id] = sent_to_author.message_id
-            message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
+        if results and results[0] and results[0][1]:
+            sent_to_author = results[0][1]
+            messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
+            for m in messages_to_save:
+                messages_storage[current_post_num]['author_message_id'] = m.message_id
+                post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
+                message_to_post[(user_id, m.message_id)] = current_post_num
+        
+        recipients = b_data['users']['active'] - {user_id}
+        if recipients and user_id in b_data['users']['active']:
+            await message_queues[board_id].put({
+                'recipients': recipients, 'content': content, 'post_num': current_post_num,
+                'reply_info': reply_info, 'board_id': board_id
+            })
 
     except TelegramForbiddenError:
         b_data['users']['active'].discard(user_id)
         print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из handle_voice).")
     except Exception as e:
-        print(f"⚠️ Ошибка отправки голосового поста #{current_post_num} автору {user_id}: {e}")
-
-    recipients = b_data['users']['active'] - {user_id}
-    if recipients and user_id in b_data['users']['active']:
-        try:
-            await message_queues[board_id].put({
-                'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                'reply_info': reply_info, 'board_id': board_id
-            })
-        except Exception as e:
-            print(f"❌ Критическая ошибка постановки в очередь голосового поста. Пост #{current_post_num} удален. Ошибка: {e}")
-            messages_storage.pop(current_post_num, None)
+        print(f"❌ Критическая ошибка постановки в очередь голосового поста. Пост #{current_post_num} удален. Ошибка: {e}")
+        messages_storage.pop(current_post_num, None)
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
 @dp.message(F.media_group_id)
@@ -3121,31 +3186,26 @@ async def handle_media_group_init(message: Message):
     group = current_media_groups.get(media_group_id)
     is_leader = False
 
-    # setdefault является атомарной операцией. Первый, кто ее вызовет, создаст запись
-    # и сможет стать лидером. Остальные получат уже существующий объект.
     if group is None:
         group = current_media_groups.setdefault(media_group_id, {'is_initializing': True})
         if group.get('is_initializing'):
             is_leader = True
     
-    # Только "лидер" выполняет этот блок для инициализации группы
     if is_leader:
-        # Симулируем текстовое сообщение, чтобы применить общие лимиты частоты, а не специфичные для гифок.
-        # Это предотвращает ложное срабатывание на повтор и использует более адекватные лимиты.
+        # Симулируем текстовое сообщение для спам-проверки
         fake_text_message = types.Message(
             message_id=message.message_id,
             date=message.date,
             chat=message.chat,
             from_user=message.from_user,
             content_type='text',
-            text=f"media_group_{media_group_id}" # Уникальный текст для избежания ложного детекта повторов
+            text=f"media_group_{media_group_id}"
         )
         
         spam_check_passed = await check_spam(user_id, fake_text_message, board_id)
         
         if not spam_check_passed:
             current_media_groups.pop(media_group_id, None) 
-            # НЕ УДАЛЯЕМ СООБЩЕНИЕ
             await apply_penalty(message.bot, user_id, 'text', board_id)
             return
         
@@ -3157,7 +3217,7 @@ async def handle_media_group_init(message: Message):
         header, post_num = await format_header(board_id)
         caption = message.caption or ""
         
-        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         # Инициализируем хранилище для ID исходных сообщений
         group.update({
             'board_id': board_id, 'post_num': post_num, 'header': header, 'author_id': user_id,
@@ -3165,25 +3225,23 @@ async def handle_media_group_init(message: Message):
             'reply_to_post': reply_to_post, 'processed_messages': set(),
             'source_message_ids': set() # <--- НОВОЕ ПОЛЕ
         })
-        # Снимаем флаг инициализации, разрешая остальным продолжать
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         group.pop('is_initializing', None)
     else:
-        # "Последователи" ждут, пока "лидер" закончит инициализацию
         while group is not None and group.get('is_initializing'):
             await asyncio.sleep(0.05)
             group = current_media_groups.get(media_group_id)
         
-        # Если лидер отменил создание группы (из-за спама), выходим
         if media_group_id not in current_media_groups:
             return
 
-    # Этот блок теперь выполняется всеми сообщениями ПОСЛЕ инициализации
     if not group:
         return
         
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     # Собираем ID всех сообщений из группы для последующего пакетного удаления
     group.get('source_message_ids', set()).add(message.message_id)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
     if message.message_id not in group['processed_messages']:
         media_data = {'type': message.content_type, 'file_id': None}
@@ -3196,10 +3254,10 @@ async def handle_media_group_init(message: Message):
             group['media'].append(media_data)
             group['processed_messages'].add(message.message_id)
 
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-    # Удаление отдельного сообщения убрано. Удаление будет пакетным на следующем шаге.
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Удаление отдельного сообщения убрано.
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # Перезапускаем таймер с каждым новым сообщением
     if media_group_id in media_group_timers:
         media_group_timers[media_group_id].cancel()
     
@@ -3211,12 +3269,10 @@ async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bo
     try:
         await asyncio.sleep(delay)
 
-        # Атомарно извлекаем группу из словаря. Если ее там уже нет, выходим.
         group = current_media_groups.pop(media_group_id, None)
         if not group or media_group_id in sent_media_groups:
             return
 
-        # Удаляем таймер, так как мы его сейчас выполним.
         media_group_timers.pop(media_group_id, None)
 
         # --- НАЧАЛО ИЗМЕНЕНИЙ: Пакетное удаление ---
@@ -3227,7 +3283,6 @@ async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bo
         if source_message_ids and author_id:
             try:
                 # Используем специальный метод API для удаления нескольких сообщений одним запросом.
-                # Это предотвращает срабатывание flood-лимитов Telegram.
                 await bot_instance.delete_messages(
                     chat_id=author_id,
                     message_ids=list(source_message_ids)
@@ -3239,18 +3294,15 @@ async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bo
                 print(f"❌ Ошибка при пакетном удалении для media group {media_group_id}: {e}")
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        # Передаем извлеченные данные в обработчик.
         await process_complete_media_group(media_group_id, group, bot_instance)
 
     except asyncio.CancelledError:
-        # Если таймер был отменен (пришло новое сообщение в группу) - это норма.
         pass
     except Exception as e:
         print(f"❌ Ошибка в complete_media_group_after_delay для {media_group_id}: {e}")
-        # Подчищаем в случае непредвиденной ошибки
         current_media_groups.pop(media_group_id, None)
         media_group_timers.pop(media_group_id, None)
-
+        
 async def process_complete_media_group(media_group_id: str, group: dict, bot_instance: Bot):
     if not group or not group.get('media'):
         return
@@ -3297,19 +3349,24 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
         try:
             builder = MediaGroupBuilder()
             reply_to_message_id = None
+            
+            # --- Логика форматирования вынесена в общую функцию ---
+            formatted_body = await _format_message_body(content, user_id)
+            header_html = f"<i>{escape_html(header)}</i>"
+            
+            # Собираем финальную подпись. Основной текст добавляем только к первому чанку.
+            full_caption_text = ""
+            if i == 0:
+                full_caption_text = f"{header_html}\n\n{formatted_body}" if formatted_body else header_html
+            else:
+                full_caption_text = header_html
+
             if reply_to_post:
                 reply_info = post_to_messages.get(reply_to_post, {})
                 reply_to_message_id = reply_info.get(user_id)
             
-            header_html = f"<i>{header}</i>"
-            
-            full_caption = header_html
-            # Добавляем основной текст только к первому чанку
-            if i == 0 and content.get('caption'):
-                full_caption += f"\n\n{content['caption']}"
-
             for idx, media in enumerate(chunk):
-                caption_for_media = full_caption if idx == 0 else None
+                caption_for_media = full_caption_text if idx == 0 else None
                 builder.add(type=media['type'], media=media['file_id'], caption=caption_for_media, parse_mode="HTML" if caption_for_media else None)
             
             if builder.build():
@@ -3345,7 +3402,8 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
 def apply_greentext_formatting(text: str) -> str:
     """
     Применяет форматирование 'Greentext' к строкам, начинающимся с '>'.
-    Работает с уже HTML-экранированным текстом.
+    Эта версия сначала экранирует HTML в строке, а затем оборачивает её в тег,
+    чтобы избежать конфликтов разметки.
     """
     if not text:
         return text
@@ -3353,12 +3411,14 @@ def apply_greentext_formatting(text: str) -> str:
     processed_lines = []
     lines = text.split('\n')
     for line in lines:
-        # Проверяем, начинается ли строка (без ведущих пробелов) с HTML-сущности '>'
+        # Проверяем, начинается ли строка (без ведущих пробелов) с символа '>'
         if line.lstrip().startswith('>'):
-            # Оборачиваем всю строку в тег <code> для моноширинного зеленого текста
-            processed_lines.append(f"<code>{line}</code>")
+            # Сначала экранируем строку, чтобы символы < > & не ломали разметку,
+            # а затем оборачиваем в тег `<code>`.
+            processed_lines.append(f"<code>{escape_html(line)}</code>")
         else:
-            processed_lines.append(line)
+            # Для обычных строк просто экранируем их.
+            processed_lines.append(escape_html(line))
             
     return '\n'.join(processed_lines)
 
@@ -3466,39 +3526,29 @@ async def handle_message(message: Message):
         
         text_for_corpus = None
         
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        # Логика режима АНИМЕ была удалена отсюда и перенесена в _apply_mode_transformations
         if message.content_type == 'text':
             text_for_corpus = message.text
-            text_content = message.html_text if message.entities else escape_html(message.text)
-            text_content = apply_greentext_formatting(text_content)
-
-            if b_data['anime_mode'] and random.random() < 0.41:
-                anime_img_url = await get_random_anime_image()
-                if anime_img_url:
-                    content.update({'type': 'photo', 'caption': text_content, 'image_url': anime_img_url})
-                else: 
-                    content.update({'text': text_content})
-            else: 
-                content.update({'text': text_content})
+            text_content = message.text
+            content.update({'text': text_content})
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                 
         elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio']:
             text_for_corpus = message.caption
             file_id = getattr(message, message.content_type, [])
             if isinstance(file_id, list): file_id = file_id[-1]
-            caption_content = escape_html(message.caption or "")
-            caption_content = apply_greentext_formatting(caption_content)
+            # --- ИЗМЕНЕНИЕ: Убираем отсюда форматирование и экранирование ---
+            caption_content = message.caption or ""
             content.update({'file_id': file_id.file_id, 'caption': caption_content})
             
         elif message.content_type in ['sticker', 'voice', 'video_note']:
             file_id = getattr(message, message.content_type)
             content['file_id'] = file_id.file_id
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        # Пополняем корпус для Призрака, если есть текст
         if text_for_corpus:
             last_messages.append(text_for_corpus)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        # Применяем трансформации режимов ДО отправки автору и ДО постановки в очередь
         content = await _apply_mode_transformations(content, board_id)
 
         # 10. Сохранение в хранилище
@@ -3507,47 +3557,23 @@ async def handle_message(message: Message):
             'reply_to': reply_to_post, 'author_message_id': None, 'board_id': board_id
         }
 
-        # 11. Отправка сообщения автору (уже с трансформированным текстом)
-        reply_to_message_id = reply_info.get(user_id)
-        sent_to_author = None
-        header_text = f"<i>{header}</i>"
-        reply_text = f">>{reply_to_post}\n" if reply_to_post else ""
-
+        # 11. Отправка сообщения автору
         try:
-            if content.get('type') == 'text':
-                full_text = f"{header_text}\n\n{reply_text}{content['text']}"
-                sent_to_author = await message.bot.send_message(user_id, full_text, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
-            
-            elif content.get('type') in ['photo', 'video', 'animation', 'document', 'audio']:
-                caption_for_author = header_text
-                final_caption = content.get('caption', '')
-                if reply_text or final_caption:
-                    caption_for_author += f"\n\n{reply_text}{final_caption}"
-                
-                media_to_send = content.get('image_url') or content.get('file_id')
-                
-                if content['type'] == 'photo':
-                    sent_to_author = await message.bot.send_photo(user_id, media_to_send, caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
-                elif content['type'] == 'video':
-                    sent_to_author = await message.bot.send_video(user_id, content['file_id'], caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
-                elif content['type'] == 'animation':
-                    sent_to_author = await message.bot.send_animation(user_id, content['file_id'], caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
-                elif content['type'] == 'document':
-                    sent_to_author = await message.bot.send_document(user_id, content['file_id'], caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
-                elif content['type'] == 'audio':
-                    sent_to_author = await message.bot.send_audio(user_id, content['file_id'], caption=caption_for_author, reply_to_message_id=reply_to_message_id, parse_mode="HTML")
-
-            elif content['type'] == 'sticker':
-                sent_to_author = await message.bot.send_sticker(user_id, content['file_id'], reply_to_message_id=reply_to_message_id)
-            elif content['type'] == 'voice':
-                 sent_to_author = await message.bot.send_voice(user_id, content['file_id'], caption=f"<i>{header}</i>\n\n{reply_text}", reply_to_message_id=reply_to_message_id, parse_mode="HTML")
-            elif content['type'] == 'video_note':
-                sent_to_author = await message.bot.send_video_note(user_id, content['file_id'], reply_to_message_id=reply_to_message_id)
-
-            if sent_to_author:
-                messages_storage[current_post_num]['author_message_id'] = sent_to_author.message_id
-                post_to_messages.setdefault(current_post_num, {})[user_id] = sent_to_author.message_id
-                message_to_post[(user_id, sent_to_author.message_id)] = current_post_num
+            # --- ИЗМЕНЕНИЕ: Отправка самому себе тоже идет через центральную функцию ---
+            results = await send_message_to_users(
+                bot_instance=message.bot,
+                recipients={user_id},
+                content=content,
+                reply_info=reply_info
+            )
+            # Если отправка успешна, сохраняем message_id
+            if results and results[0] and results[0][1]:
+                sent_to_author = results[0][1]
+                messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
+                for m in messages_to_save:
+                    messages_storage[current_post_num]['author_message_id'] = m.message_id
+                    post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
+                    message_to_post[(user_id, m.message_id)] = current_post_num
 
             if not is_shadow_muted and recipients:
                 await message_queues[board_id].put({
@@ -3556,9 +3582,8 @@ async def handle_message(message: Message):
                 })
 
         except TelegramForbiddenError:
-            # Пользователь заблокировал бота, удаляем его из активных
             b_data['users']['active'].discard(user_id)
-            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из handle_message).")
+            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из handle_message).")
         except Exception as e:
             print(f"Ошибка при отправке или постановке в очередь: {e}")
             messages_storage.pop(current_post_num, None)
@@ -3582,15 +3607,17 @@ async def start_background_tasks(bots: dict[str, Bot]):
         asyncio.create_task(auto_memory_cleaner()),
         asyncio.create_task(help_broadcaster()),
         asyncio.create_task(board_statistics_broadcaster()),
-        asyncio.create_task(ghost_poster( # <--- ОБНОВИТЕ ЭТОТ БЛОК
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Исправлен вызов ghost_poster ---
+        asyncio.create_task(ghost_poster(
             last_messages,
             message_queues,
             messages_storage,
-            post_to_messages, # <--- ДОБАВЬТЕ ЭТОТ АРГУМЕНТ
+            post_to_messages,
             format_header,
             board_data,
             BOARDS
         )),
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         # asyncio.create_task(dvach_thread_poster()), ПОКА НЕ НАДО
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
@@ -3614,26 +3641,28 @@ async def supervisor():
         load_state()
 
         bots = {}
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновление инициализации Bot ---
-        # Создаем объект с настройками по умолчанию один раз
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Увеличение таймаута сессии ---
+        # Создаем сессию с увеличенным таймаутом один раз
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
         default_properties = DefaultBotProperties(parse_mode="HTML")
         
         for board_id, config in BOARD_CONFIG.items():
             token = config.get("token")
             if token:
-                # Используем новый синтаксис с default=...
-                bots[board_id] = Bot(token=token, default=default_properties)
+                # Передаем созданную сессию в каждый экземпляр бота
+                bots[board_id] = Bot(token=token, default=default_properties, session=session)
             else:
                 print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         if not bots:
             print("❌ Не найдено ни одного токена бота. Завершение работы.")
+            if session and not session.closed:
+                await session.close()
             return
 
         print(f"✅ Инициализировано {len(bots)} ботов: {list(bots.keys())}")
         
-        # Обработчики сигналов теперь определяются ПОСЛЕ создания `bots` и передают его в `graceful_shutdown`
         bots_list = list(bots.values())
         if hasattr(signal, 'SIGTERM'):
             loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown(bots_list)))
@@ -3652,6 +3681,10 @@ async def supervisor():
     finally:
         if not is_shutting_down:
              await graceful_shutdown(list(bots.values()))
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Закрытие сессии ---
+        if 'session' in locals() and session and not session.closed:
+            await session.close()
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         if os.path.exists(lock_file):
             os.remove(lock_file)
             
