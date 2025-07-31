@@ -3633,6 +3633,10 @@ async def supervisor():
     with open(lock_file, "w") as f:
         f.write(str(os.getpid()))
     
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Гарантированное объявление session ---
+    session = None
+    bots = {}
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     try:
         global is_shutting_down
         loop = asyncio.get_running_loop()
@@ -3640,7 +3644,7 @@ async def supervisor():
         restore_backup_on_start()
         load_state()
 
-        bots = {}
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Корректная инициализация ---
         # Создаем сессию с увеличенным таймаутом один раз
         session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
         default_properties = DefaultBotProperties(parse_mode="HTML")
@@ -3648,11 +3652,11 @@ async def supervisor():
         for board_id, config in BOARD_CONFIG.items():
             token = config.get("token")
             if token:
-                # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-                # Убраны лишние скобки. Мы передаем созданный объект session, а не вызываем его.
+                # Передаем созданный объект session, а НЕ вызываем его
                 bots[board_id] = Bot(token=token, default=default_properties, session=session)
             else:
                 print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         if not bots:
             print("❌ Не найдено ни одного токена бота. Завершение работы.")
@@ -3676,13 +3680,15 @@ async def supervisor():
         await dp.start_polling(*bots.values(), skip_updates=True)
 
     except Exception as e:
-        print(f"🔥 Critical error in supervisor: {e}")
+        import traceback
+        print(f"🔥 Critical error in supervisor: {e}\n{traceback.format_exc()}") # Добавил traceback для детальной диагностики
     finally:
         if not is_shutting_down:
              await graceful_shutdown(list(bots.values()))
         # Закрытие сессии
-        if 'session' in locals() and session and not session.closed:
+        if session and not session.closed:
             await session.close()
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         if os.path.exists(lock_file):
             os.remove(lock_file)
             
