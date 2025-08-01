@@ -1549,6 +1549,10 @@ async def send_message_to_users(
         return []
 
     async def really_send(uid: int, reply_to: int | None):
+        # Переменные, которые могут понадобиться в блоке except, определяются здесь
+        head = ""
+        formatted_body = ""
+        full_text = ""
         try:
             ct_raw = modified_content["type"]
             ct = ct_raw.value if hasattr(ct_raw, 'value') else ct_raw
@@ -1562,14 +1566,11 @@ async def send_message_to_users(
             if uid == original_author:
                 head = head.replace("Пост", "🔴 Пост")
 
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем новую общую функцию ---
             formatted_body = await _format_message_body(modified_content, uid)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             if ct == "media_group":
                 if not modified_content.get('media'): return None
                 builder = MediaGroupBuilder()
-                # Собираем подпись для медиа-группы, используя уже отформатированный текст
                 full_text_for_group = f"{head}\n\n{formatted_body}" if formatted_body else head
                 for idx, media in enumerate(modified_content['media']):
                     caption = full_text_for_group if idx == 0 else None
@@ -1583,7 +1584,6 @@ async def send_message_to_users(
             send_method = getattr(bot_instance, method_name)
             kwargs = {'reply_to_message_id': reply_to}
             
-            # Собираем финальное сообщение для всех остальных типов
             full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
 
             if ct == 'text':
@@ -1614,10 +1614,12 @@ async def send_message_to_users(
             if "VOICE_MESSAGES_FORBIDDEN" in e.message and modified_content.get("type") == "voice":
                 print(f"ℹ️ Пользователь {uid} запретил голосовые. Отправляю как аудио...")
                 try:
+                    # Используем полный текст сообщения, а не только заголовок
+                    if len(full_text) > 1024: full_text = full_text[:1021] + "..."
                     return await bot_instance.send_audio(
                         chat_id=uid,
                         audio=modified_content["file_id"],
-                        caption=f"<i>{escape_html(modified_content['header'])}</i>",
+                        caption=full_text,
                         parse_mode="HTML",
                         reply_to_message_id=reply_to
                     )
@@ -1627,10 +1629,12 @@ async def send_message_to_users(
             elif "VIDEO_MESSAGES_FORBIDDEN" in e.message and modified_content.get("type") == "video_note":
                 print(f"ℹ️ Пользователь {uid} запретил видеосообщения. Отправляю как видео...")
                 try:
+                    # Используем полный текст сообщения, а не только заголовок
+                    if len(full_text) > 1024: full_text = full_text[:1021] + "..."
                     return await bot_instance.send_video(
                         chat_id=uid,
                         video=modified_content["file_id"],
-                        caption=f"<i>{escape_html(modified_content['header'])}</i>",
+                        caption=full_text,
                         parse_mode="HTML",
                         reply_to_message_id=reply_to
                     )
@@ -3100,7 +3104,10 @@ async def handle_voice(message: Message):
         
     b_data = board_data[board_id]
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Полная унификация с handle_message ---
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавлена проверка shadow-мута ---
+    is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
+                       b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+
     if user_id in b_data['users']['banned']:
         await message.delete()
         return
@@ -3115,7 +3122,6 @@ async def handle_voice(message: Message):
         try:
             await message.delete()
         except TelegramBadRequest: pass
-        # Для голосовых нет caption, поэтому используем тип 'animation' для правил спама
         await apply_penalty(message.bot, user_id, 'animation', board_id)
         return
 
@@ -3140,14 +3146,13 @@ async def handle_voice(message: Message):
         'reply_to_post': reply_to_post
     }
 
-    # Для голосовых нет текста, поэтому трансформация не нужна, но структура сохраняется
     messages_storage[current_post_num] = {
         'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
         'reply_to': reply_to_post, 'board_id': board_id, 'author_message_id': None
     }
 
     try:
-        # Используем единую функцию отправки
+        # Отправка автору (выполняется всегда, даже в shadow-муте)
         results = await send_message_to_users(
             bot_instance=message.bot,
             recipients={user_id},
@@ -3162,12 +3167,14 @@ async def handle_voice(message: Message):
                 post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
                 message_to_post[(user_id, m.message_id)] = current_post_num
         
-        recipients = b_data['users']['active'] - {user_id}
-        if recipients and user_id in b_data['users']['active']:
-            await message_queues[board_id].put({
-                'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                'reply_info': reply_info, 'board_id': board_id
-            })
+        # Постановка в очередь для остальных, только если нет shadow-мута
+        if not is_shadow_muted:
+            recipients = b_data['users']['active'] - {user_id}
+            if recipients and user_id in b_data['users']['active']:
+                await message_queues[board_id].put({
+                    'recipients': recipients, 'content': content, 'post_num': current_post_num,
+                    'reply_info': reply_info, 'board_id': board_id
+                })
 
     except TelegramForbiddenError:
         b_data['users']['active'].discard(user_id)
