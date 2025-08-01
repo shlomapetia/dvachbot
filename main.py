@@ -1415,7 +1415,23 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     modified_content = content.copy()
 
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # 1. Единый блок для режима 'anime'
+    # Проверяем, активен ли какой-либо режим, трансформирующий текст.
+    # Если да, то мы ОБЯЗАНЫ очистить текст от HTML-тегов, чтобы избежать ошибок парсинга.
+    # Приоритет режима > приоритета пользовательского форматирования.
+    is_transform_mode_active = (
+        b_data['anime_mode'] or
+        b_data['slavaukraine_mode'] or
+        b_data['zaputin_mode'] or
+        b_data['suka_blyat_mode']
+    )
+
+    if is_transform_mode_active:
+        if 'text' in modified_content and modified_content['text']:
+            modified_content['text'] = clean_html_tags(modified_content['text'])
+        if 'caption' in modified_content and modified_content['caption']:
+            modified_content['caption'] = clean_html_tags(modified_content['caption'])
+
+    # Теперь, когда текст гарантированно чистый (если нужно), применяем трансформации.
     if b_data['anime_mode']:
         # 1a. Преобразование текста в японский стиль
         if 'text' in modified_content and modified_content['text']:
@@ -1424,11 +1440,9 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
             modified_content['caption'] = anime_transform(modified_content['caption'])
         
         # 1b. Добавление случайного изображения к ТЕКСТОВЫМ постам.
-        # Срабатывает с шансом 41% только для постов, которые изначально были текстовыми.
         if modified_content.get('type') == 'text' and random.random() < 0.41:
             anime_img_url = await get_random_anime_image()
             if anime_img_url:
-                # Трансформируем сообщение из текстового в фото
                 text_content = modified_content.pop('text', '')
                 modified_content.update({
                     'type': 'photo',
@@ -1436,7 +1450,6 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
                     'image_url': anime_img_url
                 })
 
-    # 2. Остальные режимы
     elif b_data['slavaukraine_mode']:
         if 'text' in modified_content and modified_content['text']:
             modified_content['text'] = ukrainian_transform(modified_content['text'])
@@ -3031,16 +3044,16 @@ async def handle_audio(message: Message):
         await message.delete()
     except TelegramBadRequest: pass
     
-    caption_content = message.caption or ""
-    if caption_content:
-        last_messages.append(caption_content)
+    caption_content = message.caption_html_text or ""
+    if message.caption:
+        last_messages.append(message.caption)
         
     content = {
         'type': 'audio', 'header': header, 'file_id': message.audio.file_id,
         'caption': caption_content, 'reply_to_post': reply_to_post
     }
 
-    content = await _apply_mode_transformations(content, board_id)
+    # content = await _apply_mode_transformations(content, board_id) # <-- СТРОКА УДАЛЕНА
 
     messages_storage[current_post_num] = {
         'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
@@ -3048,11 +3061,13 @@ async def handle_audio(message: Message):
     }
     
     try:
-        # Используем единую функцию отправки, как в handle_message
+        # Применяем трансформацию только для копии автора
+        content_for_author = await _apply_mode_transformations(content, board_id)
+        
         results = await send_message_to_users(
             bot_instance=message.bot,
             recipients={user_id},
-            content=content,
+            content=content_for_author,
             reply_info=reply_info
         )
         if results and results[0] and results[0][1]:
@@ -3075,9 +3090,7 @@ async def handle_audio(message: Message):
     except Exception as e:
         print(f"❌ Критическая ошибка постановки в очередь аудио-поста. Пост #{current_post_num} удален. Ошибка: {e}")
         messages_storage.pop(current_post_num, None)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-
+        
 @dp.message(F.voice)
 async def handle_voice(message: Message):
     """Адаптированный обработчик голосовых сообщений."""
@@ -3216,7 +3229,7 @@ async def handle_media_group_init(message: Message):
             reply_to_post = message_to_post.get(lookup_key)
 
         header, post_num = await format_header(board_id)
-        caption = message.caption or ""
+        caption = message.caption_html_text or ""
         
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         # Инициализируем хранилище для ID исходных сообщений
@@ -3338,8 +3351,8 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
             'type': 'media_group', 'header': header, 'media': chunk,
             'caption': caption, 'reply_to_post': reply_to_post
         }
-
-        content = await _apply_mode_transformations(content, board_id)
+        
+        # content = await _apply_mode_transformations(content, board_id) # <-- СТРОКА УДАЛЕНА
 
         messages_storage[post_num] = {
             'author_id': user_id, 'timestamp': group['timestamp'], 'content': content,
@@ -3350,9 +3363,12 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
         try:
             builder = MediaGroupBuilder()
             reply_to_message_id = None
+
+            # Применяем трансформацию только для копии, отправляемой автору
+            content_for_author = await _apply_mode_transformations(content, board_id)
             
-            # --- Логика форматирования вынесена в общую функцию ---
-            formatted_body = await _format_message_body(content, user_id)
+            # --- Логика форматирования теперь использует content_for_author ---
+            formatted_body = await _format_message_body(content_for_author, user_id)
             header_html = f"<i>{escape_html(header)}</i>"
             
             # Собираем финальную подпись. Основной текст добавляем только к первому чанку.
@@ -3388,6 +3404,7 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
         recipients = b_data['users']['active'] - {user_id}
         if recipients and user_id in b_data['users']['active']:
             try:
+                # В очередь на рассылку кладем ОРИГИНАЛЬНЫЙ контент
                 await message_queues[board_id].put({
                     'recipients': recipients, 'content': content, 'post_num': post_num,
                     'reply_info': reply_info, 'board_id': board_id
@@ -3398,7 +3415,6 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
         
         if len(media_chunks) > 1:
             await asyncio.sleep(1) # Небольшая задержка между отправкой частей альбома
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
 def apply_greentext_formatting(text: str) -> str:
     """
@@ -3412,17 +3428,17 @@ def apply_greentext_formatting(text: str) -> str:
     processed_lines = []
     lines = text.split('\n')
     for line in lines:
-        # Проверяем, начинается ли строка (без ведущих пробелов) с символа '>'
-        if line.lstrip().startswith('>'):
+        stripped_line = line.lstrip()
+        # Проверяем, начинается ли строка с символа '>' или его HTML-сущности '>'
+        if stripped_line.startswith('>') or stripped_line.startswith('>'):
             # Сначала экранируем строку, чтобы символы < > & не ломали разметку,
             # а затем оборачиваем в тег `<code>`.
             processed_lines.append(f"<code>{escape_html(line)}</code>")
         else:
-            # Для обычных строк просто экранируем их.
-            processed_lines.append(escape_html(line))
+            # Для обычных строк просто передаем их как есть, сохраняя HTML-разметку.
+            processed_lines.append(line)
             
     return '\n'.join(processed_lines)
-
 
 @dp.message()
 async def handle_message(message: Message):
@@ -3501,43 +3517,55 @@ async def handle_message(message: Message):
         header, current_post_num = await format_header(board_id)
         await message.delete()
 
-        # Формирование словаря `content`
+        # Формирование словаря `content` с оригинальной разметкой
         content = {'type': message.content_type, 'header': header, 'reply_to_post': reply_to_post}
         text_for_corpus = None
 
         if message.content_type == 'text':
             text_for_corpus = message.text
-            content.update({'text': message.text})
+            content.update({'text': message.html_text})
         elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio', 'sticker', 'voice', 'video_note']:
             text_for_corpus = message.caption
             file_id_obj = getattr(message, message.content_type, [])
             if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
-            content.update({'file_id': file_id_obj.file_id, 'caption': message.caption or ""})
+            content.update({'file_id': file_id_obj.file_id, 'caption': message.caption_html_text or ""})
         
         if text_for_corpus: last_messages.append(text_for_corpus)
 
-        content = await _apply_mode_transformations(content, board_id)
-
-        # Сохранение поста в хранилище
+        # Сохранение поста в хранилище с ОРИГИНАЛЬНЫМ контентом
         messages_storage[current_post_num] = {
             'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
             'reply_to': reply_to_post, 'author_message_id': None, 'board_id': board_id
         }
 
         # Отправка сообщения обратно автору (для всех)
-        results = await send_message_to_users(
-            bot_instance=message.bot, recipients={user_id}, content=content, reply_info=reply_info
-        )
-        if results and results[0] and results[0][1]:
-            sent_to_author = results[0][1]
-            messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
-            for m in messages_to_save:
-                messages_storage[current_post_num]['author_message_id'] = m.message_id
-                post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
-                message_to_post[(user_id, m.message_id)] = current_post_num
+        try:
+            # Применяем трансформацию режима ТОЛЬКО для копии, отправляемой автору
+            content_for_author = await _apply_mode_transformations(content, board_id)
+            
+            results = await send_message_to_users(
+                bot_instance=message.bot,
+                recipients={user_id},
+                content=content_for_author,
+                reply_info=reply_info
+            )
+            # Если отправка успешна, сохраняем message_id
+            if results and results[0] and results[0][1]:
+                sent_to_author = results[0][1]
+                messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
+                for m in messages_to_save:
+                    messages_storage[current_post_num]['author_message_id'] = m.message_id
+                    # Остальное сохранение происходит внутри send_message_to_users, которое теперь вызывается с post_num
+                    # и само обновляет post_to_messages и message_to_post
+        except TelegramForbiddenError:
+            b_data['users']['active'].discard(user_id)
+            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из handle_message).")
+        except Exception as e:
+            print(f"Ошибка при отправке сообщения автору: {e}")
+            messages_storage.pop(current_post_num, None)
+            return # Прерываем выполнение, если не удалось отправить даже автору
 
-        # !!! --- КЛЮЧЕВОЙ МОМЕНТ ЛОГИКИ ШЕДОУМУТА --- !!!
-        # В очередь на рассылку остальным отправляем, только если юзер НЕ в муте.
+        # В очередь на рассылку остальным отправляем ОРИГИНАЛЬНЫЙ контент
         if not is_shadow_muted:
             recipients = b_data['users']['active'] - {user_id}
             if recipients:
@@ -3546,9 +3574,6 @@ async def handle_message(message: Message):
                     'reply_info': reply_info if reply_info else None, 'board_id': board_id
                 })
 
-    except TelegramForbiddenError:
-        b_data['users']['active'].discard(user_id)
-        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота.")
     except TelegramBadRequest:
         pass
     except Exception as e:
