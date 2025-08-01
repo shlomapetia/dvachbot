@@ -3012,8 +3012,6 @@ async def handle_audio(message: Message):
     
     b_data = board_data[board_id]
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Полная унификация с handle_message ---
-    # Блок проверок (бан, мут) идентичен основному обработчику
     if user_id in b_data['users']['banned']:
         await message.delete()
         return
@@ -3022,17 +3020,18 @@ async def handle_audio(message: Message):
         await message.delete()
         return
 
-    # Спам-проверку для аудио и других медиа лучше делать по caption,
-    # поэтому используем логику из handle_message
     spam_check = await check_spam(user_id, message, board_id)
     if not spam_check:
         try:
             await message.delete()
         except TelegramBadRequest: pass
-        msg_type = 'text' if message.caption else 'animation' # Считаем аудио как анимацию для штрафа
+        msg_type = 'text' if message.caption else 'animation'
         await apply_penalty(message.bot, user_id, msg_type, board_id)
         return
         
+    is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
+                       b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+
     recipients = b_data['users']['active'] - {user_id}
     reply_to_post, reply_info = None, {}
     if message.reply_to_message:
@@ -3048,7 +3047,7 @@ async def handle_audio(message: Message):
         await message.delete()
     except TelegramBadRequest: pass
     
-    caption_content = message.caption_html_text or ""
+    caption_content = message.caption_html_text if message.caption else ""
     if message.caption:
         last_messages.append(message.caption)
         
@@ -3057,15 +3056,12 @@ async def handle_audio(message: Message):
         'caption': caption_content, 'reply_to_post': reply_to_post
     }
 
-    # content = await _apply_mode_transformations(content, board_id) # <-- СТРОКА УДАЛЕНА
-
     messages_storage[current_post_num] = {
         'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
         'reply_to': reply_to_post, 'board_id': board_id, 'author_message_id': None
     }
     
     try:
-        # Применяем трансформацию только для копии автора
         content_for_author = await _apply_mode_transformations(content, board_id)
         
         results = await send_message_to_users(
@@ -3081,12 +3077,13 @@ async def handle_audio(message: Message):
                 messages_storage[current_post_num]['author_message_id'] = m.message_id
                 post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
                 message_to_post[(user_id, m.message_id)] = current_post_num
-
-        if recipients and user_id in b_data['users']['active']:
-            await message_queues[board_id].put({
-                'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                'reply_info': reply_info if reply_info else None, 'board_id': board_id
-            })
+        
+        if not is_shadow_muted:
+            if recipients and user_id in b_data['users']['active']:
+                await message_queues[board_id].put({
+                    'recipients': recipients, 'content': content, 'post_num': current_post_num,
+                    'reply_info': reply_info if reply_info else None, 'board_id': board_id
+                })
             
     except TelegramForbiddenError:
         b_data['users']['active'].discard(user_id)
@@ -3531,11 +3528,20 @@ async def handle_message(message: Message):
         if message.content_type == 'text':
             text_for_corpus = message.text
             content.update({'text': message.html_text})
-        elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio', 'sticker', 'voice', 'video_note']:
+        
+        # Блок для медиа, которые МОГУТ ИМЕТЬ подпись
+        elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio']:
             text_for_corpus = message.caption
             file_id_obj = getattr(message, message.content_type, [])
             if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
-            content.update({'file_id': file_id_obj.file_id, 'caption': message.caption_html_text or ""})
+            content.update({'file_id': file_id_obj.file_id, 'caption': message.caption_html_text if message.caption else ""})
+        
+        # Блок для медиа, которые НЕ ИМЕЮТ подписи
+        elif message.content_type in ['sticker', 'voice', 'video_note']:
+            file_id_obj = getattr(message, message.content_type)
+            content.update({'file_id': file_id_obj.file_id})
+            if message.content_type == 'sticker' and message.sticker and message.sticker.emoji:
+                 text_for_corpus = message.sticker.emoji # Добавляем эмодзи для Призрака
         
         if text_for_corpus: last_messages.append(text_for_corpus)
 
@@ -3562,15 +3568,13 @@ async def handle_message(message: Message):
                 messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
                 for m in messages_to_save:
                     messages_storage[current_post_num]['author_message_id'] = m.message_id
-                    # Остальное сохранение происходит внутри send_message_to_users, которое теперь вызывается с post_num
-                    # и само обновляет post_to_messages и message_to_post
         except TelegramForbiddenError:
             b_data['users']['active'].discard(user_id)
             print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из handle_message).")
         except Exception as e:
             print(f"Ошибка при отправке сообщения автору: {e}")
             messages_storage.pop(current_post_num, None)
-            return # Прерываем выполнение, если не удалось отправить даже автору
+            return
 
         # В очередь на рассылку остальным отправляем ОРИГИНАЛЬНЫЙ контент
         if not is_shadow_muted:
