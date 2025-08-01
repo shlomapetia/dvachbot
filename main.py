@@ -3047,7 +3047,8 @@ async def handle_audio(message: Message):
         await message.delete()
     except TelegramBadRequest: pass
     
-    caption_content = message.caption_html_text if message.caption else ""
+    # --- ИСПРАВЛЕНИЕ: Безопасный доступ к caption_html_text ---
+    caption_content = message.caption_html_text if hasattr(message, 'caption_html_text') and message.caption_html_text else (message.caption or "")
     if message.caption:
         last_messages.append(message.caption)
         
@@ -3233,17 +3234,15 @@ async def handle_media_group_init(message: Message):
             reply_to_post = message_to_post.get(lookup_key)
 
         header, post_num = await format_header(board_id)
-        caption = message.caption_html_text or ""
+        # --- ИСПРАВЛЕНИЕ: Безопасный доступ к caption_html_text ---
+        caption = message.caption_html_text if hasattr(message, 'caption_html_text') and message.caption_html_text else (message.caption or "")
         
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        # Инициализируем хранилище для ID исходных сообщений
         group.update({
             'board_id': board_id, 'post_num': post_num, 'header': header, 'author_id': user_id,
             'timestamp': datetime.now(UTC), 'media': [], 'caption': caption,
             'reply_to_post': reply_to_post, 'processed_messages': set(),
-            'source_message_ids': set() # <--- НОВОЕ ПОЛЕ
+            'source_message_ids': set()
         })
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         group.pop('is_initializing', None)
     else:
         while group is not None and group.get('is_initializing'):
@@ -3256,10 +3255,7 @@ async def handle_media_group_init(message: Message):
     if not group:
         return
         
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Собираем ID всех сообщений из группы для последующего пакетного удаления
     group.get('source_message_ids', set()).add(message.message_id)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
     if message.message_id not in group['processed_messages']:
         media_data = {'type': message.content_type, 'file_id': None}
@@ -3271,10 +3267,6 @@ async def handle_media_group_init(message: Message):
         if media_data['file_id']:
             group['media'].append(media_data)
             group['processed_messages'].add(message.message_id)
-
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Удаление отдельного сообщения убрано.
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if media_group_id in media_group_timers:
         media_group_timers[media_group_id].cancel()
@@ -3534,7 +3526,9 @@ async def handle_message(message: Message):
             text_for_corpus = message.caption
             file_id_obj = getattr(message, message.content_type, [])
             if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
-            content.update({'file_id': file_id_obj.file_id, 'caption': message.caption_html_text if message.caption else ""})
+            # --- ИСПРАВЛЕНИЕ: Безопасный доступ к caption_html_text ---
+            caption_text = message.caption_html_text if hasattr(message, 'caption_html_text') and message.caption_html_text else (message.caption or "")
+            content.update({'file_id': file_id_obj.file_id, 'caption': caption_text})
         
         # Блок для медиа, которые НЕ ИМЕЮТ подписи
         elif message.content_type in ['sticker', 'voice', 'video_note']:
