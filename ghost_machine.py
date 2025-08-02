@@ -31,8 +31,17 @@ MANIC_EPISODE_CHANCE = 0.25
 
 MAT_WORDS = ["сука", "блядь", "пиздец", "ебать", "нах", "пизда", "хуйня", "ебал", "блять", "отъебись", "ебаный", "еблан", "ХУЙ", "ПИЗДА", "хуйло", "долбаёб", "пидорас"]
 
+# --- ИЗМЕНЕНИЕ: Удален некорректный метод sentence_split ---
+# Класс теперь является простым наследником markovify.Text,
+# так как вся логика очистки корпуса корректно реализована в ghost_poster.
 class TextModel(markovify.Text if markovify else object):
     pass
+
+def _clean_html_tags(text: str) -> str:
+    """Безопасно удаляет HTML-теги из текста."""
+    if not text:
+        return ""
+    return re.sub(r'<[^>]+>', '', text)
 
 # --- Функции-генераторы ---
 def _generate_short_post(model: TextModel, **kwargs) -> str | None:
@@ -47,10 +56,13 @@ def _generate_story_post(model: TextModel, length_hint: int = 0, **kwargs) -> st
     return ". ".join(s.capitalize() for s in story) + "." if story else None
 
 def _generate_greentext_post(model: TextModel, length_hint: int = 0, **kwargs) -> str | None:
+    # Динамическая длина greentext
     num_lines = 2
     if length_hint > 150: num_lines = random.randint(3, 5)
     elif length_hint > 50: num_lines = random.randint(2, 3)
     
+    # --- ИЗМЕНЕНИЕ: Генерируем строки, начинающиеся с '>', без HTML-тегов. ---
+    # Основной обработчик в main.py сам обернет такие строки в теги <code>.
     story = [f">{s}" for s in (model.make_sentence(tries=100) for _ in range(num_lines)) if s]
     return "\n".join(story) if story else None
 
@@ -62,6 +74,12 @@ async def _send_ghost_post(post_data: dict, board_id: str, b_data, message_queue
     post_num, header, message = post_data['post_num'], post_data['header'], post_data['message']
     reply_to = post_data.get('reply_to')
     
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Удален блок с трансформациями (anime_transform, zaputin_transform и т.д.).
+    # Теперь Призрак отправляет "сырой" текст. Вся логика применения режимов
+    # корректно и централизованно обрабатывается в main.py.
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     content = {'type': 'text', 'header': header, 'text': message, 'reply_to_post': reply_to, 'is_system_message': True}
     reply_info = post_to_messages.get(reply_to, {}) if reply_to else {}
 
@@ -73,10 +91,9 @@ async def _send_ghost_post(post_data: dict, board_id: str, b_data, message_queue
 
     messages_storage[post_num] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
     await message_queues[board_id].put({'recipients': recipients, 'content': content, 'post_num': post_num, 'board_id': board_id, 'reply_info': reply_info})
-    print(f"👻 ...[Ghost Machine] Отправлен пост #{post_num} на доску /{board_id}/")
+    print(f"👻 ...отправлен пост #{post_num}...")
 
 
-# --- Основной процесс "Призрака" ---
 async def ghost_poster(
     last_messages: deque, message_queues: dict, messages_storage: dict,
     post_to_messages: dict, format_header, board_data: defaultdict, BOARDS: list
@@ -88,20 +105,12 @@ async def ghost_poster(
 
     while True:
         try:
-            delay = random.randint(MIN_GHOST_POST_DELAY_SEC, MAX_GHOST_POST_DELAY_SEC)
-            print(f"👻 [Ghost Machine] Следующая попытка через {delay // 60} минут...")
-            await asyncio.sleep(delay)
-
-            print(f"\n👻 [Ghost Machine] Начало новой итерации...")
-            if len(last_messages) < MIN_MESSAGES_FOR_TRAINING:
-                print(f"👻 [Ghost Machine] Недостаточно сообщений для обучения ({len(last_messages)}/{MIN_MESSAGES_FOR_TRAINING}). Пропуск.")
-                continue
+            await asyncio.sleep(random.randint(MIN_GHOST_POST_DELAY_SEC, MAX_GHOST_POST_DELAY_SEC))
+            if len(last_messages) < MIN_MESSAGES_FOR_TRAINING: continue
 
             destination_board_id = random.choice(BOARDS)
             b_data = board_data[destination_board_id]
-            if not (b_data['users']['active'] - b_data['users']['banned']):
-                print(f"👻 [Ghost Machine] На доске /{destination_board_id}/ нет активных пользователей. Пропуск.")
-                continue
+            if not (b_data['users']['active'] - b_data['users']['banned']): continue
 
             corpus: List[str] = list(last_messages)
             reply_to_post_num = None
@@ -109,7 +118,6 @@ async def ghost_poster(
             force_generator = None
 
             if random.random() < REPLY_CHANCE and messages_storage:
-                print("👻 [Ghost Machine] Решено сгенерировать ответ.")
                 if random.random() < SELF_REPLY_CHANCE:
                     ghost_posts = [p for p, data in messages_storage.items() if data.get('author_id') == 0 and data.get('content', {}).get('header', '').startswith(tuple(GHOST_HEADERS))]
                     if ghost_posts: reply_to_post_num = random.choice(ghost_posts[-20:])
@@ -121,42 +129,31 @@ async def ghost_poster(
                 if reply_to_post_num:
                     target_content = messages_storage.get(reply_to_post_num, {}).get('content', {})
                     raw_text = target_content.get('text') or target_content.get('caption', '')
-                    target_text_for_priming = clean_html_tags(raw_text) # Используем общую функцию очистки
+                    target_text_for_priming = _clean_html_tags(raw_text)
                     
-                    if target_content.get('type') == 'text' and target_content.get('text', '').lstrip().startswith(('>', '>')):
+                    if target_content.get('type') == 'text' and target_content.get('text', '').strip().startswith('<code>>'):
                         force_generator = _generate_greentext_post
 
             final_corpus = corpus
             if target_text_for_priming:
-                print(f"👻 [Ghost Machine] Прайминг на тексте поста #{reply_to_post_num}: '{target_text_for_priming[:50]}...'")
+                print(f"👻 [Ghost Machine] Прайминг на тексте поста #{reply_to_post_num}...")
                 final_corpus += [target_text_for_priming] * 10
 
-            print(f"👻 [Ghost Machine] Размер корпуса до фильтрации: {len(final_corpus)} сообщений.")
-            
-            # Фильтруем корпус, оставляя только строки, содержащие минимум 2 слова после очистки
-            valid_corpus = []
-            for s in final_corpus:
-                # Удаляем реплаи (>>123), HTML-теги и лишние пробелы
-                cleaned_s = re.sub(r'(>>\d+|<[^>]+>)', '', s).strip()
-                if len(cleaned_s.split()) > 1:
-                    valid_corpus.append(cleaned_s)
-
-            print(f"👻 [Ghost Machine] Размер корпуса после фильтрации: {len(valid_corpus)} сообщений.")
-            
-            if len(valid_corpus) < MIN_MESSAGES_FOR_TRAINING:
-                print(f"👻 [Ghost Machine] Недостаточно валидных сообщений для обучения ({len(valid_corpus)}/{MIN_MESSAGES_FOR_TRAINING}). Пропуск.")
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка корпуса перед обучением ---
+            # Передаем в модель только строки, которые имеют хотя бы 2 слова после очистки
+            valid_corpus = [s for s in final_corpus if len(re.sub(r'(>>\d+|<[^>]+>)', '', s).strip().split()) > 1]
+            if not valid_corpus:
+                print("👻 [Ghost Machine] Корпус пуст после очистки. Пропуск итерации.")
                 continue
-            
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
             state_size = random.choice([1, 2, 2, 3])
-            print(f"👻 [Ghost Machine] Обучение модели с state_size={state_size}...")
-            text_model = TextModel(" ".join(valid_corpus), state_size=state_size, well_formed=False)
+            # Обучаем модель на валидном корпусе
+            text_model = TextModel(valid_corpus, state_size=state_size, well_formed=False)
             
             length_hint = len(target_text_for_priming)
             generator = force_generator or random.choices([s[0] for s in generation_strategies], [s[1] for s in generation_strategies], k=1)[0]
-            print(f"👻 [Ghost Machine] Выбрана стратегия генерации: {generator.__name__}")
-            
             ghost_message = generator(model=text_model, length_hint=length_hint) or "..."
-            print(f"👻 [Ghost Machine] Сгенерировано сообщение: '{ghost_message}'")
 
             _, post_num = await format_header(destination_board_id)
             current_post_data = {
