@@ -45,11 +45,9 @@ from datetime import datetime, timedelta, timezone, UTC
 from japanese_translator import anime_transform, get_random_anime_image
 from ukrainian_mode import ukrainian_transform, UKRAINIAN_PHRASES
 import deanonymizer 
-from conan import conan_roaster, conan_phrase
 from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES 
 from deanonymizer import DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS, generate_deanon_info
 from help_text import HELP_TEXT
-from ghost_machine import ghost_poster
 
 # ========== Глобальные настройки досок ==========
 # Вставляем новую конфигурационную структуру
@@ -3591,8 +3589,12 @@ async def handle_message(message: Message):
         
 async def start_background_tasks(bots: dict[str, Bot]):
     """Поднимаем все фоновые корутины ОДИН раз за весь runtime"""
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Локальный импорт для разрыва цикла ---
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Локальный импорт для разрыва цикла зависимостей, который вызывает NameError
     from help_broadcaster import help_broadcaster
+    from conan import conan_roaster
+    from ghost_machine import ghost_poster
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     tasks = [
         asyncio.create_task(auto_backup()),
@@ -3605,7 +3607,6 @@ async def start_background_tasks(bots: dict[str, Bot]):
         asyncio.create_task(auto_memory_cleaner()),
         asyncio.create_task(help_broadcaster()),
         asyncio.create_task(board_statistics_broadcaster()),
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Исправлен вызов ghost_poster ---
         asyncio.create_task(ghost_poster(
             last_messages,
             message_queues,
@@ -3615,12 +3616,10 @@ async def start_background_tasks(bots: dict[str, Bot]):
             board_data,
             BOARDS
         )),
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         # asyncio.create_task(dvach_thread_poster()), ПОКА НЕ НАДО
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
     return tasks
-
 
 async def supervisor():
     lock_file = "bot.lock"
