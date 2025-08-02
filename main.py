@@ -1545,9 +1545,14 @@ async def send_message_to_users(
         elif 'caption' in modified_content and modified_content['caption']: modified_content['caption'] += phrase
 
     blocked_users = set()
-    active_recipients = {uid for uid in recipients if uid not in b_data['users']['banned']}
-    if not active_recipients:
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Преобразуем множество в список, чтобы гарантировать одинаковый порядок
+    # при создании задач и обработке результатов.
+    active_recipients_list = [uid for uid in recipients if uid not in b_data['users']['banned']]
+    if not active_recipients_list:
         return []
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
 
     async def really_send(uid: int, reply_to: int | None):
         # Переменные, которые могут понадобиться в блоке except, определяются здесь
@@ -1655,12 +1660,15 @@ async def send_message_to_users(
             reply_to = reply_info.get(uid) if reply_info else None
             return await really_send(uid, reply_to)
 
-    tasks = [send_with_semaphore(uid) for uid in active_recipients]
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Используем упорядоченный список для создания задач
+    tasks = [send_with_semaphore(uid) for uid in active_recipients_list]
     results = await asyncio.gather(*tasks)
 
     if content.get('post_num'):
         post_num = content['post_num']
-        for uid, msg in zip(active_recipients, results):
+        # Используем тот же упорядоченный список для сопоставления результатов
+        for uid, msg in zip(active_recipients_list, results):
             if not msg: continue
             messages_to_save = msg if isinstance(msg, list) else [msg]
             for m in messages_to_save:
@@ -1673,15 +1681,9 @@ async def send_message_to_users(
                 b_data['users']['active'].discard(uid)
                 print(f"🚫 [{board_id}] Пользователь {uid} заблокировал бота, удален из активных")
 
-    return list(zip(active_recipients, results))
-    
-async def message_broadcaster(bots: dict[str, Bot]):
-    """Обработчик очереди сообщений с воркерами для каждой доски."""
-    tasks = [
-        asyncio.create_task(message_worker(f"Worker-{board_id}", board_id, bot_instance))
-        for board_id, bot_instance in bots.items()
-    ]
-    await asyncio.gather(*tasks)
+    # Используем тот же упорядоченный список для возврата результатов
+    return list(zip(active_recipients_list, results))
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
     """Индивидуальный обработчик сообщений для одной доски."""
