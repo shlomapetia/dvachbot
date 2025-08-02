@@ -1545,14 +1545,9 @@ async def send_message_to_users(
         elif 'caption' in modified_content and modified_content['caption']: modified_content['caption'] += phrase
 
     blocked_users = set()
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Преобразуем множество в список, чтобы гарантировать одинаковый порядок
-    # при создании задач и обработке результатов.
-    active_recipients_list = [uid for uid in recipients if uid not in b_data['users']['banned']]
-    if not active_recipients_list:
+    active_recipients = {uid for uid in recipients if uid not in b_data['users']['banned']}
+    if not active_recipients:
         return []
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
 
     async def really_send(uid: int, reply_to: int | None):
         # Переменные, которые могут понадобиться в блоке except, определяются здесь
@@ -1655,20 +1650,24 @@ async def send_message_to_users(
             return None
 
     semaphore = asyncio.Semaphore(100)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Внутренняя функция теперь возвращает кортеж (ID, результат),
+    # чтобы надежно связать результат с получателем.
     async def send_with_semaphore(uid):
         async with semaphore:
             reply_to = reply_info.get(uid) if reply_info else None
-            return await really_send(uid, reply_to)
+            result = await really_send(uid, reply_to)
+            return (uid, result)
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Используем упорядоченный список для создания задач
-    tasks = [send_with_semaphore(uid) for uid in active_recipients_list]
+    # Создаем задачи на отправку
+    tasks = [send_with_semaphore(uid) for uid in active_recipients]
+    # `results` теперь будет списком кортежей: [(uid1, msg1), (uid2, None), ...]
     results = await asyncio.gather(*tasks)
 
+    # Обрабатываем результаты, итерируя по списку кортежей. `zip` больше не нужен.
     if content.get('post_num'):
         post_num = content['post_num']
-        # Используем тот же упорядоченный список для сопоставления результатов
-        for uid, msg in zip(active_recipients_list, results):
+        for uid, msg in results:
             if not msg: continue
             messages_to_save = msg if isinstance(msg, list) else [msg]
             for m in messages_to_save:
@@ -1681,8 +1680,8 @@ async def send_message_to_users(
                 b_data['users']['active'].discard(uid)
                 print(f"🚫 [{board_id}] Пользователь {uid} заблокировал бота, удален из активных")
 
-    # Используем тот же упорядоченный список для возврата результатов
-    return list(zip(active_recipients_list, results))
+    # Возвращаем список кортежей, который уже содержит и ID, и результат.
+    return results
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
