@@ -1682,6 +1682,14 @@ async def send_message_to_users(
     return results
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
+async def message_broadcaster(bots: dict[str, Bot]):
+    """Обработчик очереди сообщений с воркерами для каждой доски."""
+    tasks = [
+        asyncio.create_task(message_worker(f"Worker-{board_id}", board_id, bot_instance))
+        for board_id, bot_instance in bots.items()
+    ]
+    await asyncio.gather(*tasks)
+
 async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
     """Индивидуальный обработчик сообщений для одной доски."""
     queue = message_queues[board_id]
