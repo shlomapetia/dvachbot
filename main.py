@@ -1648,22 +1648,28 @@ async def send_message_to_users(
             return None
 
     semaphore = asyncio.Semaphore(100)
+
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     # Внутренняя функция теперь возвращает кортеж (ID, результат),
     # чтобы надежно связать результат с получателем.
-       async def send_with_semaphore(uid):
+    async def send_with_semaphore(uid):
         async with semaphore:
             reply_to = None
             if reply_info and isinstance(reply_info, dict):
                 reply_to = reply_info.get(uid)
+            
             # Если это автор, а reply_info пустое — пробуем найти его message_id напрямую
             if reply_to is None and content.get("reply_to_post"):
                 original_post = content["reply_to_post"]
-                author_mid = post_to_messages.get(original_post, {}).get(uid)
-                if author_mid:
-                    reply_to = author_mid
+                # Убедимся, что post_to_messages и вложенный словарь существуют
+                if original_post in post_to_messages and isinstance(post_to_messages[original_post], dict):
+                    author_mid = post_to_messages[original_post].get(uid)
+                    if author_mid:
+                        reply_to = author_mid
+            
             result = await really_send(uid, reply_to)
             return (uid, result)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     # Создаем задачи на отправку
     tasks = [send_with_semaphore(uid) for uid in active_recipients]
@@ -1688,7 +1694,6 @@ async def send_message_to_users(
 
     # Возвращаем список кортежей, который уже содержит и ID, и результат.
     return results
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 async def message_broadcaster(bots: dict[str, Bot]):
     """Обработчик очереди сообщений с воркерами для каждой доски."""
