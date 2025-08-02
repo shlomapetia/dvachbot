@@ -1481,34 +1481,35 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
 async def _format_message_body(content: dict, user_id_for_context: int) -> str:
     """
     Формирует и форматирует тело сообщения (reply, greentext, (You)).
-    Вынесено в отдельную функцию для переиспользования.
+    Эта версия разделяет обработку ответа и основного текста для надежности.
     
     :param content: Словарь с данными поста ('reply_to_post', 'text', 'caption').
     :param user_id_for_context: ID пользователя, для которого форматируется сообщение (для '(You)').
     :return: Готовая к отправке HTML-форматированная строка.
     """
+    parts = []
     reply_to_post = content.get('reply_to_post')
     
-    # 1. Формируем сырой текст ответа (reply) и основной текст (caption/text).
-    reply_text_raw = ""
+    # 1. Формируем и форматируем блок ответа (если он есть)
     if reply_to_post:
         original_author = messages_storage.get(reply_to_post, {}).get('author_id')
-        # Добавляем (You) к ответу, если пользователь отвечает на свой же пост.
         you_marker = " (You)" if user_id_for_context == original_author else ""
-        reply_text_raw = f">>{reply_to_post}{you_marker}\n"
+        reply_line = f">>{reply_to_post}{you_marker}"
+        # Ответ всегда форматируется как greentext (в теге code)
+        formatted_reply_line = f"<code>{escape_html(reply_line)}</code>"
+        parts.append(formatted_reply_line)
 
+    # 2. Формируем и форматируем основной текст сообщения
     main_text_raw = content.get('text') or content.get('caption') or ''
-    
-    # 2. Объединяем их, чтобы обработать как единое целое.
-    combined_raw_text = reply_text_raw + main_text_raw
-    
-    # 3. Добавляем "(You)" к упоминаниям своих постов в основном тексте.
-    combined_text_with_you = add_you_to_my_posts(combined_raw_text, user_id_for_context)
-
-    # 4. Применяем Greentext и экранирование ко ВСЕМУ тексту сообщения.
-    formatted_body = apply_greentext_formatting(combined_text_with_you)
-    
-    return formatted_body
+    if main_text_raw:
+        # Сначала добавляем (You) к упоминаниям в тексте
+        text_with_you = add_you_to_my_posts(main_text_raw, user_id_for_context)
+        # Затем применяем greentext-форматирование к этому тексту
+        formatted_main_text = apply_greentext_formatting(text_with_you)
+        parts.append(formatted_main_text)
+        
+    # 3. Объединяем части. Используем один \n, чтобы ответ был плотнее к тексту.
+    return '\n'.join(parts)
 
 async def send_message_to_users(
     bot_instance: Bot,
@@ -1930,7 +1931,7 @@ async def motivation_broadcaster():
                 weekday = WEEKDAYS[now.weekday()]
                 time_str = now.strftime("%H:%M:%S")
                 
-                header = f"<i>### АДМИН ### {date_str} ({weekday}) {time_str}</i>"
+                header = f"### АДМИН ### {date_str} ({weekday}) {time_str}"
                 # Используем общую функцию format_header для инкремента счетчика
                 _, post_num = await format_header(board_id)
 
