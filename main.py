@@ -1651,9 +1651,17 @@ async def send_message_to_users(
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     # Внутренняя функция теперь возвращает кортеж (ID, результат),
     # чтобы надежно связать результат с получателем.
-    async def send_with_semaphore(uid):
+       async def send_with_semaphore(uid):
         async with semaphore:
-            reply_to = reply_info.get(uid) if reply_info else None
+            reply_to = None
+            if reply_info and isinstance(reply_info, dict):
+                reply_to = reply_info.get(uid)
+            # Если это автор, а reply_info пустое — пробуем найти его message_id напрямую
+            if reply_to is None and content.get("reply_to_post"):
+                original_post = content["reply_to_post"]
+                author_mid = post_to_messages.get(original_post, {}).get(uid)
+                if author_mid:
+                    reply_to = author_mid
             result = await really_send(uid, reply_to)
             return (uid, result)
 
