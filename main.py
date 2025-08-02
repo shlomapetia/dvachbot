@@ -3582,7 +3582,13 @@ async def handle_message(message: Message):
                 sent_to_author = results[0][1]
                 messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
                 for m in messages_to_save:
+                    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+                    # Сохраняем не только author_message_id, но и создаем запись в словарях
+                    # для корректной работы будущих ответов.
                     messages_storage[current_post_num]['author_message_id'] = m.message_id
+                    post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
+                    message_to_post[(user_id, m.message_id)] = current_post_num
+                    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         except TelegramForbiddenError:
             b_data['users']['active'].discard(user_id)
             print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из handle_message).")
