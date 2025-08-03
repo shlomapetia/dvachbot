@@ -86,8 +86,18 @@ BOARD_CONFIG = {
         "username": "@dvach_vg_chatbot",
         "token": os.getenv("VG_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("VG_ADMINS", "").split(",") if x}
+    },
+    # --- ДОБАВЬТЕ ЭТОТ БЛОК ---
+    'int': {
+        "name": "/int/",
+        "description": "INTERNATIONAL (🇬🇧🇺🇸🇨🇳🇮🇳🇪🇺)",
+        "username": "@tgchan_chatbot",
+        "token": os.getenv("INT_BOT_TOKEN"),
+        "admins": {int(x) for x in os.getenv("INT_ADMINS", "").split(",") if x}
     }
+    # --------------------------
 }
+
 
 # Извлекаем список ID досок для удобства
 BOARDS = list(BOARD_CONFIG.keys())
@@ -484,6 +494,17 @@ MOTIVATIONAL_MESSAGES = [
     "Пора бы пропиарить тгач. Эй уёбок, разошли в свои конфы",
 ]
 
+MOTIVATIONAL_MESSAGES_EN = [
+    "The more anons, the more epic the threads",
+    "One anon is no anon. Call your bros",
+    "More anons = more lulz",
+    "Your friend still using Telegram like a normie? Fix it",
+    "Every anon you invite = -1 normie in the world",
+    "Wanna make this chat great? Invite new anons",
+    "More anons means less chance the thread will die",
+    "Bring a friend - get a double dose of lulz"
+]
+
 # Тексты для копирования
 INVITE_TEXTS = [
     "Анон, залетай в Тгач @dvach_chatbot\nТут можно постить что угодно анонимно",
@@ -501,6 +522,14 @@ INVITE_TEXTS = [
     "Добро пожаловать. Снова. @dvach_chatbot",
     "Привет, анон. Ты не один. Зови друзей. @dvach_chatbot",
     "Тгач - двач в телеге @dvach_chatbot",
+]
+
+INVITE_TEXTS_EN = [
+    "Anon, join TGACH @tgchan_chatbot\nYou can post anything anonymously here",
+    "Got Telegram? Wanna post anonymously?\n@tgchan_chatbot - welcome aboard",
+    "Tired of censorship? Want anonymity?\nWelcome to TGACH - @tgchan_chatbot - the real chan experience in Telegram",
+    "@tgchan_chatbot - anonymous chat in Telegram\nNo registration, no SMS",
+    "TGACH: @tgchan_chatbot\nSay what you think, no one will know who you are"
 ]
 
 # Для /suka_blyat
@@ -589,6 +618,25 @@ def is_admin(uid: int, board_id: str) -> bool:
     if not board_id:
         return False
     return uid in BOARD_CONFIG.get(board_id, {}).get('admins', set())
+
+def get_board_activity_last_hours(board_id: str, hours: int = 2) -> float:
+    """Подсчитывает среднее количество постов в час для указанной доски за последние N часов."""
+    if hours <= 0:
+        return 0.0
+
+    now = datetime.now(UTC)
+    time_threshold = now - timedelta(hours=hours)
+    post_count = 0
+
+    # Проходим по всем сообщениям в памяти
+    for post_data in messages_storage.values():
+        # Проверяем, что пост принадлежит нужной доске и создан в рамках временного окна
+        if post_data.get('board_id') == board_id and post_data.get('timestamp', now) > time_threshold:
+            post_count += 1
+
+    # Считаем среднюю активность (постов в час)
+    activity = post_count / hours
+    return activity
     
 def _sync_save_board_state(board_id: str):
     """Синхронная, блокирующая функция для сохранения state.json."""
@@ -974,80 +1022,62 @@ async def auto_memory_cleaner():
 
 async def board_statistics_broadcaster():
     """Раз в час собирает общую статистику и рассылает на каждую доску."""
-    await asyncio.sleep(300)  # Начальная задержка 5 минут
+    await asyncio.sleep(300)
 
     while True:
         try:
-            await asyncio.sleep(3600)  # Выполняется раз в час
+            await asyncio.sleep(3600)
 
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-            # 1. Сбор статистики по постам за последний час
             now = datetime.now(UTC)
             hour_ago = now - timedelta(hours=1)
             
-            # Структура для хранения почасовой статистики
             posts_per_hour = defaultdict(int)
-
             for post_data in messages_storage.values():
                 b_id = post_data.get('board_id')
                 if b_id and post_data.get('timestamp', now) > hour_ago:
                     posts_per_hour[b_id] += 1
             
-            # 2. Формирование единого текста сообщения
-            stats_lines = []
-            for b_id, config in BOARD_CONFIG.items():
-                # Берем почасовую статистику из посчитанного
-                hour_stat = posts_per_hour[b_id]
-                # Берем ОБЩУЮ статистику из надежного счетчика доски
-                total_stat = board_data[b_id].get('board_post_count', 0)
-                
-                stats_lines.append(
-                    f"<b>{config['name']}</b> - {hour_stat} пст/час, всего: {total_stat}"
-                )
-            full_stats_text = "📊 Статистика досок:\n" + "\n".join(stats_lines)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-            # 3. Рассылка готового сообщения по очередям всех досок
-            header = "### Статистика ###"
+            # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+            # Переносим формирование текста внутрь цикла рассылки
             for board_id in BOARDS:
+                activity = get_board_activity_last_hours(board_id, hours=2)
+                if activity < 20:
+                    print(f"ℹ️ [{board_id}] Пропуск отправки статистики, активность слишком низкая: {activity:.1f} п/ч (требуется > 20).")
+                    continue
+
                 b_data = board_data[board_id]
                 recipients = b_data['users']['active'] - b_data['users']['banned']
-
                 if not recipients:
                     continue
 
+                # Формируем локализованный текст
+                stats_lines = []
+                for b_id_inner, config_inner in BOARD_CONFIG.items():
+                    hour_stat = posts_per_hour[b_id_inner]
+                    total_stat = board_data[b_id_inner].get('board_post_count', 0)
+                    
+                    line_template = f"<b>{config_inner['name']}</b> - {hour_stat} pst/hr, total: {total_stat}" \
+                                    if board_id == 'int' \
+                                    else f"<b>{config_inner['name']}</b> - {hour_stat} пст/час, всего: {total_stat}"
+                    stats_lines.append(line_template)
+                
+                header_text = "📊 Boards Statistics:\n" if board_id == 'int' else "📊 Статистика досок:\n"
+                full_stats_text = header_text + "\n".join(stats_lines)
+                header = "### Statistics ###" if board_id == 'int' else "### Статистика ###"
+
                 _, post_num = await format_header(board_id)
-                content = {
-                    "type": "text",
-                    "header": header,
-                    "text": full_stats_text,
-                    "is_system_message": True
-                }
+                content = {"type": "text", "header": header, "text": full_stats_text, "is_system_message": True}
                 
-                # --- НАЧАЛО ИЗМЕНЕНИЙ: Сохранение поста в хранилище ---
-                # Важно: системное сообщение тоже должно быть в базе
-                messages_storage[post_num] = {
-                    'author_id': 0,
-                    'timestamp': now,
-                    'content': content,
-                    'board_id': board_id
-                }
-                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                messages_storage[post_num] = {'author_id': 0, 'timestamp': now, 'content': content, 'board_id': board_id}
                 
-                # Постановка в очередь
-                await message_queues[board_id].put({
-                    "recipients": recipients,
-                    "content": content,
-                    "post_num": post_num,
-                    "board_id": board_id
-                })
+                await message_queues[board_id].put({"recipients": recipients, "content": content, "post_num": post_num, "board_id": board_id})
                 
                 print(f"✅ [{board_id}] Статистика досок #{post_num} добавлена в очередь.")
 
         except Exception as e:
             print(f"❌ Ошибка в board_statistics_broadcaster: {e}")
             await asyncio.sleep(120)
-    
+            
 async def setup_pinned_messages(bots: dict[str, Bot]):
     """Устанавливает или обновляет закрепленное сообщение для каждого бота."""
     
@@ -1056,24 +1086,29 @@ async def setup_pinned_messages(bots: dict[str, Bot]):
         for config in BOARD_CONFIG.values()
     )
 
-    help_with_boards = (
-        f"{HELP_TEXT}\n\n"
-        f"🌐 <b>Все доски:</b>\n{board_links}"
-    )
-    
+    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
     for board_id, bot_instance in bots.items():
-        # Получаем список активных пользователей для этой доски
         b_data = board_data[board_id]
-        # Мы не можем просто закрепить сообщение в личке,
-        # поэтому мы будем отправлять его каждому активному пользователю
-        # при старте и при команде /start
         
-        # Вместо настоящего "закрепа", мы сохраним этот текст
-        # для использования в команде /start
-        b_data['start_message_text'] = help_with_boards
+        # Выбираем правильный текст помощи в зависимости от доски
+        if board_id == 'int':
+            base_help_text = HELP_TEXT_EN
+            boards_header = "🌐 <b>All boards:</b>"
+        else:
+            base_help_text = HELP_TEXT
+            boards_header = "🌐 <b>Все доски:</b>"
+            
+        # Собираем финальное сообщение
+        full_help_text = (
+            f"{base_help_text}\n\n"
+            f"{boards_header}\n{board_links}"
+        )
+        
+        # Сохраняем готовый текст для использования в /start и /help
+        b_data['start_message_text'] = full_help_text
         
         print(f"📌 [{board_id}] Текст для команды /start и закрепа подготовлен.")
-
+        
 async def check_spam(user_id: int, msg: Message, board_id: str) -> bool:
     """Проверяет спам с прогрессивным наказанием и сбросом уровня (с поддержкой досок)"""
     b_data = board_data[board_id]
@@ -1181,18 +1216,24 @@ async def apply_penalty(bot_instance: Bot, user_id: int, msg_type: str, board_id
             time_str = f"{mute_seconds // 60} мин"
         else:
             time_str = f"{mute_seconds // 3600} час"
-        
-        # Используем переданный экземпляр бота
-        await bot_instance.send_message(
-            user_id,
-            f"🚫 Эй пидор ты в муте на {time_str} за {violation_type} на доске {BOARD_CONFIG[board_id]['name']}\n"
-            f"Спамишь дальше - получишь бан",
-            parse_mode="HTML")
+
+        # ИЗМЕНИТЕ ЭТОТ БЛОК
+        if board_id == 'int':
+            violation_type_en = {'text': "text spam", 'sticker': "sticker spam", 'animation': "gif spam"}.get(msg_type, "spam")
+            notification_text = (f"🚫 Hey faggot, you are muted for {time_str} for {violation_type_en} on the {BOARD_CONFIG[board_id]['name']} board.\n"
+                                 f"Keep spamming - get banned.")
+        else:
+            notification_text = (f"🚫 Эй пидор ты в муте на {time_str} за {violation_type} на доске {BOARD_CONFIG[board_id]['name']}\n"
+                                 f"Спамишь дальше - получишь бан")
+
+        await bot_instance.send_message(user_id, notification_text, parse_mode="HTML")
         
         # Передаем bot_instance в send_moderation_notice (потребует адаптации на след. шагах)
         await send_moderation_notice(user_id, "mute", board_id, duration=time_str)
     except Exception as e:
         print(f"Ошибка отправки уведомления о муте: {e}")
+
+# main.py
 
 async def format_header(board_id: str) -> Tuple[str, int]:
     """Асинхронное форматирование заголовка с блокировкой для безопасного инкремента счетчика постов."""
@@ -1200,12 +1241,29 @@ async def format_header(board_id: str) -> Tuple[str, int]:
         state['post_counter'] += 1
         post_num = state['post_counter']
         
-        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-        # Инкрементируем счетчик постов для конкретной доски
-        # Это обеспечивает актуальность счетчика в памяти в реальном времени
         board_data[board_id].setdefault('board_post_count', 0)
         board_data[board_id]['board_post_count'] += 1
     
+    # --- БЛОК ДЛЯ /int/ ---
+    if board_id == 'int':
+        circle = ""
+        rand_circle = random.random()
+        if rand_circle < 0.003: circle = "🔴 "
+        elif rand_circle < 0.006: circle = "🟢 "
+        
+        prefix = ""
+        rand_prefix = random.random()
+        if rand_prefix < 0.005: prefix = "### ADMIN ### "
+        elif rand_prefix < 0.008: prefix = "Me - "
+        elif rand_prefix < 0.01: prefix = "Faggot - "
+        elif rand_prefix < 0.012: prefix = "### DEGENERATE ### "
+        elif rand_prefix < 0.016: prefix = "Biden - "
+        elif rand_prefix < 0.021: prefix = "EMPEROR CONAN - "
+            
+        header_text = f"{circle}{prefix}Post No.{post_num}"
+        return header_text, post_num
+    # --- КОНЕЦ БЛОКА ДЛЯ /int/ ---
+
     b_data = board_data[board_id]
 
     # Режим /slavaukraine
@@ -1746,6 +1804,76 @@ async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
             print(f"{worker_name} | ⛔ Критическая ошибка: {str(e)[:200]}")
             await asyncio.sleep(1)
             
+async def motivation_broadcaster():
+    """Отправляет мотивационные сообщения на каждую доску в разное время."""
+    await asyncio.sleep(15)  # Начальная задержка
+
+    async def board_motivation_worker(board_id: str):
+        """Индивидуальный воркер для одной доски."""
+        while True:
+            try:
+                # Случайная задержка от 2 до 4 часов
+                delay = random.randint(7200, 14400)
+                await asyncio.sleep(delay)
+
+                # --- ДОБАВЛЕНА ПРОВЕРКА АКТИВНОСТИ ---
+                activity = get_board_activity_last_hours(board_id, hours=2)
+                if activity < 60:
+                    print(f"ℹ️ [{board_id}] Пропуск мотивационного сообщения, активность слишком низкая: {activity:.1f} п/ч (требуется > 60).")
+                    continue
+                # --- КОНЕЦ ПРОВЕРКИ ---
+
+                b_data = board_data[board_id]
+                recipients = b_data['users']['active'] - b_data['users']['banned']
+
+                if not recipients:
+                    continue
+                
+                # Код ниже остается без изменений...
+                header, post_num = await format_header(board_id)
+                
+                if board_id == 'int':
+                    motivation = random.choice(MOTIVATIONAL_MESSAGES_EN)
+                    invite_text = random.choice(INVITE_TEXTS_EN)
+                    message_text = (
+                        f"💭 {motivation}\n\n"
+                        f"Copy and send to anons:\n"
+                        f"<code>{escape_html(invite_text)}</code>"
+                    )
+                else:
+                    motivation = random.choice(MOTIVATIONAL_MESSAGES)
+                    invite_text = random.choice(INVITE_TEXTS)
+                    header = f"### АДМИН ### "
+                    message_text = (
+                        f"💭 {motivation}\n\n"
+                        f"Скопируй и отправь анончикам:\n"
+                        f"<code>{escape_html(invite_text)}</code>"
+                    )
+
+                content = {
+                    'type': 'text', 'header': header, 'text': message_text,
+                    'is_system_message': True
+                }
+
+                await message_queues[board_id].put({
+                    'recipients': recipients, 'content': content,
+                    'post_num': post_num, 'reply_info': None, 'board_id': board_id
+                })
+
+                messages_storage[post_num] = {
+                    'author_id': 0, 'timestamp': datetime.now(UTC),
+                    'content': content, 'board_id': board_id
+                }
+
+                print(f"✅ [{board_id}] Мотивационное сообщение #{post_num} добавлено в очередь")
+
+            except Exception as e:
+                print(f"❌ [{board_id}] Ошибка в motivation_broadcaster: {e}")
+                await asyncio.sleep(120)
+
+    tasks = [asyncio.create_task(board_motivation_worker(bid)) for bid in BOARDS]
+    await asyncio.gather(*tasks)
+            
 async def validate_message_format(msg_data: dict) -> bool:
     """Быстрая валидация формата сообщения"""
     if not isinstance(msg_data, dict):
@@ -1924,76 +2052,7 @@ async def dvach_thread_poster():
             print(f"❌ Ошибка в dvach_thread_poster: {e}")
             await asyncio.sleep(300) # Ждем 5 минут при ошибке
 
-async def motivation_broadcaster():
-    """Отправляет мотивационные сообщения на каждую доску в разное время."""
-    await asyncio.sleep(15)  # Начальная задержка
 
-    async def board_motivation_worker(board_id: str):
-        """Индивидуальный воркер для одной доски."""
-        while True:
-            try:
-                # Случайная задержка от 2 до 4 часов
-                delay = random.randint(7200, 14400)
-                await asyncio.sleep(delay)
-                
-                b_data = board_data[board_id]
-                recipients = b_data['users']['active'] - b_data['users']['banned']
-
-                if not recipients:
-                    # print(f"ℹ️ [{board_id}] Нет активных пользователей для мотивационного сообщения")
-                    continue
-
-                motivation = random.choice(MOTIVATIONAL_MESSAGES)
-                invite_text = random.choice(INVITE_TEXTS)
-
-                now = datetime.now(MSK)
-                date_str = now.strftime("%d/%m/%y")
-                weekday = WEEKDAYS[now.weekday()]
-                time_str = now.strftime("%H:%M:%S")
-                
-                header = f"### АДМИН ### {date_str} ({weekday}) {time_str}"
-                # Используем общую функцию format_header для инкремента счетчика
-                _, post_num = await format_header(board_id)
-
-                message_text = (
-                    f"💭 {motivation}\n\n"
-                    f"Скопируй и отправь анончикам:\n"
-                    f"<code>{escape_html(invite_text)}</code>"
-                )
-
-                content = {
-                    'type': 'text',
-                    'header': header,
-                    'text': message_text,
-                    'is_system_message': True # Флаг для особых сообщений
-                }
-
-                # Добавляем в очередь рассылки для конкретной доски
-                await message_queues[board_id].put({
-                    'recipients': recipients,
-                    'content': content,
-                    'post_num': post_num,
-                    'reply_info': None,
-                    'board_id': board_id
-                })
-
-                # Сохраняем системное сообщение в общем хранилище
-                messages_storage[post_num] = {
-                    'author_id': 0,
-                    'timestamp': datetime.now(UTC),
-                    'content': content,
-                    'board_id': board_id
-                }
-
-                print(f"✅ [{board_id}] Мотивационное сообщение #{post_num} добавлено в очередь")
-
-            except Exception as e:
-                print(f"❌ [{board_id}] Ошибка в motivation_broadcaster: {e}")
-                await asyncio.sleep(120)  # Ждем 2 минуты при ошибке
-
-    # Запускаем по одному воркеру на каждую доску
-    tasks = [asyncio.create_task(board_motivation_worker(bid)) for bid in BOARDS]
-    await asyncio.gather(*tasks)
     
 async def check_cooldown(message: Message, board_id: str) -> bool:
     """Проверяет кулдаун на активацию режимов для конкретной доски"""
@@ -2121,7 +2180,13 @@ async def cmd_roll(message: types.Message):
 async def cmd_slavaukraine(message: types.Message):
     board_id = get_board_id(message)
     if not board_id: return
-
+    # --- ДОБАВЬТЕ ЭТОТ БЛОК ---
+    if board_id == 'int':
+        try:
+            await message.delete()
+        except Exception: pass
+        return
+    # --------------------------
     b_data = board_data[board_id]
 
     if not await check_cooldown(message, board_id):
@@ -2267,12 +2332,20 @@ async def cmd_stats(message: types.Message):
     # Получаем общее количество уникальных пользователей с доски 'b'
     total_users_b = len(board_data['b']['users']['active'])
 
-    stats_text = (f"📊 Статистика доски {BOARD_CONFIG[board_id]['name']}:\n\n"
-                  f"👥 Анонимов на доске: {total_users_on_board}\n"
-                  f"👥 Всего анонов в Тгаче: {total_users_b}\n"
-                  f"📨 Постов на доске: {total_posts_on_board}\n"
-                  f"📈 Всего постов в тгаче: {state['post_counter']}")
-
+    # ИЗМЕНИТЕ ЭТОТ БЛОК
+    if board_id == 'int':
+        stats_text = (f"📊 Board Statistics {BOARD_CONFIG[board_id]['name']}:\n\n"
+                      f"👥 Anons on this board: {total_users_on_board}\n"
+                      f"👥 Total anons in TGACH: {total_users_b}\n"
+                      f"📨 Posts on this board: {total_posts_on_board}\n"
+                      f"📈 Total posts in TGACH: {state['post_counter']}")
+    else:
+        stats_text = (f"📊 Статистика доски {BOARD_CONFIG[board_id]['name']}:\n\n"
+                      f"👥 Анонимов на доске: {total_users_on_board}\n"
+                      f"👥 Всего анонов в Тгаче: {total_users_b}\n"
+                      f"📨 Постов на доске: {total_posts_on_board}\n"
+                      f"📈 Всего постов в тгаче: {state['post_counter']}")
+        
     header, pnum = await format_header(board_id)
     content = {'type': 'text', 'header': header, 'text': stats_text}
     
@@ -2370,56 +2443,68 @@ async def disable_anime_mode(delay: int, board_id: str):
     })
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
+
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: Message):
     board_id = get_board_id(message)
     if not board_id: return
     
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ: Локализация ответов и вызова ---
+    lang = 'en' if board_id == 'int' else 'ru'
+
     if not message.reply_to_message:
-        await message.answer("⚠️ Ответь на сообщение для деанона!")
+        reply_text = "⚠️ Reply to a message to de-anonymize!" if lang == 'en' else "⚠️ Ответь на сообщение для деанона!"
+        await message.answer(reply_text)
         await message.delete()
         return
 
-    # Находим номер поста, на который ответил пользователь
     target_mid = message.reply_to_message.message_id
     user_id = message.from_user.id
     target_post = message_to_post.get((user_id, target_mid))
 
     if not target_post or target_post not in messages_storage:
-        await message.answer("🚫 Не удалось найти пост для деанона (возможно, вы ответили на чужую копию или старое сообщение).")
+        reply_text = "🚫 Could not find the post to de-anonymize (you might have replied to someone else's copy or an old message)." if lang == 'en' else "🚫 Не удалось найти пост для деанона (возможно, вы ответили на чужую копию или старое сообщение)."
+        await message.answer(reply_text)
         await message.delete()
         return
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка на системное сообщение ---
-    # Получаем ID автора оригинального поста
     original_author_id = messages_storage[target_post].get('author_id')
-
-    # Запрещаем деанонить системные сообщения (у которых автор 0)
     if original_author_id == 0:
-        await message.answer("⚠️ Нельзя деанонимизировать системные сообщения.")
+        reply_text = "⚠️ System messages cannot be de-anonymized." if lang == 'en' else "⚠️ Нельзя деанонимизировать системные сообщения."
+        await message.answer(reply_text)
         await message.delete()
         return
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-    name, surname, city, profession, fetish, detail = generate_deanon_info()
+        
+    # Передаем язык в генератор
+    # Убедитесь, что в deanonymizer.py функция generate_deanon_info принимает lang
+    name, surname, city, profession, fetish, detail = generate_deanon_info(lang=lang)
     ip = f"{random.randint(10,250)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
     age = random.randint(18, 45)
     
-    deanon_text = (f"\nЭтого анона зовут: {name} {surname}\n"
-                   f"Возраст: {age}\n"
-                   f"Адрес проживания: {city}\n"
-                   f"Профессия: {profession}\n"
-                   f"Фетиш: {fetish}\n"
-                   f"IP-адрес: {ip}\n"
-                   f"Дополнительная информация о нём: {detail}")
+    if lang == 'en':
+        deanon_text = (f"\nThis anon's name is: {name} {surname}\n"
+                       f"Age: {age}\n"
+                       f"Address: {city}\n"
+                       f"Profession: {profession}\n"
+                       f"Fetish: {fetish}\n"
+                       f"IP address: {ip}\n"
+                       f"Additional info: {detail}")
+        header_text = "### DEANON ###"
+    else:
+        deanon_text = (f"\nЭтого анона зовут: {name} {surname}\n"
+                       f"Возраст: {age}\n"
+                       f"Адрес проживания: {city}\n"
+                       f"Профессия: {profession}\n"
+                       f"Фетиш: {fetish}\n"
+                       f"IP-адрес: {ip}\n"
+                       f"Дополнительная информация о нём: {detail}")
+        header_text = "### ДЕАНОН ###"
 
-    header = "### ДЕАНОН ###"
     _, pnum = await format_header(board_id)
-    content = {"type": "text", "header": header, "text": deanon_text, "reply_to_post": target_post}
+    content = {"type": "text", "header": header_text, "text": deanon_text, "reply_to_post": target_post}
 
     messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
 
-    # Деанон отправляется на ту же доску, где была вызвана команда
     await message_queues[board_id].put({
         "recipients": board_data[board_id]['users']['active'],
         "content": content,
@@ -2434,6 +2519,14 @@ async def cmd_zaputin(message: types.Message):
     board_id = get_board_id(message)
     if not board_id: return
 
+        # --- ДОБАВЬТЕ ЭТОТ БЛОК ---
+    if board_id == 'int':
+        try:
+            await message.delete()
+        except Exception: pass
+        return
+    # --------------------------
+    
     b_data = board_data[board_id]
 
     if not await check_cooldown(message, board_id):
@@ -2513,7 +2606,13 @@ async def disable_zaputin_mode(delay: int, board_id: str):
 async def cmd_suka_blyat(message: types.Message):
     board_id = get_board_id(message)
     if not board_id: return
-
+    # --- ДОБАВЬТЕ ЭТОТ БЛОК ---
+    if board_id == 'int':
+        try:
+            await message.delete()
+        except Exception: pass
+        return
+    # --------------------------
     b_data = board_data[board_id]
 
     if not await check_cooldown(message, board_id):
@@ -3474,12 +3573,17 @@ async def handle_message(message: Message):
         if mute_until and mute_until > datetime.now(UTC):
             left = mute_until - datetime.now(UTC)
             await message.delete()
-            await message.bot.send_message(
-                user_id, 
-                f"🔇 Эй пидор, ты в муте на доске {BOARD_CONFIG[board_id]['name']} ещё {int(left.total_seconds() // 60)}м {int(left.total_seconds() % 60)}с",
-                parse_mode="HTML"
-            )
+            
+            if board_id == 'int':
+                time_left_str = f"{int(left.total_seconds() // 60)}m {int(left.total_seconds() % 60)}s"
+                notification_text = f"🔇 Hey faggot, you are still muted on the {BOARD_CONFIG[board_id]['name']} board for {time_left_str}"
+            else:
+                time_left_str = f"{int(left.total_seconds() // 60)}м {int(left.total_seconds() % 60)}с"
+                notification_text = f"🔇 Эй пидор, ты в муте на доске {BOARD_CONFIG[board_id]['name']} ещё {time_left_str}"
+            
+            await message.bot.send_message(user_id, notification_text, parse_mode="HTML")
             return
+            
         elif mute_until: # Если мут истек, удаляем его
              b_data['mutes'].pop(user_id, None)
 
@@ -3618,7 +3722,6 @@ async def start_background_tasks(bots: dict[str, Bot]):
     """Поднимаем все фоновые корутины ОДИН раз за весь runtime"""
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     # Локальный импорт для разрыва цикла зависимостей, который вызывает NameError
-    from help_broadcaster import help_broadcaster
     from conan import conan_roaster
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
@@ -3631,7 +3734,6 @@ async def start_background_tasks(bots: dict[str, Bot]):
         )),
         asyncio.create_task(motivation_broadcaster()),
         asyncio.create_task(auto_memory_cleaner()),
-        asyncio.create_task(help_broadcaster()),
         asyncio.create_task(board_statistics_broadcaster()),
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
