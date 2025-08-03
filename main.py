@@ -1471,14 +1471,26 @@ async def send_moderation_notice(user_id: int, action: str, board_id: str, durat
 
 async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     """
-    Централизованно применяет все трансформации режимов (аниме, и т.д.)
-    к полям 'text' и 'caption' в словаре content.
+    Централизованно применяет все трансформации режимов.
     """
     b_data = board_data[board_id]
     modified_content = content.copy()
 
-    # Текст уже безопасен, т.к. handle_message передает message.text
-    # Просто применяем трансформации
+    is_transform_mode_active = (
+        b_data['anime_mode'] or b_data['slavaukraine_mode'] or
+        b_data['zaputin_mode'] or b_data['suka_blyat_mode']
+    )
+
+    if not is_transform_mode_active:
+        return modified_content # Если режимов нет, ничего не делаем
+
+    # Если режим активен, принудительно очищаем HTML перед трансформацией
+    if 'text' in modified_content and modified_content['text']:
+        modified_content['text'] = clean_html_tags(modified_content['text'])
+    if 'caption' in modified_content and modified_content['caption']:
+        modified_content['caption'] = clean_html_tags(modified_content['caption'])
+
+    # Теперь применяем трансформации к чистому тексту
     if b_data['anime_mode']:
         if 'text' in modified_content and modified_content['text']:
             modified_content['text'] = anime_transform(modified_content['text'])
@@ -3697,19 +3709,8 @@ async def handle_message(message: Message):
             text_for_corpus = message.caption
             file_id_obj = getattr(message, message.content_type, [])
             if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
-            
-            # --- ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-            caption_to_process = ""
-            if is_transform_mode_active:
-                # Для режимов всегда берем чистый текст, если он есть
-                caption_to_process = message.caption or ""
-            else:
-                # Для обычного режима безопасно проверяем наличие html_text,
-                # и если его нет - берем обычный текст
-                caption_to_process = getattr(message, 'caption_html_text', message.caption or "")
-
+            caption_to_process = message.caption or "" if is_transform_mode_active else getattr(message, 'caption_html_text', message.caption or "")
             content.update({'file_id': file_id_obj.file_id, 'caption': caption_to_process})
-            # --- КОНЕЦ ФИНАЛЬНОГО ИСПРАВЛЕНИЯ ---
         
         elif message.content_type in ['sticker', 'voice', 'video_note']:
             file_id_obj = getattr(message, message.content_type)
