@@ -47,7 +47,7 @@ from ukrainian_mode import ukrainian_transform, UKRAINIAN_PHRASES
 import deanonymizer 
 from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES 
 from deanonymizer import DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS, generate_deanon_info
-from help_text import HELP_TEXT
+from help_text import HELP_TEXT, HELP_TEXT_EN
 
 # ========== Глобальные настройки досок ==========
 # Вставляем новую конфигурационную структуру
