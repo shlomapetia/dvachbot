@@ -1477,10 +1477,8 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     b_data = board_data[board_id]
     modified_content = content.copy()
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Проверяем, активен ли какой-либо режим, трансформирующий текст.
-    # Если да, то мы ОБЯЗАНЫ очистить текст от HTML-тегов, чтобы избежать ошибок парсинга.
-    # Приоритет режима > приоритета пользовательского форматирования.
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+    # Проверяем, активен ли какой-либо режим, который трансформирует текст.
     is_transform_mode_active = (
         b_data['anime_mode'] or
         b_data['slavaukraine_mode'] or
@@ -1488,21 +1486,23 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
         b_data['suka_blyat_mode']
     )
 
+    # Если да, то мы ОБЯЗАНЫ очистить текст от любого пользовательского HTML,
+    # чтобы избежать ошибок парсинга после нашей трансформации.
     if is_transform_mode_active:
         if 'text' in modified_content and modified_content['text']:
             modified_content['text'] = clean_html_tags(modified_content['text'])
         if 'caption' in modified_content and modified_content['caption']:
             modified_content['caption'] = clean_html_tags(modified_content['caption'])
+    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
-    # Теперь, когда текст гарантированно чистый (если нужно), применяем трансформации.
+
+    # Теперь, когда текст гарантированно чистый (если это было необходимо), применяем трансформации.
     if b_data['anime_mode']:
-        # 1a. Преобразование текста в японский стиль
         if 'text' in modified_content and modified_content['text']:
             modified_content['text'] = anime_transform(modified_content['text'])
         if 'caption' in modified_content and modified_content['caption']:
             modified_content['caption'] = anime_transform(modified_content['caption'])
         
-        # 1b. Добавление случайного изображения к ТЕКСТОВЫМ постам.
         if modified_content.get('type') == 'text' and random.random() < 0.41:
             anime_img_url = await get_random_anime_image()
             if anime_img_url:
@@ -1537,7 +1537,6 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
             for i in range(len(words)):
                 if random.random() < 0.3: words[i] = random.choice(MAT_WORDS)
             modified_content['caption'] = ' '.join(words)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     return modified_content
 
