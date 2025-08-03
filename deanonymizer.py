@@ -142,38 +142,105 @@ DEANON_DETAILS = [
     "он трогает себя, пока никто не видит"
 ]
 
+# --- ENGLISH LISTS ---
+DEANON_NAMES_EN = ["John", "Michael", "David", "Chris", "Mike", "James", "Robert", "William", "Richard", "Eugene", "Walter", "Chad", "Kyle", "Brandon", "Kevin", "Scott", "Peter", "Anonymous", "Abu", "Tyrone", "Jamal", "Bob", "Rick", "Morty", "Homer", "Bartholomew", "Arthur"]
+DEANON_SURNAMES_EN = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Miller", "Davis", "Wilson", "Anderson", "Taylor", "Moore", "Jackson", "White", "Harris", "Martin", "Thompson", "Garcia", "Martinez", "Robinson", "Clark", "Rodriguez", "Lewis", "Lee", "Walker", "Hall", "Allen", "Young", "King", "Wright", "Hill", "Scott", "Green", "Adams", "Baker", "Faggot", "Cuckson", "Biden", "Trump", "Freeman", "Doe"]
+DEANON_CITIES_EN = ["New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia", "San Antonio", "San Diego", "Dallas", "San Jose", "Austin", "Jacksonville", "London", "Birmingham", "Manchester", "Glasgow", "Liverpool", "Bristol", "Sheffield", "Detroit", "Ohio", "Mumbai", "Beijing", "Berlin", "Gary, Indiana", "Compton", "Silent Hill", "Racoon City"]
+DEANON_STREETS_EN = ["Main St", "Elm St", "High St", "Washington St", "Park Ave", "Oak Ave", "Maple St", "2nd St", "3rd St", "Church St", "Broad St", "Center St", "Fake St", "Faggot Alley", "Cuckold Drive", "Retard Rd", "Loser Lane", "Gaylord Ave", "4chan Blvd", "Anon Way"]
+DEANON_PROFESSIONS_EN = ["plumber", "loader", "security guard", "sales manager", "dentist", "mentally ill", "steals grandma's pension", "steals metal", "rubber dildo tester", "electrician", "unemployed", "janitor", "alcoholic", "drug dealer", "call center operator", "fast-food worker", "war veteran", "disabled person", "thief", "pedophile hunter", "handyman", "hikikomori", "NEET", "software developer", "toilet cleaner", "shoplifter at Walmart", "heroin dealer", "Discord mod", "dumpster diver", "bottle collector", "beggar", "pimp", "zoophile", "prostitute", "bot admin", "moderator", "4chan mod", "personal hole of Abu", "CP operator", "vape seller", "gay prostitute", "transgender", "animator", "DJ", "bartender", "faggot-bartender", "barista", "weeb", "artist", "YouTuber"]
+DEANON_FETISHES_EN = ["schoolgirls' feet", "grandmas' panties", "schoolgirls", "scat", "dead pigeons", "expired mayonnaise", "80s porn", "anime girls", "hand-holding", "hugging", "smell of shit", "pustules", "feces", "used tampons", "autofellatio", "college girls", "rape", "sex with sheep", "dried cum", "fisting", "interracial", "interspecies", "zoophilia", "black guys", "girls", "moms", "child porn", "ballbusting", "elderly", "funny pictures", "anal sex", "migrants", "asians", "jews", "african-americans", "Abu's nudes", "hentai", "furry", "shotacon", "lolicon", "watersports", "BDSM", "cuckoldry", "pegging"]
+DEANON_DETAILS_EN = [
+    "hides a criminal past", "sucks off his boss", "pees in the sink", 
+    "is afraid of the dark", "collects dildos", "has 5 criminal records", 
+    "has an expired passport", "hasn't showered in 2 weeks", "got friendzoned by a whore", 
+    "shoplifts at Walmart", "drinks cologne", "rents an apartment from a pedophile", 
+    "likes to eat his own cum", "sleeps at a dumpster", "dreams of becoming Ukrainian", 
+    "is afraid of women", "masturbates to old cartoons", "wears his sister's panties", 
+    "donated to a controversial political figure", "pays for sex with grandmas", "buys fake sneakers", 
+    "participates in dog fights", "drinks piss from a jar", "gave a blowjob to a school bully in 7th grade", 
+    "pissed himself on the subway", "is a faggot", "is a gambling addict", 
+    "wipes his ass with his fingers", "licked a classmate's asshole", "is afraid to take a shit at a friend's house",
+    "sits on a bottle", "son of a whore", "is a completely healthy person", 
+    "is a kind, good person actually", "wouldn't mind sucking someone off", "spent half a year in a mental hospital", 
+    "takes antidepressants", "his grandpa was Ukrainian", "is the developer of this bot", 
+    "loves watching anime", "is a drama queen", "is a war veteran", 
+    "is mentally disabled", "has a 4-inch dick", "is a kind, pleasant person", 
+    "is ashamed of his face", "is ashamed of his voice", "dreams of raping a schoolgirl", 
+    "is a latent faggot", "his father was a foreigner", "is just a beaten-down loser",
+    "feeds his cat viagra", "his mother was raped by migrants on her way home",
+    "sold a kidney for an anime figure collection", "sniffs his fingers after scratching his crotch",
+    "sleeps in his grandmother's coffin", "sniffed his grandmother's panties",
+    "recently wet the bed again", "uses neural networks", 
+    "went bald at 22", "dabbles in drugs from time to time", "lives an ordinary life, nothing remarkable",
+    "works in a freak show", "unironically watches anime",
+    "is locked in the basement by his alcoholic mother", "tried to grope his own mother",
+    "has collected 500 gigabytes of furry porn", "had sex with his stepfather",
+    "believes the Earth is flat", "is an enlightened one",
+    "spends his salary on prostitutes", "is a real autist",
+    "spends his salary on anime merch", "is a disgrace to his family, everyone hates him",
+    "is a gambling addict", "has a criminal record", "spent 4 years in prison", 
+    "has suicidal tendencies", "is registered at a psychiatric clinic",
+    "lives in a piss-stained apartment building", "had one testicle removed after a torsion",
+    "visited 4chan for the first time in 2023"
+]
 
-def generate_deanon_info() -> Tuple[str, str, str, str, str, str]:
-    """Генерирует фейковые данные для деанона"""
+def generate_deanon_info(lang: str = 'ru') -> Tuple[str, str, str, str, str, str]:
+    """Генерирует фейковые данные для деанона на указанном языке."""
+    
+    # --- БЛОК ВЫБОРА ЯЗЫКА ---
+    if lang == 'en':
+        names = DEANON_NAMES_EN
+        surnames = DEANON_SURNAMES_EN
+        cities = DEANON_CITIES_EN
+        streets = DEANON_STREETS_EN
+        professions = DEANON_PROFESSIONS_EN
+        fetishes = DEANON_FETISHES_EN
+        details_list = DEANON_DETAILS_EN
+        address_template = "{city}, {street}, {house}"
+        apartment_template = ", apt. {flat}"
+    else: # По умолчанию используется русский
+        names = DEANON_NAMES
+        surnames = DEANON_SURNAMES
+        cities = DEANON_CITIES
+        streets = DEANON_STREETS
+        professions = DEANON_PROFESSIONS
+        fetishes = DEANON_FETISHES
+        details_list = DEANON_DETAILS
+        address_template = "{city}, ул. {street}, д. {house}"
+        apartment_template = ", кв. {flat}"
+
+    # --- ОСТАЛЬНАЯ ЛОГИКА ОСТАЕТСЯ ПРЕЖНЕЙ, НО ИСПОЛЬЗУЕТ ВЫБРАННЫЕ СПИСКИ ---
+    
     # Генерация адреса
-    city = random.choice(DEANON_CITIES)
-    street = random.choice(DEANON_STREETS)
+    city = random.choice(cities)
+    street = random.choice(streets)
     house = random.randint(1, 200)
-    address = f"{city}, ул. {street}, д. {house}"
+    address = address_template.format(city=city, street=street, house=house)
     
-    # 70% шанс добавить квартиру
-    if random.random() < 0.7:
-        flat = random.randint(1, 204)
-        address += f", кв. {flat}"
-    
-    # Генерация деталей (1, 2 или 3 факта)
-    details = [random.choice(DEANON_DETAILS)]
-    
-    # 40% шанс на второй факт
-    if random.random() < 0.4:
-        details.append(random.choice(DEANON_DETAILS))
-    
-    # 10% шанс на третий факт
-    if random.random() < 0.1:
-        details.append(random.choice(DEANON_DETAILS))
-    
-    details_str = ", ".join(details)
+    # --- ИЗМЕНЕННЫЙ БЛОК ГЕНЕРАЦИИ ДЕТАЛЕЙ ---
+    if random.random() < 0.21:
+        # С вероятностью 21% возвращаем заглушку
+        details_str = "Nothing to say about this anon" if lang == 'en' else "Про анона нечего сказать"
+    else:
+        # В остальных случаях генерируем факты как раньше
+        details = [random.choice(details_list)]
+        
+        # 40% шанс на второй факт
+        if random.random() < 0.25:
+            details.append(random.choice(details_list))
+        
+        # 10% шанс на третий факт
+        if random.random() < 0.1:
+            details.append(random.choice(details_list))
+        
+        details_str = ", ".join(details)
+    # --- КОНЕЦ ИЗМЕНЕННОГО БЛОКА ---
 
     return (
-        random.choice(DEANON_NAMES),
-        random.choice(DEANON_SURNAMES),
+        random.choice(names),
+        random.choice(surnames),
         address,
-        random.choice(DEANON_PROFESSIONS),
-        random.choice(DEANON_FETISHES),
+        random.choice(professions),
+        random.choice(fetishes),
         details_str
     )
