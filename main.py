@@ -2174,8 +2174,17 @@ async def cmd_roll(message: types.Message):
     
     result = random.randint(1, 100)
 
+    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+    lang = 'en' if board_id == 'int' else 'ru'
+    
+    if lang == 'en':
+        roll_text = f"🎲 Rolled: {result}"
+    else:
+        roll_text = f"🎲 Нароллил: {result}"
+    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
     header, pnum = await format_header(board_id)
-    content = {"type": "text", "header": header, "text": f"🎲 Нароллил: {result}"}
+    content = {"type": "text", "header": header, "text": roll_text} # Используем новую переменную
 
     messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
 
