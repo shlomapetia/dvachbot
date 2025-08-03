@@ -3683,17 +3683,13 @@ async def handle_message(message: Message):
         content = {'type': message.content_type, 'header': header, 'reply_to_post': reply_to_post}
         text_for_corpus = None
 
-        # --- ГЛАВНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-        # Проверяем, активен ли режим трансформации
         is_transform_mode_active = (
             b_data['anime_mode'] or b_data['slavaukraine_mode'] or
             b_data['zaputin_mode'] or b_data['suka_blyat_mode']
         )
         
-        # Выбираем, какой текст использовать: чистый или с HTML-разметкой
         if message.content_type == 'text':
             text_for_corpus = message.text
-            # Если режим активен, берем ЧИСТЫЙ текст. Иначе - текст с HTML.
             text_to_process = message.text if is_transform_mode_active else message.html_text
             content.update({'text': text_to_process})
         
@@ -3702,9 +3698,18 @@ async def handle_message(message: Message):
             file_id_obj = getattr(message, message.content_type, [])
             if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
             
-            # Та же логика для подписей к медиа
-            caption_to_process = message.caption if is_transform_mode_active else (message.caption_html_text or "")
+            # --- ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+            caption_to_process = ""
+            if is_transform_mode_active:
+                # Для режимов всегда берем чистый текст, если он есть
+                caption_to_process = message.caption or ""
+            else:
+                # Для обычного режима безопасно проверяем наличие html_text,
+                # и если его нет - берем обычный текст
+                caption_to_process = getattr(message, 'caption_html_text', message.caption or "")
+
             content.update({'file_id': file_id_obj.file_id, 'caption': caption_to_process})
+            # --- КОНЕЦ ФИНАЛЬНОГО ИСПРАВЛЕНИЯ ---
         
         elif message.content_type in ['sticker', 'voice', 'video_note']:
             file_id_obj = getattr(message, message.content_type)
