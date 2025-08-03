@@ -14,3 +14,17 @@ HELP_TEXT = (
     "/anime - активировать аниме-режим\n\n"
     "Все сообщения анонимны!"
 )
+
+HELP_TEXT_EN = (
+    "This is TGACH, an anonymous chat. Just send messages, and they will be sent to everyone anonymously. From everyone, to everyone.\n\n"
+    "Commands:\n"
+    "/start - start the bot\n"
+    "/help - show this help message\n"
+    "/stats - show statistics\n"
+    "/face - get a random face\n"
+    "/roll – roll a number from 0-100\n"
+    "/invite - get a text to invite new anons\n"
+    "/deanon - de-anonymize a poster\n\n"
+    "/anime - activate anime-mode\n\n"
+    "All messages are anonymous!"
+)
