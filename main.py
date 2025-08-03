@@ -50,18 +50,20 @@ from deanonymizer import DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEA
 from help_text import HELP_TEXT, HELP_TEXT_EN
 
 # ========== Глобальные настройки досок ==========
-# Вставляем новую конфигурационную структуру
+
 BOARD_CONFIG = {
     'b': {
         "name": "/b/",
         "description": "БРЕД - основная доска",
+        "description_en": "RANDOM -",
         "username": "@dvach_chatbot",
-        "token": os.getenv("BOT_TOKEN"),  # Основной бот
+        "token": os.getenv("BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
     },
     'po': {
         "name": "/po/",
         "description": "ПОЛИТАЧ - (срачи, политика)",
+        "description_en": "POLITICS  -",
         "username": "@dvach_po_chatbot",
         "token": os.getenv("PO_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("PO_ADMINS", "").split(",") if x}
@@ -69,6 +71,7 @@ BOARD_CONFIG = {
     'a': {
         "name": "/a/",
         "description": "АНИМЕ - (манга, Япония, хентай)",
+        "description_en": "ANIME (🇯🇵, hentai)",
         "username": "@dvach_a_chatbot",
         "token": os.getenv("A_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("A_ADMINS", "").split(",") if x}
@@ -76,6 +79,7 @@ BOARD_CONFIG = {
     'sex': {
         "name": "/sex/",
         "description": "СЕКСАЧ - (отношения, секс, тян, еот, блекпилл)",
+        "description_en": "SEX (relationships, sex, blackpill)",
         "username": "@dvach_sex_chatbot",
         "token": os.getenv("SEX_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("SEX_ADMINS", "").split(",") if x}
@@ -83,19 +87,19 @@ BOARD_CONFIG = {
     'vg': {
         "name": "/vg/",
         "description": "ВИДЕОИГРЫ - (ПК, игры, хобби)",
+        "description_en": "VIDEO GAMES (🎮, hobbies)",
         "username": "@dvach_vg_chatbot",
         "token": os.getenv("VG_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("VG_ADMINS", "").split(",") if x}
     },
-    # --- ДОБАВЬТЕ ЭТОТ БЛОК ---
     'int': {
         "name": "/int/",
         "description": "INTERNATIONAL (🇬🇧🇺🇸🇨🇳🇮🇳🇪🇺)",
+        "description_en": "INTERNATIONAL (🇬🇧🇺🇸🇨🇳🇮🇳🇪🇺)",
         "username": "@tgchan_chatbot",
         "token": os.getenv("INT_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("INT_ADMINS", "").split(",") if x}
     }
-    # --------------------------
 }
 
 
@@ -1081,22 +1085,25 @@ async def board_statistics_broadcaster():
 async def setup_pinned_messages(bots: dict[str, Bot]):
     """Устанавливает или обновляет закрепленное сообщение для каждого бота."""
     
-    board_links = "\n".join(
-        f"<b>{config['name']}</b> {config['description']} - {config['username']}"
-        for config in BOARD_CONFIG.values()
-    )
-
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
     for board_id, bot_instance in bots.items():
         b_data = board_data[board_id]
         
-        # Выбираем правильный текст помощи в зависимости от доски
+        # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+        # Выбираем правильный текст помощи и генерируем список досок на нужном языке
         if board_id == 'int':
             base_help_text = HELP_TEXT_EN
             boards_header = "🌐 <b>All boards:</b>"
+            board_links = "\n".join(
+                f"<b>{config['name']}</b> {config['description_en']} - {config['username']}"
+                for config in BOARD_CONFIG.values()
+            )
         else:
             base_help_text = HELP_TEXT
             boards_header = "🌐 <b>Все доски:</b>"
+            board_links = "\n".join(
+                f"<b>{config['name']}</b> {config['description']} - {config['username']}"
+                for config in BOARD_CONFIG.values()
+            )
             
         # Собираем финальное сообщение
         full_help_text = (
@@ -1621,7 +1628,12 @@ async def send_message_to_users(
             original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
 
             if uid == original_author:
-                head = head.replace("Пост", "🔴 Пост")
+                if board_id == 'int':
+                    # Для английской доски ищем "Post"
+                    head = head.replace("Post", "🔴 Post")
+                else:
+                    # Для русских досок ищем "Пост"
+                    head = head.replace("Пост", "🔴 Пост")
 
             formatted_body = await _format_message_body(modified_content, uid)
             
@@ -2292,6 +2304,62 @@ async def cmd_stop(message: types.Message):
     b_data['last_mode_activation'] = None
 
     await message.answer(f"Все активные режимы на доске {BOARD_CONFIG[board_id]['name']} остановлены.")
+    await message.delete()
+
+@dp.message(Command("active"))
+async def cmd_active(message: types.Message):
+    """Выводит статистику активности досок за последние 2 часа."""
+    board_id = get_board_id(message)
+    if not board_id: return
+
+    # 1. Определяем язык для ответа
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    # 2. Собираем статистику по всем доскам
+    activity_lines = []
+    for b_id in BOARDS:
+        # Считаем активность за последние 2 часа
+        activity = get_board_activity_last_hours(b_id, hours=2)
+        board_name = BOARD_CONFIG[b_id]['name']
+        
+        # Форматируем строку в зависимости от языка
+        if lang == 'en':
+            line = f"<b>{board_name}</b> - {activity:.1f} posts/hr"
+        else:
+            line = f"<b>{board_name}</b> - {activity:.1f} п/ч"
+        activity_lines.append(line)
+
+    # 3. Формируем полный текст сообщения
+    if lang == 'en':
+        header_text = "📊 Boards Activity (last 2h):"
+    else:
+        header_text = "📊 Активность досок (за 2ч):"
+    
+    full_activity_text = f"{header_text}\n\n" + "\n".join(activity_lines)
+
+    # 4. Отправляем сообщение в чат
+    header, pnum = await format_header(board_id)
+    content = {
+        'type': 'text', 
+        'header': header, 
+        'text': full_activity_text
+    }
+    
+    messages_storage[pnum] = {
+        'author_id': 0, 
+        'timestamp': datetime.now(UTC), 
+        'content': content, 
+        'board_id': board_id
+    }
+
+    b_data = board_data[board_id]
+    await message_queues[board_id].put({
+        'recipients': b_data['users']['active'],
+        'content': content,
+        'post_num': pnum,
+        'board_id': board_id
+    })
+    
     await message.delete()
 
 @dp.message(Command("invite"))
