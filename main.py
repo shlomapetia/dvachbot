@@ -147,7 +147,7 @@ state = {
 messages_storage = {}
 post_to_messages = {}
 message_to_post = {}
-last_messages = deque(maxlen=500) # Используется для генерации сообщений, можно оставить общим
+last_messages = deque(maxlen=3) # Используется для генерации сообщений, можно оставить общим
 last_activity_time = datetime.now()
 daily_log = io.StringIO()
 sent_media_groups = deque(maxlen=1000)
@@ -3620,7 +3620,6 @@ async def start_background_tasks(bots: dict[str, Bot]):
     # Локальный импорт для разрыва цикла зависимостей, который вызывает NameError
     from help_broadcaster import help_broadcaster
     from conan import conan_roaster
-    from ghost_machine import ghost_poster
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     tasks = [
@@ -3634,16 +3633,6 @@ async def start_background_tasks(bots: dict[str, Bot]):
         asyncio.create_task(auto_memory_cleaner()),
         asyncio.create_task(help_broadcaster()),
         asyncio.create_task(board_statistics_broadcaster()),
-        asyncio.create_task(ghost_poster(
-            last_messages,
-            message_queues,
-            messages_storage,
-            post_to_messages,
-            format_header,
-            board_data,
-            BOARDS
-        )),
-        # asyncio.create_task(dvach_thread_poster()), ПОКА НЕ НАДО
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
     return tasks
