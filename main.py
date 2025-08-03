@@ -1477,26 +1477,8 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     b_data = board_data[board_id]
     modified_content = content.copy()
 
-    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-    # Проверяем, активен ли какой-либо режим, который трансформирует текст.
-    is_transform_mode_active = (
-        b_data['anime_mode'] or
-        b_data['slavaukraine_mode'] or
-        b_data['zaputin_mode'] or
-        b_data['suka_blyat_mode']
-    )
-
-    # Если да, то мы ОБЯЗАНЫ очистить текст от любого пользовательского HTML,
-    # чтобы избежать ошибок парсинга после нашей трансформации.
-    if is_transform_mode_active:
-        if 'text' in modified_content and modified_content['text']:
-            modified_content['text'] = clean_html_tags(modified_content['text'])
-        if 'caption' in modified_content and modified_content['caption']:
-            modified_content['caption'] = clean_html_tags(modified_content['caption'])
-    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-
-
-    # Теперь, когда текст гарантированно чистый (если это было необходимо), применяем трансформации.
+    # Текст уже безопасен, т.к. handle_message передает message.text
+    # Просто применяем трансформации
     if b_data['anime_mode']:
         if 'text' in modified_content and modified_content['text']:
             modified_content['text'] = anime_transform(modified_content['text'])
@@ -3636,58 +3618,45 @@ def apply_greentext_formatting(text: str) -> str:
 async def handle_message(message: Message):
     user_id = message.from_user.id
     
-    # 1. Определяем доску и получаем её данные
     board_id = get_board_id(message)
-    if not board_id:
-        return 
+    if not board_id: return 
+    
     b_data = board_data[board_id]
 
-    # --- ПРОВЕРКИ, КОТОРЫЕ ПОЛНОСТЬЮ БЛОКИРУЮТ ПОЛЬЗОВАТЕЛЯ ---
     try:
-        # Проверка на обычный мут. Если да - удаляем, уведомляем и выходим.
         mute_until = b_data['mutes'].get(user_id)
         if mute_until and mute_until > datetime.now(UTC):
             left = mute_until - datetime.now(UTC)
             await message.delete()
-            
             if board_id == 'int':
                 time_left_str = f"{int(left.total_seconds() // 60)}m {int(left.total_seconds() % 60)}s"
                 notification_text = f"🔇 Hey faggot, you are still muted on the {BOARD_CONFIG[board_id]['name']} board for {time_left_str}"
             else:
                 time_left_str = f"{int(left.total_seconds() // 60)}м {int(left.total_seconds() % 60)}с"
                 notification_text = f"🔇 Эй пидор, ты в муте на доске {BOARD_CONFIG[board_id]['name']} ещё {time_left_str}"
-            
             await message.bot.send_message(user_id, notification_text, parse_mode="HTML")
             return
-            
-        elif mute_until: # Если мут истек, удаляем его
+        elif mute_until:
              b_data['mutes'].pop(user_id, None)
 
-        # Проверка на бан. Если да - удаляем и выходим.
         if user_id in b_data['users']['banned']:
             await message.delete()
             return
 
-        # Игнорируем технические сообщения и медиагруппы
         if message.media_group_id or not (message.text or message.caption or message.content_type):
             return
-            
     except (TelegramBadRequest, TelegramForbiddenError):
-        return # Не удалось что-то сделать, прекращаем
+        return
     except Exception as e:
         print(f"Ошибка на этапе блочных проверок для user {user_id}: {e}")
         return
 
-    # --- ПРОВЕРКА НА ШЕДОУМУТ (не прерывает выполнение, а влияет на рассылку) ---
-    is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
-                       b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+    is_shadow_muted = (user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC))
 
-    # Добавление пользователя, если его нет
     if user_id not in b_data['users']['active']:
         b_data['users']['active'].add(user_id)
         print(f"✅ [{board_id}] Добавлен новый пользователь: ID {user_id}")
 
-    # Спам-проверка
     if not await check_spam(user_id, message, board_id):
         try:
             await message.delete()
@@ -3698,10 +3667,7 @@ async def handle_message(message: Message):
         except TelegramBadRequest: pass
         return
 
-    # --- ЕСЛИ ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ, НАЧИНАЕТСЯ ОБРАБОТКА И СОЗДАНИЕ ПОСТА ---
-    # Этот блок выполняется ДЛЯ ВСЕХ, включая тех, кто в шедоумуте.
     try:
-        # Получение информации об ответе
         reply_to_post, reply_info = None, {}
         if message.reply_to_message:
             lookup_key = (user_id, message.reply_to_message.message_id)
@@ -3714,61 +3680,58 @@ async def handle_message(message: Message):
         header, current_post_num = await format_header(board_id)
         await message.delete()
 
-        # Формирование словаря `content` с оригинальной разметкой
         content = {'type': message.content_type, 'header': header, 'reply_to_post': reply_to_post}
         text_for_corpus = None
 
+        # --- ГЛАВНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+        # Проверяем, активен ли режим трансформации
+        is_transform_mode_active = (
+            b_data['anime_mode'] or b_data['slavaukraine_mode'] or
+            b_data['zaputin_mode'] or b_data['suka_blyat_mode']
+        )
+        
+        # Выбираем, какой текст использовать: чистый или с HTML-разметкой
         if message.content_type == 'text':
             text_for_corpus = message.text
-            content.update({'text': message.html_text})
+            # Если режим активен, берем ЧИСТЫЙ текст. Иначе - текст с HTML.
+            text_to_process = message.text if is_transform_mode_active else message.html_text
+            content.update({'text': text_to_process})
         
-        # Блок для медиа, которые МОГУТ ИМЕТЬ подпись
         elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio']:
             text_for_corpus = message.caption
             file_id_obj = getattr(message, message.content_type, [])
             if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
-            # --- ИСПРАВЛЕНИЕ: Безопасный доступ к caption_html_text ---
-            caption_text = message.caption_html_text if hasattr(message, 'caption_html_text') and message.caption_html_text else (message.caption or "")
-            content.update({'file_id': file_id_obj.file_id, 'caption': caption_text})
+            
+            # Та же логика для подписей к медиа
+            caption_to_process = message.caption if is_transform_mode_active else (message.caption_html_text or "")
+            content.update({'file_id': file_id_obj.file_id, 'caption': caption_to_process})
         
-        # Блок для медиа, которые НЕ ИМЕЮТ подписи
         elif message.content_type in ['sticker', 'voice', 'video_note']:
             file_id_obj = getattr(message, message.content_type)
             content.update({'file_id': file_id_obj.file_id})
             if message.content_type == 'sticker' and message.sticker and message.sticker.emoji:
-                 text_for_corpus = message.sticker.emoji # Добавляем эмодзи для Призрака
+                 text_for_corpus = message.sticker.emoji
         
         if text_for_corpus: last_messages.append(text_for_corpus)
 
-        # Сохранение поста в хранилище с ОРИГИНАЛЬНЫМ контентом
         messages_storage[current_post_num] = {
             'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
             'reply_to': reply_to_post, 'author_message_id': None, 'board_id': board_id
         }
 
-        # Отправка сообщения обратно автору (для всех)
         try:
-            # Применяем трансформацию режима ТОЛЬКО для копии, отправляемой автору
             content_for_author = await _apply_mode_transformations(content, board_id)
-            
             results = await send_message_to_users(
-                bot_instance=message.bot,
-                recipients={user_id},
-                content=content_for_author,
-                reply_info=reply_info
+                bot_instance=message.bot, recipients={user_id},
+                content=content_for_author, reply_info=reply_info
             )
-            # Если отправка успешна, сохраняем message_id
             if results and results[0] and results[0][1]:
                 sent_to_author = results[0][1]
                 messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
                 for m in messages_to_save:
-                    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-                    # Сохраняем не только author_message_id, но и создаем запись в словарях
-                    # для корректной работы будущих ответов.
                     messages_storage[current_post_num]['author_message_id'] = m.message_id
                     post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
                     message_to_post[(user_id, m.message_id)] = current_post_num
-                    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         except TelegramForbiddenError:
             b_data['users']['active'].discard(user_id)
             print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из handle_message).")
@@ -3777,7 +3740,6 @@ async def handle_message(message: Message):
             messages_storage.pop(current_post_num, None)
             return
 
-        # В очередь на рассылку остальным отправляем ОРИГИНАЛЬНЫЙ контент
         if not is_shadow_muted:
             recipients = b_data['users']['active'] - {user_id}
             if recipients:
