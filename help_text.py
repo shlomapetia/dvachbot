@@ -8,6 +8,7 @@ HELP_TEXT = (
     "/roll – ролл 0-100 или /roll N\n"
     "/invite - получить текст для приглашения анонов\n"
     "/deanon - деанон постера\n"
+    "/active - активность досок\n"
     "/zaputin - активировать режим zaputin\n"
     "/slavaukraine - активировать режим slavaukraine\n"
     "/suka_blyat - активировать режим suka_blyat\n"
@@ -24,7 +25,8 @@ HELP_TEXT_EN = (
     "/face - get a random face\n"
     "/roll – roll a number from 0-100\n"
     "/invite - get a text to invite new anons\n"
-    "/deanon - de-anonymize a poster\n\n"
+    "/deanon - de-anonymize a poster\n"
+    "/active - активность досок\n"
     "/anime - activate anime-mode\n\n"
     "All messages are anonymous!"
 )
