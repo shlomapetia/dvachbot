@@ -3921,7 +3921,9 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
         # 1. Получаем ключевые ID и данные
         user_id = reaction.user.id
         chat_id = reaction.chat.id
-        message_id = reaction.message.id
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: ИСПРАВЛЕНИЕ ОШИБКИ ---
+        message_id = reaction.message_id
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         board_id = get_board_id(reaction)
         if not board_id: return
 
@@ -3956,7 +3958,7 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
             limited_new_emojis = new_emojis[:2]
             reactions_storage[user_id] = limited_new_emojis
         
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Надежная логика отмены и перезапуска таймера ---
+        # Надежная логика отмены и перезапуска таймера
         async with pending_edit_lock:
             # Если уже есть запланированная задача на редактирование, отменяем её
             if post_num in pending_edit_tasks:
@@ -3965,9 +3967,8 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
             # Создаем и сохраняем НОВУЮ задачу, эффективно сбрасывая таймер
             new_task = asyncio.create_task(execute_delayed_edit(post_num, reaction.bot))
             pending_edit_tasks[post_num] = new_task
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
-        # 6. Логика отправки уведомления автору (остается без изменений)
+        # 6. Логика отправки уведомления автору
         newly_added_emojis = set(reactions_storage.get(user_id, [])) - old_emojis_from_user
         
         if not newly_added_emojis or not author_id:
