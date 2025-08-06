@@ -156,7 +156,6 @@ async def conan_roaster(state, messages_storage, post_to_messages, message_to_po
                 'author_id': 0,  # 0 = системное сообщение
                 'timestamp': datetime.now(UTC),
                 'content': content,
-                'reply_to': post_num_to_reply,
                 'board_id': board_id # Указываем, на какой доске было опубликовано
             }
 
