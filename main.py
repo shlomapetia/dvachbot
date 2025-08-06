@@ -160,6 +160,8 @@ board_data = defaultdict(lambda: {
 AUTHOR_NOTIFY_LIMIT_PER_MINUTE = 4
 author_reaction_notify_tracker = defaultdict(lambda: deque(maxlen=AUTHOR_NOTIFY_LIMIT_PER_MINUTE))
 author_reaction_notify_lock = asyncio.Lock()
+pending_edit_posts = set()
+pending_edit_lock = asyncio.Lock()
 
 # ========== ОБЩИЕ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (остаются без изменений) ==========
 MODE_COOLDOWN = 3600  # 1 час в секундах
@@ -480,6 +482,50 @@ MOTIVATIONAL_MESSAGES_EN = [
     "More anons means less chance the thread will die",
     "Bring a friend - get a double dose of lulz"
 ]
+
+# ========== Фразы для уведомлений о реакциях ==========
+REACTION_NOTIFY_PHRASES = {
+    'ru': {
+        'positive': [
+            "👍 Анон двачует пост #{post_num}",
+            "✅ Твой пост #{post_num} нравится анону!",
+            "🔥 Отличный пост #{post_num}, анончик!",
+            "🔥 Тгач ещё торт, ахуенный пост #{post_num}!",
+            "❤️ Кто-то лайкнул твой пост #{post_num}",
+        ],
+        'negative': [
+            "👎 Анон саганул твой пост #{post_num}",
+            "🤡 Анон поссал тебе на ебало за #{post_num}",
+            "💩 Сажа на пост #{post_num}",
+            "💩 Анон репортнул пост #{post_num}",
+            "🤢 Твой пост #{post_num} тупой высер (по мнению анона)",
+        ],
+        'neutral': [
+            "🤔 Анон отреагировал на твой пост #{post_num}",
+            "👀 На твой пост #{post_num} обратили внимание",
+            "🧐 Твой пост #{post_num} вызвал интерес",
+        ]
+    },
+    'en': {
+        'positive': [
+            "👍 Anon liked your post #{post_num}",
+            "✅ Your post #{post_num} is fucking wholesome!",
+            "🔥 Great post #{post_num}, nigger!",
+            "❤️ Hey chud, someone liked your post #{post_num}",
+        ],
+        'negative': [
+            "👎 Anon disliked your post #{post_num}",
+            "🤡 Sage your post #{post_num}",
+            "💩 Your post #{post_num} is piece of shit",
+            "🤢 Anon says: go fuck with your dumb post #{post_num}",
+        ],
+        'neutral': [
+            "🤔 Anon reacted to your post #{post_num}",
+            "👀 Your post #{post_num} got some attention",
+            "🧐 Someone is interested in your post #{post_num}",
+        ]
+    }
+}
 
 # Тексты для копирования
 INVITE_TEXTS = [
@@ -1900,6 +1946,27 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
     # Запускаем редактирование для всех получателей параллельно
     tasks = [_edit_one(uid, mid) for uid, mid in message_copies.items()]
     await asyncio.gather(*tasks)
+
+async def execute_delayed_edit(post_num: int, bot_instance: Bot, delay: float = 3.0):
+    """
+    Ждет указанную задержку, а затем выполняет редактирование поста.
+    После выполнения удаляет пост из очереди на редактирование.
+    """
+    try:
+        await asyncio.sleep(delay)
+        
+        # Выполняем фактическое редактирование для всех
+        await edit_post_for_all_recipients(post_num, bot_instance)
+        
+    except asyncio.CancelledError:
+        # Если задача отменена, это нормально, ничего не делаем
+        pass
+    except Exception as e:
+        print(f"❌ Ошибка в execute_delayed_edit для поста #{post_num}: {e}")
+    finally:
+        # В любом случае (успех, ошибка, отмена) удаляем пост из "ожидающих"
+        async with pending_edit_lock:
+            pending_edit_posts.discard(post_num)
 
 async def message_broadcaster(bots: dict[str, Bot]):
     """Обработчик очереди сообщений с воркерами для каждой доски."""
@@ -3863,7 +3930,6 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
             return
 
         # 4. Инициализируем или конвертируем хранилище реакций
-        # Эта логика безопасно переведет посты со старой структурой на новую при первой реакции
         if 'reactions' not in post_data or 'users' not in post_data.get('reactions', {}):
             post_data['reactions'] = {'users': {}}
         
@@ -3873,32 +3939,33 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
         new_emojis = [r.emoji for r in reaction.new_reaction if r.type == 'emoji']
         
         # 6. Обрабатываем полное снятие реакций
+        old_emojis_from_user = set(reactions_storage.get(user_id, []))
         if not new_emojis:
             if user_id in reactions_storage:
                 del reactions_storage[user_id]
-                asyncio.create_task(edit_post_for_all_recipients(post_num, reaction.bot))
+            else:
+                return 
+        else:
+            # 7. Применяем лимит в 2 реакции на пользователя и обновляем
+            limited_new_emojis = new_emojis[:2]
+            reactions_storage[user_id] = limited_new_emojis
+        
+        # Логика отложенного редактирования
+        async with pending_edit_lock:
+            if post_num not in pending_edit_posts:
+                pending_edit_posts.add(post_num)
+                asyncio.create_task(execute_delayed_edit(post_num, reaction.bot))
+        
+        # Логика отправки уведомления автору
+        newly_added_emojis = set(reactions_storage.get(user_id, [])) - old_emojis_from_user
+        
+        if not newly_added_emojis or not author_id:
             return
 
-        # 7. Применяем лимит в 2 реакции на пользователя и обновляем
-        old_emojis_from_user = set(reactions_storage.get(user_id, []))
-        limited_new_emojis = new_emojis[:2]
-        reactions_storage[user_id] = limited_new_emojis
-        
-        # 8. Редактируем пост для всех получателей
-        asyncio.create_task(edit_post_for_all_recipients(post_num, reaction.bot))
-
-        # 9. Логика отправки уведомления автору
-        # Определяем, был ли ДОБАВЛЕН новый тип эмодзи (а не просто заменен)
-        newly_added_emojis = set(limited_new_emojis) - old_emojis_from_user
-        if not newly_added_emojis or not author_id:
-            return # Не отправляем уведомление, если реакция была заменена или убрана
-
-        # 10. Проверяем rate limit для автора и отправляем уведомление
         async with author_reaction_notify_lock:
             now = time.time()
             author_timestamps = author_reaction_notify_tracker[author_id]
             
-            # Убираем старые временные метки (старше минуты)
             while author_timestamps and author_timestamps[0] <= now - 60:
                 author_timestamps.popleft()
 
@@ -3909,21 +3976,27 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
                 can_send = False
 
         if can_send:
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Выбор случайной фразы ---
+            lang = 'en' if board_id == 'int' else 'ru'
             emoji = list(newly_added_emojis)[0]
-            if board_id == 'int':
-                notify_text = f"🤔 Anon reacted to your post #{post_num}"
-                if emoji in POSITIVE_REACTIONS: notify_text = f"👍 Anon liked your post #{post_num}"
-                elif emoji in NEGATIVE_REACTIONS: notify_text = f"👎 Anon disliked your post #{post_num}"
+
+            if emoji in POSITIVE_REACTIONS:
+                category = 'positive'
+            elif emoji in NEGATIVE_REACTIONS:
+                category = 'negative'
             else:
-                notify_text = f"🤔 Анон отреагировал на твой пост #{post_num}"
-                if emoji in POSITIVE_REACTIONS: notify_text = f"👍 Анон оценил твой пост #{post_num}"
-                elif emoji in NEGATIVE_REACTIONS: notify_text = f"👎 Анон осудил твой пост #{post_num}"
+                category = 'neutral'
+            
+            # Выбираем случайный шаблон и форматируем его
+            phrase_template = random.choice(REACTION_NOTIFY_PHRASES[lang][category])
+            notify_text = phrase_template.format(post_num=post_num)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             try:
                 await reaction.bot.send_message(author_id, notify_text)
             except (TelegramForbiddenError, TelegramBadRequest):
-                pass # Игнорируем, если не удалось доставить
-
+                pass
+                
     except Exception as e:
         import traceback
         print(f"❌ Критическая ошибка в handle_message_reaction: {e}\n{traceback.format_exc()}")
