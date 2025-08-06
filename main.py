@@ -1695,7 +1695,7 @@ async def send_message_to_users(
     content: dict,
     reply_info: dict | None = None,
 ) -> list:
-    """Оптимизированная рассылка сообщений пользователям (с динамическим вызовом)."""
+    """Оптимизированная рассылка сообщений пользователям с уведомлением об ограничениях."""
     if not recipients or not content or 'type' not in content:
         return []
 
@@ -1707,7 +1707,7 @@ async def send_message_to_users(
     b_data = board_data[board_id]
     modified_content = content.copy()
 
-    # Добавление фраз для режимов (эта логика остается)
+    # Добавление фраз для режимов
     if b_data['suka_blyat_mode']:
         b_data['suka_blyat_counter'] += 1
         if b_data['suka_blyat_counter'] % 3 == 0:
@@ -1728,10 +1728,7 @@ async def send_message_to_users(
         return []
 
     async def really_send(uid: int, reply_to: int | None):
-        # Переменные, которые могут понадобиться в блоке except, определяются здесь
-        head = ""
-        formatted_body = ""
-        full_text = ""
+        head, formatted_body, full_text = "", "", ""
         try:
             ct_raw = modified_content["type"]
             ct = ct_raw.value if hasattr(ct_raw, 'value') else ct_raw
@@ -1741,55 +1738,44 @@ async def send_message_to_users(
 
             reply_to_post = modified_content.get('reply_to_post')
             original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
-
             if uid == original_author:
-                if board_id == 'int':
-                    # Для английской доски ищем "Post"
-                    head = head.replace("Post", "🔴 Post")
-                else:
-                    # Для русских досок ищем "Пост"
-                    head = head.replace("Пост", "🔴 Пост")
+                head = head.replace("Пост", "🔴 Пост").replace("Post", "🔴 Post")
             
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
             post_num = modified_content.get('post_num')
-            # Передаем post_num, если он есть, иначе None
             formatted_body = await _format_message_body(modified_content, uid, post_num)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-            
+            full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
+
             if ct == "media_group":
                 if not modified_content.get('media'): return None
                 builder = MediaGroupBuilder()
-                full_text_for_group = f"{head}\n\n{formatted_body}" if formatted_body else head
                 for idx, media in enumerate(modified_content['media']):
-                    caption = full_text_for_group if idx == 0 else None
+                    caption = full_text if idx == 0 else None
                     builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
                 return await bot_instance.send_media_group(chat_id=uid, media=builder.build(), reply_to_message_id=reply_to)
             
             method_name = f"send_{ct}"
-            if ct == 'text':
-                method_name = 'send_message'
-
+            if ct == 'text': method_name = 'send_message'
             send_method = getattr(bot_instance, method_name)
-            kwargs = {'reply_to_message_id': reply_to}
             
-            full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
-
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Унификация подписей и обработки ---
+            kwargs = {'chat_id': uid, 'reply_to_message_id': reply_to}
+            
+            if ct == 'text':
+                kwargs.update(text=full_text, parse_mode="HTML")
+            
             elif ct in ['photo', 'video', 'animation', 'document', 'audio', 'voice', 'video_note']:
                 if len(full_text) > 1024: full_text = full_text[:1021] + "..."
                 kwargs.update(caption=full_text, parse_mode="HTML")
                 
                 file_source = modified_content.get('image_url') or modified_content.get("file_id")
                 kwargs[ct] = file_source
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             elif ct == 'sticker':
                 kwargs[ct] = modified_content["file_id"]
             else:
                 print(f"❌ Неизвестный тип контента для отправки: {ct}")
                 return None
-                
-            return await send_method(uid, **kwargs)
+            
+            return await send_method(**kwargs)
 
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
@@ -1798,36 +1784,41 @@ async def send_message_to_users(
             blocked_users.add(uid)
             return None
         except TelegramBadRequest as e:
-            if "VOICE_MESSAGES_FORBIDDEN" in e.message and modified_content.get("type") == "voice":
-                print(f"ℹ️ Пользователь {uid} запретил голосовые. Отправляю как аудио...")
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Замена переотправки на уведомление ---
+            lang = 'en' if board_id == 'int' else 'ru'
+            current_type = modified_content.get("type")
+
+            placeholder_text = None
+            if "VOICE_MESSAGES_FORBIDDEN" in e.message and current_type == "voice":
+                placeholder_text = " VOICE MESSAGE " if lang == 'en' else " ГОЛОСОВОЕ СООБЩЕНИЕ "
+            elif "VIDEO_MESSAGES_FORBIDDEN" in e.message and current_type == "video_note":
+                placeholder_text = " VIDEO MESSAGE " if lang == 'en' else " ВИДЕО СООБЩЕНИЕ (кружок) "
+
+            if placeholder_text:
+                print(f"ℹ️ Пользователь {uid} запретил получение {current_type}. Отправляю плейсхолдер...")
                 try:
-                    # Используем полный текст сообщения, а не только заголовок
-                    if len(full_text) > 1024: full_text = full_text[:1021] + "..."
-                    return await bot_instance.send_audio(
-                        chat_id=uid,
-                        audio=modified_content["file_id"],
-                        caption=full_text,
-                        parse_mode="HTML",
-                        reply_to_message_id=reply_to
+                    error_info_ru = (
+                        "<b>[ Тут должно было быть ГС или кружок, но...]</b>\n\n"
+                        f"У вас в настройках приватности телеграм запрещено получение {placeholder_text}"
                     )
-                except Exception as audio_e:
-                    print(f"❌ Не удалось отправить как аудио для {uid}: {audio_e}")
-                    return None
-            elif "VIDEO_MESSAGES_FORBIDDEN" in e.message and modified_content.get("type") == "video_note":
-                print(f"ℹ️ Пользователь {uid} запретил видеосообщения. Отправляю как видео...")
-                try:
-                    # Используем полный текст сообщения, а не только заголовок
-                    if len(full_text) > 1024: full_text = full_text[:1021] + "..."
-                    return await bot_instance.send_video(
-                        chat_id=uid,
-                        video=modified_content["file_id"],
-                        caption=full_text,
-                        parse_mode="HTML",
-                        reply_to_message_id=reply_to
+                    error_info_en = (
+                        "<b>[ 🚫 Blocked Content. There would be VM or video message but... ]</b>\n\n"
+                        f"You have blocked receiving {placeholder_text} in your Telegram privacy settings."
                     )
-                except Exception as video_e:
-                    print(f"❌ Не удалось отправить как видео для {uid}: {video_e}")
+                    
+                    error_info = error_info_en if lang == 'en' else error_info_ru
+                    
+                    # Отправляем текстовое сообщение с тем же заголовком и информацией об ответе
+                    # Вместо тела сообщения - информация об ошибке
+                    final_text = f"{head}\n\n{error_info}"
+                    
+                    return await bot_instance.send_message(
+                        chat_id=uid, text=final_text, parse_mode="HTML", reply_to_message_id=reply_to
+                    )
+                except Exception as placeholder_e:
+                    print(f"❌ Не удалось отправить плейсхолдер для {uid}: {placeholder_e}")
                     return None
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             else:
                 print(f"❌ Ошибка отправки (BadRequest) {uid} ботом {bot_instance.id}: {e}")
                 return None
@@ -1836,19 +1827,16 @@ async def send_message_to_users(
             return None
 
     semaphore = asyncio.Semaphore(100)
-
     async def send_with_semaphore(uid):
         async with semaphore:
             reply_to = None
             if reply_info and isinstance(reply_info, dict):
                 reply_to = reply_info.get(uid)
-            
             if reply_to is None and content.get("reply_to_post"):
                 original_post = content["reply_to_post"]
                 if original_post in post_to_messages and isinstance(post_to_messages[original_post], dict):
                     author_mid = post_to_messages[original_post].get(uid)
-                    if author_mid:
-                        reply_to = author_mid
+                    if author_mid: reply_to = author_mid
             
             result = await really_send(uid, reply_to)
             return (uid, result)
@@ -1860,6 +1848,7 @@ async def send_message_to_users(
         post_num = content['post_num']
         for uid, msg in results:
             if not msg: continue
+            # Важно: Сохраняем в `message_to_post` даже плейсхолдер, чтобы на него можно было ставить реакции
             messages_to_save = msg if isinstance(msg, list) else [msg]
             for m in messages_to_save:
                 post_to_messages.setdefault(post_num, {})[uid] = m.message_id
