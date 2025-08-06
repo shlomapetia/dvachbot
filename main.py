@@ -1774,17 +1774,16 @@ async def send_message_to_users(
             
             full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
 
-            if ct == 'text':
-                kwargs.update(text=full_text, parse_mode="HTML")
-            elif ct in ['photo', 'video', 'animation', 'document', 'audio']:
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Унификация подписей и обработки ---
+            elif ct in ['photo', 'video', 'animation', 'document', 'audio', 'voice', 'video_note']:
                 if len(full_text) > 1024: full_text = full_text[:1021] + "..."
                 kwargs.update(caption=full_text, parse_mode="HTML")
+                
                 file_source = modified_content.get('image_url') or modified_content.get("file_id")
                 kwargs[ct] = file_source
-            elif ct == 'voice':
-                kwargs.update(caption=head, parse_mode="HTML")
-                kwargs[ct] = modified_content["file_id"]
-            elif ct in ['sticker', 'video_note']:
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
+            elif ct == 'sticker':
                 kwargs[ct] = modified_content["file_id"]
             else:
                 print(f"❌ Неизвестный тип контента для отправки: {ct}")
