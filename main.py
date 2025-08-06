@@ -160,7 +160,8 @@ board_data = defaultdict(lambda: {
 AUTHOR_NOTIFY_LIMIT_PER_MINUTE = 4
 author_reaction_notify_tracker = defaultdict(lambda: deque(maxlen=AUTHOR_NOTIFY_LIMIT_PER_MINUTE))
 author_reaction_notify_lock = asyncio.Lock()
-pending_edit_posts = set()
+# ========== Debounce и управление задачами для редактирования постов ==========
+pending_edit_tasks = {}  # Словарь для хранения активных задач редактирования {post_num: asyncio.Task}
 pending_edit_lock = asyncio.Lock()
 
 # ========== ОБЩИЕ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (остаются без изменений) ==========
@@ -492,12 +493,15 @@ REACTION_NOTIFY_PHRASES = {
             "🔥 Отличный пост #{post_num}, анончик!",
             "🔥 Тгач ещё торт, ахуенный пост #{post_num}!",
             "❤️ Кто-то лайкнул твой пост #{post_num}",
+            "❤️ Охуенно написал анон! Лайк на пост #{post_num}",
         ],
         'negative': [
             "👎 Анон саганул твой пост #{post_num}",
             "🤡 Анон поссал тебе на ебало за #{post_num}",
-            "💩 Сажа на пост #{post_num}",
+            "🟥⬇️ Сажа на пост #{post_num}",
+            "🟥⬇️ SAGE SAGE SAGE пост #{post_num}",
             "💩 Анон репортнул пост #{post_num}",
+            "⬇️ Дизлайк пост #{post_num}",            
             "🤢 Твой пост #{post_num} тупой высер (по мнению анона)",
         ],
         'neutral': [
@@ -521,6 +525,7 @@ REACTION_NOTIFY_PHRASES = {
         ],
         'neutral': [
             "🤔 Anon reacted to your post #{post_num}",
+            "🤔 There is reaction on your post #{post_num}",
             "👀 Your post #{post_num} got some attention",
             "🧐 Someone is interested in your post #{post_num}",
         ]
@@ -1950,23 +1955,26 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
 async def execute_delayed_edit(post_num: int, bot_instance: Bot, delay: float = 3.0):
     """
     Ждет указанную задержку, а затем выполняет редактирование поста.
-    После выполнения удаляет пост из очереди на редактирование.
+    После выполнения удаляет СВОЮ ЖЕ задачу из словаря отслеживания.
     """
     try:
         await asyncio.sleep(delay)
-        
         # Выполняем фактическое редактирование для всех
         await edit_post_for_all_recipients(post_num, bot_instance)
         
     except asyncio.CancelledError:
-        # Если задача отменена, это нормально, ничего не делаем
+        # Это штатная ситуация, когда таймер сбрасывается новой реакцией.
+        # Ничего не делаем, просто выходим.
         pass
     except Exception as e:
         print(f"❌ Ошибка в execute_delayed_edit для поста #{post_num}: {e}")
     finally:
-        # В любом случае (успех, ошибка, отмена) удаляем пост из "ожидающих"
+        # Удаляем задачу из словаря "ожидающих", только если это мы сами.
+        # Это предотвращает случайное удаление НОВОЙ задачи, если СТАРАЯ была отменена.
         async with pending_edit_lock:
-            pending_edit_posts.discard(post_num)
+            current_task = asyncio.current_task()
+            if pending_edit_tasks.get(post_num) is current_task:
+                pending_edit_tasks.pop(post_num, None)
 
 async def message_broadcaster(bots: dict[str, Bot]):
     """Обработчик очереди сообщений с воркерами для каждой доски."""
@@ -3906,21 +3914,21 @@ def apply_greentext_formatting(text: str) -> str:
 @dp.message_reaction()
 async def handle_message_reaction(reaction: types.MessageReactionUpdated):
     """
-    Обрабатывает реакции пользователей, обновляет рейтинг поста, редактирует
-    сообщения и отправляет уведомления автору с новыми лимитами.
+    Обрабатывает реакции пользователей с корректной отменой предыдущих задач
+    редактирования для отображения только самого последнего состояния.
     """
     try:
         # 1. Получаем ключевые ID и данные
         user_id = reaction.user.id
         chat_id = reaction.chat.id
-        message_id = reaction.message_id
+        message_id = reaction.message.id
         board_id = get_board_id(reaction)
         if not board_id: return
 
         # 2. Находим пост и его автора
         post_num = message_to_post.get((chat_id, message_id))
         if not post_num or post_num not in messages_storage:
-            return  # Реакция на старое или ненайденное сообщение
+            return
 
         post_data = messages_storage[post_num]
         author_id = post_data.get('author_id')
@@ -3934,29 +3942,32 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
             post_data['reactions'] = {'users': {}}
         
         reactions_storage = post_data['reactions']['users']
+        old_emojis_from_user = set(reactions_storage.get(user_id, []))
 
-        # 5. Получаем новый список эмодзи от пользователя
+        # 5. Получаем и обрабатываем новое состояние реакций
         new_emojis = [r.emoji for r in reaction.new_reaction if r.type == 'emoji']
         
-        # 6. Обрабатываем полное снятие реакций
-        old_emojis_from_user = set(reactions_storage.get(user_id, []))
         if not new_emojis:
             if user_id in reactions_storage:
                 del reactions_storage[user_id]
             else:
-                return 
+                return # Реакций не было и нет, ничего не изменилось
         else:
-            # 7. Применяем лимит в 2 реакции на пользователя и обновляем
             limited_new_emojis = new_emojis[:2]
             reactions_storage[user_id] = limited_new_emojis
         
-        # Логика отложенного редактирования
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Надежная логика отмены и перезапуска таймера ---
         async with pending_edit_lock:
-            if post_num not in pending_edit_posts:
-                pending_edit_posts.add(post_num)
-                asyncio.create_task(execute_delayed_edit(post_num, reaction.bot))
+            # Если уже есть запланированная задача на редактирование, отменяем её
+            if post_num in pending_edit_tasks:
+                pending_edit_tasks[post_num].cancel()
+
+            # Создаем и сохраняем НОВУЮ задачу, эффективно сбрасывая таймер
+            new_task = asyncio.create_task(execute_delayed_edit(post_num, reaction.bot))
+            pending_edit_tasks[post_num] = new_task
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
-        # Логика отправки уведомления автору
+        # 6. Логика отправки уведомления автору (остается без изменений)
         newly_added_emojis = set(reactions_storage.get(user_id, [])) - old_emojis_from_user
         
         if not newly_added_emojis or not author_id:
@@ -3976,21 +3987,15 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
                 can_send = False
 
         if can_send:
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Выбор случайной фразы ---
             lang = 'en' if board_id == 'int' else 'ru'
             emoji = list(newly_added_emojis)[0]
 
-            if emoji in POSITIVE_REACTIONS:
-                category = 'positive'
-            elif emoji in NEGATIVE_REACTIONS:
-                category = 'negative'
-            else:
-                category = 'neutral'
+            if emoji in POSITIVE_REACTIONS: category = 'positive'
+            elif emoji in NEGATIVE_REACTIONS: category = 'negative'
+            else: category = 'neutral'
             
-            # Выбираем случайный шаблон и форматируем его
             phrase_template = random.choice(REACTION_NOTIFY_PHRASES[lang][category])
             notify_text = phrase_template.format(post_num=post_num)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             try:
                 await reaction.bot.send_message(author_id, notify_text)
