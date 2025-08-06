@@ -3779,13 +3779,15 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
     # Определяем, что произошло: добавлена реакция или убрана
     if reaction.new_reaction:
         # Реакции были добавлены или изменены
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         # new_reaction - это список объектов MessageReactionType
-        # Берем только эмодзи из них
+        # Проверяем тип реакции по строковому полю 'type'
         emojis = [
             react.emoji 
             for react in reaction.new_reaction 
-            if isinstance(react, types.MessageReactionTypeEmoji)
+            if react.type == 'emoji'
         ]
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         print(f"👍 [{board_id}] Пользователь {user_id} отреагировал на сообщение {message_id}. Новые реакции: {emojis}")
     else:
         # Все реакции были убраны
