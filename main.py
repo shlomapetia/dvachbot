@@ -120,7 +120,7 @@ message_queues = {board: asyncio.Queue(maxsize=9000) for board in BOARDS}
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
 git_executor = ThreadPoolExecutor(max_workers=1)
-send_executor = ThreadPoolExecutor(max_workers=100)
+send_executor = ThreadPoolExecutor(max_workers=20)
 save_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 1) # Executor для сохранения файлов
 git_semaphore = asyncio.Semaphore(1)
 post_counter_lock = asyncio.Lock()
@@ -156,6 +156,12 @@ board_data = defaultdict(lambda: {
     # --- Отслеживание активности для очистки памяти ---
     'last_activity': {},
 })
+
+# ========== Rate Limiter для уведомлений о реакциях ==========
+REACTION_NOTIFY_LIMIT = 40
+REACTION_NOTIFY_WINDOW = 60 # секунд
+reaction_notify_timestamps = deque(maxlen=REACTION_NOTIFY_LIMIT)
+reaction_notify_lock = asyncio.Lock()
 
 # ========== ОБЩИЕ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (остаются без изменений) ==========
 MODE_COOLDOWN = 3600  # 1 час в секундах
@@ -208,29 +214,6 @@ SPAM_RULES = {
 # Хранит информацию о текущих медиа-группах: media_group_id -> данные
 current_media_groups = {}
 media_group_timers = {}
-
-def suka_blyatify_text(text: str, board_id: str) -> str:
-    """
-    Применяет к тексту преобразования режима "сука блять".
-    Эта версия адаптирована для работы с данными конкретной доски.
-    """
-    if not text:
-        return text
-
-    # Получаем срез данных для конкретной доски
-    b_data = board_data[board_id]
-    words = text.split()
-
-    for i in range(len(words)):
-        if random.random() < 0.3:
-            words[i] = random.choice(MAT_WORDS)
-
-    # Используем счетчик, привязанный к доске
-    b_data['suka_blyat_counter'] += 1
-    if b_data['suka_blyat_counter'] % 3 == 0:
-        words.append("... СУКА БЛЯТЬ!")
-    
-    return ' '.join(words)
 
 def restore_backup_on_start():
     """Забирает все файлы *_state.json и *_reply_cache.json из backup-репозитория при запуске"""
@@ -450,14 +433,10 @@ gc.set_threshold(
 
 
 def get_user_msgs_deque(user_id: int, board_id: str):
-    """Получаем deque для юзера на конкретной доске, ограничиваем количество юзеров в памяти"""
+    """Получаем deque для юзера на конкретной доске. Очистка теперь централизована в auto_memory_cleaner."""
     last_user_msgs_for_board = board_data[board_id]['last_user_msgs']
     
     if user_id not in last_user_msgs_for_board:
-        if len(last_user_msgs_for_board) >= MAX_ACTIVE_USERS_IN_MEMORY:
-            oldest_user = next(iter(last_user_msgs_for_board))
-            del last_user_msgs_for_board[oldest_user]
-
         last_user_msgs_for_board[user_id] = deque(maxlen=10)
 
     return last_user_msgs_for_board[user_id]
@@ -544,6 +523,12 @@ INVITE_TEXTS_EN = [
     "@tgchan_chatbot - anonymous chat in Telegram\nNo registration, no SMS",
     "TGACH: @tgchan_chatbot\nSay what you think, no one will know who you are"
 ]
+
+# ========== Классификация реакций ==========
+POSITIVE_REACTIONS = {'👍', '❤', '🔥', '❤‍🔥', '😍', '😂', '🤣', '👌', '💯', '🙏', '🎉', '❤️', '♥️', '🥰', '🤩', '🤯'}
+NEGATIVE_REACTIONS = {'👎', '💩', '🤮', '🤡', '🤢', '😡', '🤬', '🖕'}
+# Все, что не входит в эти два списка, будет считаться нейтральным
+
 
 # Для /suka_blyat
 MAT_WORDS = ["сука", "блядь", "пиздец", "ебать", "нах", "пизда", "хуйня", "ебал", "блять", "отъебись", "ебаный", "еблан", "ХУЙ", "ПИЗДА", "хуйло", "долбаёб", "пидорас"]
@@ -996,7 +981,7 @@ async def auto_memory_cleaner():
 
             # --- НАЧАЛО ИЗМЕНЕНИЙ: ЦЕНТРАЛИЗОВАННАЯ ОЧИСТКА НЕАКТИВНЫХ ---
             
-            # Устанавливаем порог неактивности - 3 дня
+            # Устанавливаем порог неактивности - 2 дня
             inactive_threshold = now_utc - timedelta(days=2)
             
             # Собираем ID пользователей, которых нужно очистить
@@ -1019,6 +1004,8 @@ async def auto_memory_cleaner():
                     b_data['last_animations'].pop(user_id, None)
                     b_data['spam_violations'].pop(user_id, None)
                     b_data['spam_tracker'].pop(user_id, None)
+                    # --- ДОБАВЛЕНО ---
+                    b_data['last_user_msgs'].pop(user_id, None)
                 
                 print(f"🧹 [{board_id}] Очистка завершена. Удалены временные данные {purged_count} пользователей.")
 
@@ -1062,7 +1049,7 @@ async def auto_memory_cleaner():
 
         # 3. Агрессивная сборка мусора (ОБЩАЯ)
         gc.collect()
-
+        
 async def board_statistics_broadcaster():
     """Раз в час собирает общую статистику и рассылает на каждую доску."""
     await asyncio.sleep(300)
@@ -1584,38 +1571,57 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     
     return modified_content
 
-async def _format_message_body(content: dict, user_id_for_context: int) -> str:
+async def _format_message_body(content: dict, user_id_for_context: int, post_num: int) -> str:
     """
-    Формирует и форматирует тело сообщения (reply, greentext, (You)).
-    Эта версия разделяет обработку ответа и основного текста для надежности.
+    Формирует и форматирует тело сообщения (реакции, reply, greentext, (You)).
+    Эта версия разделяет обработку ответа, реакций и основного текста.
     
     :param content: Словарь с данными поста ('reply_to_post', 'text', 'caption').
-    :param user_id_for_context: ID пользователя, для которого форматируется сообщение (для '(You)').
+    :param user_id_for_context: ID пользователя, для которого форматируется сообщение.
+    :param post_num: Номер поста для поиска реакций в messages_storage.
     :return: Готовая к отправке HTML-форматированная строка.
     """
     parts = []
-    reply_to_post = content.get('reply_to_post')
     
-    # 1. Формируем и форматируем блок ответа (если он есть)
+    # 1. Формируем блок ответа (если он есть)
+    reply_to_post = content.get('reply_to_post')
     if reply_to_post:
         original_author = messages_storage.get(reply_to_post, {}).get('author_id')
         you_marker = " (You)" if user_id_for_context == original_author else ""
         reply_line = f">>{reply_to_post}{you_marker}"
-        # Ответ всегда форматируется как greentext (в теге code)
         formatted_reply_line = f"<code>{escape_html(reply_line)}</code>"
         parts.append(formatted_reply_line)
+        
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # 2. Формируем блок с реакциями
+    post_data = messages_storage.get(post_num, {})
+    reactions_data = post_data.get('reactions') # 'reactions' будет словарем
+    
+    if reactions_data:
+        reaction_lines = []
+        # Собираем строки для каждой категории реакций
+        if reactions_data.get('positive'):
+            reaction_lines.append("".join(reactions_data['positive']))
+        if reactions_data.get('neutral'):
+            reaction_lines.append("".join(reactions_data['neutral']))
+        if reactions_data.get('negative'):
+            reaction_lines.append("".join(reactions_data['negative']))
+            
+        if reaction_lines:
+            # Объединяем строки реакций в один блок и добавляем в 'parts'
+            reactions_block = "\n".join(reaction_lines)
+            parts.append(reactions_block)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # 2. Формируем и форматируем основной текст сообщения
+    # 3. Формируем и форматируем основной текст сообщения
     main_text_raw = content.get('text') or content.get('caption') or ''
     if main_text_raw:
-        # Сначала добавляем (You) к упоминаниям в тексте
         text_with_you = add_you_to_my_posts(main_text_raw, user_id_for_context)
-        # Затем применяем greentext-форматирование к этому тексту
         formatted_main_text = apply_greentext_formatting(text_with_you)
         parts.append(formatted_main_text)
         
-    # 3. Объединяем части. Используем один \n, чтобы ответ был плотнее к тексту.
-    return '\n'.join(parts)
+    # 4. Объединяем все части. Используем два переноса строки для разделения блоков.
+    return '\n\n'.join(filter(None, parts))
 
 async def send_message_to_users(
     bot_instance: Bot,
@@ -1677,8 +1683,12 @@ async def send_message_to_users(
                 else:
                     # Для русских досок ищем "Пост"
                     head = head.replace("Пост", "🔴 Пост")
-
-            formatted_body = await _format_message_body(modified_content, uid)
+            
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            post_num = modified_content.get('post_num')
+            # Передаем post_num, если он есть, иначе None
+            formatted_body = await _format_message_body(modified_content, uid, post_num)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             if ct == "media_group":
                 if not modified_content.get('media'): return None
@@ -1762,19 +1772,14 @@ async def send_message_to_users(
 
     semaphore = asyncio.Semaphore(100)
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Внутренняя функция теперь возвращает кортеж (ID, результат),
-    # чтобы надежно связать результат с получателем.
     async def send_with_semaphore(uid):
         async with semaphore:
             reply_to = None
             if reply_info and isinstance(reply_info, dict):
                 reply_to = reply_info.get(uid)
             
-            # Если это автор, а reply_info пустое — пробуем найти его message_id напрямую
             if reply_to is None and content.get("reply_to_post"):
                 original_post = content["reply_to_post"]
-                # Убедимся, что post_to_messages и вложенный словарь существуют
                 if original_post in post_to_messages and isinstance(post_to_messages[original_post], dict):
                     author_mid = post_to_messages[original_post].get(uid)
                     if author_mid:
@@ -1782,14 +1787,10 @@ async def send_message_to_users(
             
             result = await really_send(uid, reply_to)
             return (uid, result)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # Создаем задачи на отправку
     tasks = [send_with_semaphore(uid) for uid in active_recipients]
-    # `results` теперь будет списком кортежей: [(uid1, msg1), (uid2, None), ...]
     results = await asyncio.gather(*tasks)
 
-    # Обрабатываем результаты, итерируя по списку кортежей. `zip` больше не нужен.
     if content.get('post_num'):
         post_num = content['post_num']
         for uid, msg in results:
@@ -1805,8 +1806,85 @@ async def send_message_to_users(
                 b_data['users']['active'].discard(uid)
                 print(f"🚫 [{board_id}] Пользователь {uid} заблокировал бота, удален из активных")
 
-    # Возвращаем список кортежей, который уже содержит и ID, и результат.
     return results
+
+async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
+    """
+    Находит все отправленные копии поста и редактирует их, добавляя обновленный
+    список реакций.
+    """
+    post_data = messages_storage.get(post_num)
+    message_copies = post_to_messages.get(post_num)
+
+    if not post_data or not message_copies:
+        return # Пост или его копии не найдены в памяти
+
+    content = post_data.get('content', {})
+    content_type = content.get('type')
+    
+    # Редактировать можно только текстовые сообщения или сообщения с подписью
+    can_be_edited = content_type in ['text', 'photo', 'video', 'animation', 'document', 'audio']
+    if not can_be_edited:
+        return
+        
+    board_id = post_data.get('board_id')
+    if not board_id:
+        return # Не удалось определить доску
+
+    async def _edit_one(user_id: int, message_id: int):
+        """Внутренняя корутина для редактирования одного сообщения."""
+        try:
+            # 1. Формируем заголовок (с учетом подсветки для автора ответа)
+            header_text = content.get('header', '')
+            head = f"<i>{escape_html(header_text)}</i>"
+            
+            reply_to_post = content.get('reply_to_post')
+            original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
+
+            if user_id == original_author:
+                if board_id == 'int':
+                    head = head.replace("Post", "🔴 Post")
+                else:
+                    head = head.replace("Пост", "🔴 Пост")
+
+            # 2. Формируем тело сообщения с помощью обновленной функции
+            formatted_body = await _format_message_body(content, user_id, post_num)
+            
+            # 3. Собираем итоговый текст
+            full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
+            if len(full_text) > 4096: # Ограничение Telegram на длину сообщения
+                full_text = full_text[:4093] + "..."
+            
+            # 4. Выбираем и вызываем нужный метод редактирования
+            if content_type == 'text':
+                await bot_instance.edit_message_text(
+                    text=full_text,
+                    chat_id=user_id,
+                    message_id=message_id,
+                    parse_mode="HTML"
+                )
+            else: # photo, video, etc.
+                if len(full_text) > 1024: # Ограничение на длину подписи
+                    full_text = full_text[:1021] + "..."
+                await bot_instance.edit_message_caption(
+                    caption=full_text,
+                    chat_id=user_id,
+                    message_id=message_id,
+                    parse_mode="HTML"
+                )
+        except TelegramBadRequest as e:
+            # Игнорируем ошибки, если сообщение не изменилось или не найдено
+            if "message is not modified" not in e.message and "message to edit not found" not in e.message:
+                 print(f"⚠️ Ошибка (BadRequest) при редактировании поста #{post_num} для {user_id}: {e}")
+        except TelegramForbiddenError:
+            board_data[board_id]['users']['active'].discard(user_id)
+            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (при редактировании).")
+        except Exception as e:
+            print(f"❌ Неизвестная ошибка при редактировании поста #{post_num} для {user_id}: {e}")
+
+    # Запускаем редактирование для всех получателей параллельно
+    tasks = [_edit_one(uid, mid) for uid, mid in message_copies.items()]
+    await asyncio.gather(*tasks)
 
 async def message_broadcaster(bots: dict[str, Bot]):
     """Обработчик очереди сообщений с воркерами для каждой доски."""
@@ -2176,23 +2254,6 @@ async def cmd_start(message: types.Message):
 AHE_EYES = ['😵', '🤤', '😫', '😩', '😳', '😖', '🥵']
 AHE_TONGUE = ['👅', '💦', '😛', '🤪', '😝']
 AHE_EXTRA = ['💕', '💗', '✨', '🥴', '']
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    board_id = get_board_id(message)
-    if not board_id: return
-    
-    b_data = board_data[board_id]
-
-    if user_id not in b_data['users']['active']:
-        b_data['users']['active'].add(user_id)
-        print(f"✅ [{board_id}] Новый пользователь через /start: ID {user_id}")
-    
-    start_text = b_data.get('start_message_text', "Добро пожаловать в ТГАЧ!")
-    
-    await message.answer(start_text, parse_mode="HTML", disable_web_page_preview=True)
-    await message.delete()
 
 @dp.message(Command(commands=['b', 'po', 'pol', 'a', 'sex', 'vg', 'int', 'test']))
 async def cmd_show_board_info(message: types.Message):
@@ -3688,7 +3749,7 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
             content_for_author = await _apply_mode_transformations(content, board_id)
             
             # --- Логика форматирования теперь использует content_for_author ---
-            formatted_body = await _format_message_body(content_for_author, user_id)
+            formatted_body = await _format_message_body(content_for_author, user_id, post_num)
             header_html = f"<i>{escape_html(header)}</i>"
             
             # Собираем финальную подпись. Основной текст добавляем только к первому чанку.
@@ -3763,43 +3824,94 @@ def apply_greentext_formatting(text: str) -> str:
 @dp.message_reaction()
 async def handle_message_reaction(reaction: types.MessageReactionUpdated):
     """
-    Обрабатывает реакции пользователей на сообщения бота в личном чате.
+    Обрабатывает реакции пользователей, обновляет рейтинг поста, редактирует
+    сообщения и отправляет уведомления автору.
     """
-    # Так как бот общается с пользователем в ЛС, chat.id будет равен user.id
-    user_id = reaction.chat.id
-    message_id = reaction.message_id
-    
-    # Определяем, на какой доске пользователь оставил реакцию
-    board_id = get_board_id(reaction)
-    if not board_id:
-        # Если не удалось определить доску, логируем и выходим
-        print(f"⚠️ Не удалось определить доску для реакции от user_id: {user_id}")
+    # 1. Игнорируем, если реакции были убраны
+    if not reaction.new_reaction:
         return
 
-    # Определяем, что произошло: добавлена реакция или убрана
-    if reaction.new_reaction:
-        # Реакции были добавлены или изменены
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        # new_reaction - это список объектов MessageReactionType
-        # Проверяем тип реакции по строковому полю 'type'
-        emojis = [
-            react.emoji 
-            for react in reaction.new_reaction 
-            if react.type == 'emoji'
-        ]
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-        print(f"👍 [{board_id}] Пользователь {user_id} отреагировал на сообщение {message_id}. Новые реакции: {emojis}")
-    else:
-        # Все реакции были убраны
-        print(f"👎 [{board_id}] Пользователь {user_id} убрал все реакции с сообщения {message_id}.")
+    try:
+        # 2. Получаем ключевые ID и данные
+        user_id = reaction.user.id
+        chat_id = reaction.chat.id
+        message_id = reaction.message_id
+        board_id = get_board_id(reaction)
+        
+        if not board_id:
+            return
 
-    # Здесь можно добавить любую логику, например:
-    # 1. Найти пост, на который отреагировали:
-    #    post_num = message_to_post.get((user_id, message_id))
-    # 2. Если пост найден, увеличить ему счетчик реакций в messages_storage
-    # 3. Сохранить информацию о реакции в базу данных
-    # На данный момент, как и было запрошено, реализован только вывод в консоль.
+        # 3. Находим пост и его автора
+        post_num = message_to_post.get((chat_id, message_id))
+        if not post_num or post_num not in messages_storage:
+            return # Реакция на старое или ненайденное сообщение
 
+        post_data = messages_storage[post_num]
+        author_id = post_data.get('author_id')
+
+        # 4. Игнорируем реакции на собственные сообщения
+        if author_id == user_id:
+            return
+
+        # 5. Инициализируем хранилище реакций, если его нет
+        if 'reactions' not in post_data:
+            post_data['reactions'] = {'positive': [], 'neutral': [], 'negative': [], 'rating': 0}
+        
+        # 6. Обрабатываем новые реакции
+        new_emojis = {react.emoji for react in reaction.new_reaction if react.type == 'emoji'}
+        old_emojis = {react.emoji for react in reaction.old_reaction if react.type == 'emoji'}
+        
+        added_emoji = list(new_emojis - old_emojis)
+        if not added_emoji:
+            return # Ничего не было добавлено, только убрано
+            
+        emoji = added_emoji[0] # Берем только первую добавленную реакцию за раз
+        
+        # 7. Классифицируем и обновляем данные поста
+        reactions = post_data['reactions']
+        if emoji in POSITIVE_REACTIONS:
+            reactions['positive'].append(emoji)
+            reactions['rating'] += 1
+            category = 'positive'
+            notify_text = f"👍 Анон оценил твой пост #{post_num}"
+        elif emoji in NEGATIVE_REACTIONS:
+            reactions['negative'].append(emoji)
+            reactions['rating'] -= 1
+            category = 'negative'
+            notify_text = f"👎 Анон осудил твой пост #{post_num}"
+        else:
+            reactions['neutral'].append(emoji)
+            category = 'neutral'
+            notify_text = f"🤔 Анон отреагировал на твой пост #{post_num}"
+        
+        # 8. Вызываем редактирование поста для всех получателей
+        # Мы не ждем (await) эту задачу, чтобы не задерживать обработку
+        asyncio.create_task(edit_post_for_all_recipients(post_num, reaction.bot))
+
+        # 9. Проверяем rate limit и отправляем уведомление автору
+        async with reaction_notify_lock:
+            now = time.time()
+            # Убираем старые временные метки
+            while reaction_notify_timestamps and reaction_notify_timestamps[0] <= now - REACTION_NOTIFY_WINDOW:
+                reaction_notify_timestamps.popleft()
+            
+            if len(reaction_notify_timestamps) < REACTION_NOTIFY_LIMIT:
+                reaction_notify_timestamps.append(now)
+                can_send = True
+            else:
+                can_send = False
+        
+        if can_send and author_id:
+            try:
+                # Отправляем уведомление автору поста
+                await reaction.bot.send_message(author_id, notify_text)
+            except (TelegramForbiddenError, TelegramBadRequest):
+                pass # Игнорируем, если не удалось доставить
+                
+    except Exception as e:
+        import traceback
+        print(f"❌ Критическая ошибка в handle_message_reaction: {e}\n{traceback.format_exc()}")
+        
 @dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
