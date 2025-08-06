@@ -9,7 +9,7 @@ except ImportError:
     # Запасной вариант, если файл используется отдельно
     def escape_html(text: str) -> str:
         if not text: return text
-        return text.replace('&', '&').replace('<', '<').replace('>', '>').replace('"', '"')
+        return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
 
 
 # --- НОВЫЙ СУЩЕСТВЕННО РАСШИРЕННЫЙ СЛОВАРЬ ПЕРЕВОДОВ ---
