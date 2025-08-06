@@ -63,7 +63,7 @@ BOARD_CONFIG = {
     'po': {
         "name": "/po/",
         "description": "ПОЛИТАЧ - (срачи, политика)",
-        "description_en": "POLITICS  -",
+        "description_en": "POLITICS  -",
         "username": "@dvach_po_chatbot",
         "token": os.getenv("PO_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("PO_ADMINS", "").split(",") if x}
@@ -99,6 +99,14 @@ BOARD_CONFIG = {
         "username": "@tgchan_chatbot",
         "token": os.getenv("INT_BOT_TOKEN"),
         "admins": {int(x) for x in os.getenv("INT_ADMINS", "").split(",") if x}
+    },
+    'test': {
+        "name": "/test/",
+        "description": "Testground",
+        "description_en": "Testground",
+        "username": "@tgchan_testbot", # ЗАМЕНИТЕ НА ЮЗЕРНЕЙМ ВАШЕГО БОТА
+        "token": os.getenv("TEST_BOT_TOKEN"),
+        "admins": {int(x) for x in os.getenv("TEST_ADMINS", "").split(",") if x}
     }
 }
 
@@ -145,6 +153,8 @@ board_data = defaultdict(lambda: {
     'message_counter': defaultdict(int),
     # --- Кэш последних сообщений (для анти-спама) ---
     'last_user_msgs': {},
+    # --- Отслеживание активности для очистки памяти ---
+    'last_activity': {},
 })
 
 # ========== ОБЩИЕ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (остаются без изменений) ==========
@@ -163,7 +173,6 @@ post_to_messages = {}
 message_to_post = {}
 last_messages = deque(maxlen=3) # Используется для генерации сообщений, можно оставить общим
 last_activity_time = datetime.now()
-daily_log = io.StringIO()
 sent_media_groups = deque(maxlen=1000)
 current_media_groups = {}
 media_group_timers = {}
@@ -963,16 +972,12 @@ async def auto_memory_cleaner():
                 messages_storage.pop(post_num, None)
                 post_to_messages.pop(post_num, None)
 
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Эффективное удаление ---
-            # Вместо полного пересоздания словаря, итеративно удаляем устаревшие ключи.
-            # Это значительно эффективнее по памяти и CPU при больших размерах словаря.
             keys_to_delete_from_m2p = [
                 key for key, post_num in message_to_post.items()
                 if post_num in posts_to_delete_set
             ]
             for key in keys_to_delete_from_m2p:
                 message_to_post.pop(key, None)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов.")
 
@@ -989,11 +994,48 @@ async def auto_memory_cleaner():
                 b_data['message_counter'] = defaultdict(int, top_users)
                 print(f"🧹 [{board_id}] Очистка счетчика сообщений.")
 
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: ЦЕНТРАЛИЗОВАННАЯ ОЧИСТКА НЕАКТИВНЫХ ---
+            
+            # Устанавливаем порог неактивности - 3 дня
+            inactive_threshold = now_utc - timedelta(days=2)
+            
+            # Собираем ID пользователей, которых нужно очистить
+            users_to_purge = [
+                user_id for user_id, last_time in b_data.get('last_activity', {}).items()
+                if last_time < inactive_threshold
+            ]
+            
+            if users_to_purge:
+                purged_count = len(users_to_purge)
+                print(f"🧹 [{board_id}] Начинаю очистку данных для {purged_count} неактивных пользователей...")
+                
+                # Удаляем данные этих пользователей из всех временных хранилищ
+                for user_id in users_to_purge:
+                    b_data['last_activity'].pop(user_id, None)
+                    b_data['mutes'].pop(user_id, None)
+                    b_data['shadow_mutes'].pop(user_id, None)
+                    b_data['last_texts'].pop(user_id, None)
+                    b_data['last_stickers'].pop(user_id, None)
+                    b_data['last_animations'].pop(user_id, None)
+                    b_data['spam_violations'].pop(user_id, None)
+                    b_data['spam_tracker'].pop(user_id, None)
+                
+                print(f"🧹 [{board_id}] Очистка завершена. Удалены временные данные {purged_count} пользователей.")
 
-            # 2.2. Чистим spam_tracker доски от старых записей
+            # 2.2. Чистим истекшие муты для активных пользователей
+            active_mutes = b_data.get('mutes', {})
+            for user_id in list(active_mutes.keys()):
+                if active_mutes[user_id] < now_utc:
+                    active_mutes.pop(user_id, None)
+            
+            active_shadow_mutes = b_data.get('shadow_mutes', {})
+            for user_id in list(active_shadow_mutes.keys()):
+                 if active_shadow_mutes[user_id] < now_utc:
+                    active_shadow_mutes.pop(user_id, None)
+
+            # 2.3. Чистим spam_tracker доски от старых записей (для активных пользователей)
             spam_tracker_board = b_data['spam_tracker']
             for user_id in list(spam_tracker_board.keys()):
-                # Окно для спам-трекера берем из общей конфигурации
                 window_sec = SPAM_RULES.get('text', {}).get('window_sec', 15)
                 window_start = now_utc - timedelta(seconds=window_sec)
                 
@@ -1004,21 +1046,18 @@ async def auto_memory_cleaner():
                 if not spam_tracker_board[user_id]:
                     del spam_tracker_board[user_id]
             
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-            # 2.3. Чистим spam_violations от давно неактивных пользователей
-            inactive_threshold = now_utc - timedelta(hours=24) # Порог неактивности - 24 часа
+            # 2.4. Чистим spam_violations от давно неактивных пользователей (дублирующая проверка на случай, если пользователь остался в этом словаре)
+            inactive_threshold_spam = now_utc - timedelta(hours=24) 
             spam_violations_board = b_data['spam_violations']
             
-            # Собираем ID пользователей для удаления, чтобы не изменять словарь во время итерации
-            users_to_purge = [
+            users_to_purge_from_spam = [
                 user_id for user_id, data in spam_violations_board.items()
-                if data.get('last_reset', now_utc) < inactive_threshold
+                if data.get('last_reset', now_utc) < inactive_threshold_spam
             ]
             
-            if users_to_purge:
-                for user_id in users_to_purge:
+            if users_to_purge_from_spam:
+                for user_id in users_to_purge_from_spam:
                     spam_violations_board.pop(user_id, None)
-                print(f"🧹 [{board_id}] Очистка spam_violations: удалено {len(users_to_purge)} записей старых пользователей.")
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         # 3. Агрессивная сборка мусора (ОБЩАЯ)
@@ -1044,6 +1083,9 @@ async def board_statistics_broadcaster():
             # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
             # Переносим формирование текста внутрь цикла рассылки
             for board_id in BOARDS:
+                if board_id == 'test': # --- ДОБАВЛЕНО: Пропускаем рассылку на тестовую доску
+                    continue
+
                 activity = get_board_activity_last_hours(board_id, hours=2)
                 if activity < 20:
                     print(f"ℹ️ [{board_id}] Пропуск отправки статистики, активность слишком низкая: {activity:.1f} п/ч (требуется > 20).")
@@ -1056,7 +1098,11 @@ async def board_statistics_broadcaster():
 
                 # Формируем локализованный текст
                 stats_lines = []
+                # --- НАЧАЛО ИЗМЕНЕНИЙ ---
                 for b_id_inner, config_inner in BOARD_CONFIG.items():
+                    if b_id_inner == 'test': # Исключаем тестовую доску из списка
+                        continue
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                     hour_stat = posts_per_hour[b_id_inner]
                     total_stat = board_data[b_id_inner].get('board_post_count', 0)
                     
@@ -1093,17 +1139,21 @@ async def setup_pinned_messages(bots: dict[str, Bot]):
         if board_id == 'int':
             base_help_text = HELP_TEXT_EN
             boards_header = "🌐 <b>All boards:</b>"
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
             board_links = "\n".join(
                 f"<b>{config['name']}</b> {config['description_en']} - {config['username']}"
-                for config in BOARD_CONFIG.values()
+                for b_id, config in BOARD_CONFIG.items() if b_id != 'test'
             )
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         else:
             base_help_text = HELP_TEXT
             boards_header = "🌐 <b>Все доски:</b>"
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
             board_links = "\n".join(
                 f"<b>{config['name']}</b> {config['description']} - {config['username']}"
-                for config in BOARD_CONFIG.values()
+                for b_id, config in BOARD_CONFIG.items() if b_id != 'test'
             )
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
         # Собираем финальное сообщение
         full_help_text = (
@@ -2127,6 +2177,75 @@ AHE_EYES = ['😵', '🤤', '😫', '😩', '😳', '😖', '🥵']
 AHE_TONGUE = ['👅', '💦', '😛', '🤪', '😝']
 AHE_EXTRA = ['💕', '💗', '✨', '🥴', '']
 
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    user_id = message.from_user.id
+    board_id = get_board_id(message)
+    if not board_id: return
+    
+    b_data = board_data[board_id]
+
+    if user_id not in b_data['users']['active']:
+        b_data['users']['active'].add(user_id)
+        print(f"✅ [{board_id}] Новый пользователь через /start: ID {user_id}")
+    
+    start_text = b_data.get('start_message_text', "Добро пожаловать в ТГАЧ!")
+    
+    await message.answer(start_text, parse_mode="HTML", disable_web_page_preview=True)
+    await message.delete()
+
+@dp.message(Command(commands=['b', 'po', 'pol', 'a', 'sex', 'vg', 'int', 'test']))
+async def cmd_show_board_info(message: types.Message):
+    """
+    Отвечает на команду с названием доски, предоставляя информацию о ней.
+    """
+    current_board_id = get_board_id(message)
+    if not current_board_id:
+        return
+
+    # Получаем команду без "/"
+    requested_board_alias = message.text.lstrip('/')
+    
+    # Обрабатываем алиас /pol -> /po
+    if requested_board_alias == 'pol':
+        requested_board_alias = 'po'
+        
+    # Проверяем, существует ли такая доска в конфиге
+    if requested_board_alias not in BOARD_CONFIG:
+        # Эту ситуацию aiogram не должен допустить, но проверка не повредит
+        await message.delete()
+        return
+
+    # Получаем данные о запрошенной доске
+    target_config = BOARD_CONFIG[requested_board_alias]
+
+    # Определяем язык ответа на основе ТЕКУЩЕЙ доски пользователя
+    is_english = (current_board_id == 'int')
+
+    if is_english:
+        header_text = f"🌐 You are currently on the <b>{BOARD_CONFIG[current_board_id]['name']}</b> board."
+        board_info_text = (
+            f"You requested information about the <b>{target_config['name']}</b> board:\n"
+            f"<i>{target_config['description_en']}</i>\n\n"
+            f"You can switch to it here: {target_config['username']}"
+        )
+    else:
+        header_text = f"🌐 Вы находитесь на доске <b>{BOARD_CONFIG[current_board_id]['name']}</b>."
+        board_info_text = (
+            f"Вы запросили информацию о доске <b>{target_config['name']}</b>:\n"
+            f"<i>{target_config['description']}</i>\n\n"
+            f"Переключиться на нее можно здесь: {target_config['username']}"
+        )
+    
+    full_response_text = f"{header_text}\n\n{board_info_text}"
+
+    try:
+        # Отправляем ответ пользователю
+        await message.answer(full_response_text, parse_mode="HTML", disable_web_page_preview=True)
+        # Удаляем исходную команду
+        await message.delete()
+    except Exception as e:
+        print(f"Ошибка в cmd_show_board_info: {e}")
 
 @dp.message(Command("face"))
 async def cmd_face(message: types.Message):
@@ -2319,7 +2438,11 @@ async def cmd_active(message: types.Message):
 
     # 2. Собираем статистику по всем доскам
     activity_lines = []
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     for b_id in BOARDS:
+        if b_id == 'test':
+            continue
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         # Считаем активность за последние 2 часа
         activity = get_board_activity_last_hours(b_id, hours=2)
         board_name = BOARD_CONFIG[b_id]['name']
@@ -3210,6 +3333,10 @@ async def handle_audio(message: Message):
         await message.delete()
         return
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    b_data['last_activity'][user_id] = datetime.now(UTC)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
     spam_check = await check_spam(user_id, message, board_id)
     if not spam_check:
         try:
@@ -3304,6 +3431,10 @@ async def handle_voice(message: Message):
         await message.delete()
         return
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    b_data['last_activity'][user_id] = datetime.now(UTC)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     # Проводим спам-проверку для голосовых сообщений
     spam_check = await check_spam(user_id, message, board_id)
     if not spam_check:
@@ -3370,7 +3501,6 @@ async def handle_voice(message: Message):
     except Exception as e:
         print(f"❌ Критическая ошибка постановки в очередь голосового поста. Пост #{current_post_num} удален. Ошибка: {e}")
         messages_storage.pop(current_post_num, None)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
 @dp.message(F.media_group_id)
 async def handle_media_group_init(message: Message):
@@ -3392,6 +3522,10 @@ async def handle_media_group_init(message: Message):
         # НЕ УДАЛЯЕМ СООБЩЕНИЕ
         return
     
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    b_data['last_activity'][user_id] = datetime.now(UTC)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     group = current_media_groups.get(media_group_id)
     is_leader = False
 
@@ -3664,6 +3798,10 @@ async def handle_message(message: Message):
         return
 
     is_shadow_muted = (user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    b_data['last_activity'][user_id] = datetime.now(UTC)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if user_id not in b_data['users']['active']:
         b_data['users']['active'].add(user_id)
