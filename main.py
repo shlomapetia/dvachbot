@@ -120,7 +120,6 @@ message_queues = {board: asyncio.Queue(maxsize=9000) for board in BOARDS}
 # ========== Глобальные переменные и настройки ==========
 is_shutting_down = False
 git_executor = ThreadPoolExecutor(max_workers=1)
-send_executor = ThreadPoolExecutor(max_workers=20)
 save_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 1) # Executor для сохранения файлов
 git_semaphore = asyncio.Semaphore(1)
 post_counter_lock = asyncio.Lock()
@@ -157,11 +156,10 @@ board_data = defaultdict(lambda: {
     'last_activity': {},
 })
 
-# ========== Rate Limiter для уведомлений о реакциях ==========
-REACTION_NOTIFY_LIMIT = 40
-REACTION_NOTIFY_WINDOW = 60 # секунд
-reaction_notify_timestamps = deque(maxlen=REACTION_NOTIFY_LIMIT)
-reaction_notify_lock = asyncio.Lock()
+# ========== Rate Limiter для уведомлений о реакциях (на пользователя) ==========
+AUTHOR_NOTIFY_LIMIT_PER_MINUTE = 4
+author_reaction_notify_tracker = defaultdict(lambda: deque(maxlen=AUTHOR_NOTIFY_LIMIT_PER_MINUTE))
+author_reaction_notify_lock = asyncio.Lock()
 
 # ========== ОБЩИЕ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (остаются без изменений) ==========
 MODE_COOLDOWN = 3600  # 1 час в секундах
@@ -444,23 +442,9 @@ def get_user_msgs_deque(user_id: int, board_id: str):
 # Конфиг
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMINS = {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
-SPAM_LIMIT = 14
-SPAM_WINDOW = 15
-STATE_FILE = 'state.json'
-SAVE_INTERVAL = 900  # секунд
-STICKER_WINDOW = 10  # секунд
-STICKER_LIMIT = 7
-REST_SECONDS = 30  # время блокировки
-REPLY_CACHE = 500  # сколько постов держать
-REPLY_FILE = "reply_cache.json"  # отдельный файл для reply
 # В начале файла с константами
 MAX_MESSAGES_IN_MEMORY = 600  # храним только последние 600 постов
 
-
-WEEKDAYS = [
-    "Понедельник", "Вторник", "Среда", 
-    "Четверг", "Пятница", "Суббота", "Воскресенье"
-]
 
 # Мотивационные сообщения для приглашений
 MOTIVATIONAL_MESSAGES = [
@@ -979,16 +963,28 @@ async def auto_memory_cleaner():
                 b_data['message_counter'] = defaultdict(int, top_users)
                 print(f"🧹 [{board_id}] Очистка счетчика сообщений.")
 
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: ЦЕНТРАЛИЗОВАННАЯ ОЧИСТКА НЕАКТИВНЫХ ---
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: БОЛЕЕ АГРЕССИВНАЯ, НО БЕЗОПАСНАЯ ОЧИСТКА ---
             
-            # Устанавливаем порог неактивности - 2 дня
-            inactive_threshold = now_utc - timedelta(days=2)
+            # Устанавливаем порог неактивности - 12 часов (вместо 2 дней)
+            inactive_threshold = now_utc - timedelta(hours=12)
             
             # Собираем ID пользователей, которых нужно очистить
-            users_to_purge = [
+            potentially_inactive_users = {
                 user_id for user_id, last_time in b_data.get('last_activity', {}).items()
                 if last_time < inactive_threshold
-            ]
+            }
+            
+            # Исключаем пользователей с активными мутами из списка на удаление
+            users_with_active_mute = {
+                uid for uid, expiry in b_data.get('mutes', {}).items() if expiry > now_utc
+            }
+            users_with_active_shadow_mute = {
+                uid for uid, expiry in b_data.get('shadow_mutes', {}).items() if expiry > now_utc
+            }
+            
+            users_to_purge = list(
+                potentially_inactive_users - users_with_active_mute - users_with_active_shadow_mute
+            )
             
             if users_to_purge:
                 purged_count = len(users_to_purge)
@@ -997,19 +993,17 @@ async def auto_memory_cleaner():
                 # Удаляем данные этих пользователей из всех временных хранилищ
                 for user_id in users_to_purge:
                     b_data['last_activity'].pop(user_id, None)
-                    b_data['mutes'].pop(user_id, None)
-                    b_data['shadow_mutes'].pop(user_id, None)
                     b_data['last_texts'].pop(user_id, None)
                     b_data['last_stickers'].pop(user_id, None)
                     b_data['last_animations'].pop(user_id, None)
                     b_data['spam_violations'].pop(user_id, None)
                     b_data['spam_tracker'].pop(user_id, None)
-                    # --- ДОБАВЛЕНО ---
                     b_data['last_user_msgs'].pop(user_id, None)
+                    # Mutes и shadow_mutes не трогаем, так как мы их уже отфильтровали
                 
                 print(f"🧹 [{board_id}] Очистка завершена. Удалены временные данные {purged_count} пользователей.")
 
-            # 2.2. Чистим истекшие муты для активных пользователей
+            # 2.2. Чистим истекшие муты (логика остается)
             active_mutes = b_data.get('mutes', {})
             for user_id in list(active_mutes.keys()):
                 if active_mutes[user_id] < now_utc:
@@ -1020,7 +1014,7 @@ async def auto_memory_cleaner():
                  if active_shadow_mutes[user_id] < now_utc:
                     active_shadow_mutes.pop(user_id, None)
 
-            # 2.3. Чистим spam_tracker доски от старых записей (для активных пользователей)
+            # 2.3. Чистим spam_tracker доски от старых записей
             spam_tracker_board = b_data['spam_tracker']
             for user_id in list(spam_tracker_board.keys()):
                 window_sec = SPAM_RULES.get('text', {}).get('window_sec', 15)
@@ -1033,7 +1027,7 @@ async def auto_memory_cleaner():
                 if not spam_tracker_board[user_id]:
                     del spam_tracker_board[user_id]
             
-            # 2.4. Чистим spam_violations от давно неактивных пользователей (дублирующая проверка на случай, если пользователь остался в этом словаре)
+            # 2.4. Чистим spam_violations
             inactive_threshold_spam = now_utc - timedelta(hours=24) 
             spam_violations_board = b_data['spam_violations']
             
@@ -1046,8 +1040,19 @@ async def auto_memory_cleaner():
                 for user_id in users_to_purge_from_spam:
                     spam_violations_board.pop(user_id, None)
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        
+        # 3. Очистка трекера уведомлений о реакциях
+        keys_to_delete_from_tracker = [
+            author_id for author_id, timestamps in author_reaction_notify_tracker.items()
+            if not timestamps
+        ]
+        if keys_to_delete_from_tracker:
+            for author_id in keys_to_delete_from_tracker:
+                if not author_reaction_notify_tracker.get(author_id):
+                    del author_reaction_notify_tracker[author_id]
+            print(f"🧹 Очистка трекера реакций: удалено {len(keys_to_delete_from_tracker)} неактивных авторов.")
 
-        # 3. Агрессивная сборка мусора (ОБЩАЯ)
+        # 4. Агрессивная сборка мусора
         gc.collect()
         
 async def board_statistics_broadcaster():
@@ -1595,20 +1600,30 @@ async def _format_message_body(content: dict, user_id_for_context: int, post_num
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     # 2. Формируем блок с реакциями
     post_data = messages_storage.get(post_num, {})
-    reactions_data = post_data.get('reactions') # 'reactions' будет словарем
+    reactions_data = post_data.get('reactions')
     
     if reactions_data:
         reaction_lines = []
-        # Собираем строки для каждой категории реакций
-        if reactions_data.get('positive'):
-            reaction_lines.append("".join(reactions_data['positive']))
-        if reactions_data.get('neutral'):
-            reaction_lines.append("".join(reactions_data['neutral']))
-        if reactions_data.get('negative'):
-            reaction_lines.append("".join(reactions_data['negative']))
+        # --- НОВАЯ ЛОГИКА для структуры {'users': {uid: [emojis]}} ---
+        if 'users' in reactions_data and isinstance(reactions_data.get('users'), dict):
+            all_emojis = [emoji for user_emojis in reactions_data['users'].values() for emoji in user_emojis]
             
+            # Собираем и сортируем эмодзи по категориям для консистентного отображения
+            positive_display = sorted([e for e in all_emojis if e in POSITIVE_REACTIONS])
+            neutral_display = sorted([e for e in all_emojis if e not in POSITIVE_REACTIONS and e not in NEGATIVE_REACTIONS])
+            negative_display = sorted([e for e in all_emojis if e in NEGATIVE_REACTIONS])
+            
+            if positive_display: reaction_lines.append("".join(positive_display))
+            if neutral_display: reaction_lines.append("".join(neutral_display))
+            if negative_display: reaction_lines.append("".join(negative_display))
+
+        # --- СТАРАЯ ЛОГИКА для обратной совместимости ---
+        elif 'positive' in reactions_data or 'negative' in reactions_data:
+            if reactions_data.get('positive'): reaction_lines.append("".join(reactions_data['positive']))
+            if reactions_data.get('neutral'): reaction_lines.append("".join(reactions_data['neutral']))
+            if reactions_data.get('negative'): reaction_lines.append("".join(reactions_data['negative']))
+        
         if reaction_lines:
-            # Объединяем строки реакций в один блок и добавляем в 'parts'
             reactions_block = "\n".join(reaction_lines)
             parts.append(reactions_block)
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
@@ -3437,7 +3452,7 @@ async def handle_audio(message: Message):
 
     messages_storage[current_post_num] = {
         'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
-        'reply_to': reply_to_post, 'board_id': board_id, 'author_message_id': None
+        'board_id': board_id, 'author_message_id': None
     }
     
     try:
@@ -3528,7 +3543,7 @@ async def handle_voice(message: Message):
 
     messages_storage[current_post_num] = {
         'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
-        'reply_to': reply_to_post, 'board_id': board_id, 'author_message_id': None
+        'board_id': board_id, 'author_message_id': None
     }
 
     try:
@@ -3737,7 +3752,7 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
 
         messages_storage[post_num] = {
             'author_id': user_id, 'timestamp': group['timestamp'], 'content': content,
-            'reply_to': reply_to_post, 'board_id': board_id
+            'board_id': board_id
         }
 
         reply_info = {}
@@ -3825,89 +3840,90 @@ def apply_greentext_formatting(text: str) -> str:
 async def handle_message_reaction(reaction: types.MessageReactionUpdated):
     """
     Обрабатывает реакции пользователей, обновляет рейтинг поста, редактирует
-    сообщения и отправляет уведомления автору.
+    сообщения и отправляет уведомления автору с новыми лимитами.
     """
-    # 1. Игнорируем, если реакции были убраны
-    if not reaction.new_reaction:
-        return
-
     try:
-        # 2. Получаем ключевые ID и данные
+        # 1. Получаем ключевые ID и данные
         user_id = reaction.user.id
         chat_id = reaction.chat.id
         message_id = reaction.message_id
         board_id = get_board_id(reaction)
-        
-        if not board_id:
-            return
+        if not board_id: return
 
-        # 3. Находим пост и его автора
+        # 2. Находим пост и его автора
         post_num = message_to_post.get((chat_id, message_id))
         if not post_num or post_num not in messages_storage:
-            return # Реакция на старое или ненайденное сообщение
+            return  # Реакция на старое или ненайденное сообщение
 
         post_data = messages_storage[post_num]
         author_id = post_data.get('author_id')
 
-        # 4. Игнорируем реакции на собственные сообщения
+        # 3. Игнорируем реакции на собственные сообщения
         if author_id == user_id:
             return
 
-        # 5. Инициализируем хранилище реакций, если его нет
-        if 'reactions' not in post_data:
-            post_data['reactions'] = {'positive': [], 'neutral': [], 'negative': [], 'rating': 0}
+        # 4. Инициализируем или конвертируем хранилище реакций
+        # Эта логика безопасно переведет посты со старой структурой на новую при первой реакции
+        if 'reactions' not in post_data or 'users' not in post_data.get('reactions', {}):
+            post_data['reactions'] = {'users': {}}
         
-        # 6. Обрабатываем новые реакции
-        new_emojis = {react.emoji for react in reaction.new_reaction if react.type == 'emoji'}
-        old_emojis = {react.emoji for react in reaction.old_reaction if react.type == 'emoji'}
+        reactions_storage = post_data['reactions']['users']
+
+        # 5. Получаем новый список эмодзи от пользователя
+        new_emojis = [r.emoji for r in reaction.new_reaction if r.type == 'emoji']
         
-        added_emoji = list(new_emojis - old_emojis)
-        if not added_emoji:
-            return # Ничего не было добавлено, только убрано
-            
-        emoji = added_emoji[0] # Берем только первую добавленную реакцию за раз
+        # 6. Обрабатываем полное снятие реакций
+        if not new_emojis:
+            if user_id in reactions_storage:
+                del reactions_storage[user_id]
+                asyncio.create_task(edit_post_for_all_recipients(post_num, reaction.bot))
+            return
+
+        # 7. Применяем лимит в 2 реакции на пользователя и обновляем
+        old_emojis_from_user = set(reactions_storage.get(user_id, []))
+        limited_new_emojis = new_emojis[:2]
+        reactions_storage[user_id] = limited_new_emojis
         
-        # 7. Классифицируем и обновляем данные поста
-        reactions = post_data['reactions']
-        if emoji in POSITIVE_REACTIONS:
-            reactions['positive'].append(emoji)
-            reactions['rating'] += 1
-            category = 'positive'
-            notify_text = f"👍 Анон оценил твой пост #{post_num}"
-        elif emoji in NEGATIVE_REACTIONS:
-            reactions['negative'].append(emoji)
-            reactions['rating'] -= 1
-            category = 'negative'
-            notify_text = f"👎 Анон осудил твой пост #{post_num}"
-        else:
-            reactions['neutral'].append(emoji)
-            category = 'neutral'
-            notify_text = f"🤔 Анон отреагировал на твой пост #{post_num}"
-        
-        # 8. Вызываем редактирование поста для всех получателей
-        # Мы не ждем (await) эту задачу, чтобы не задерживать обработку
+        # 8. Редактируем пост для всех получателей
         asyncio.create_task(edit_post_for_all_recipients(post_num, reaction.bot))
 
-        # 9. Проверяем rate limit и отправляем уведомление автору
-        async with reaction_notify_lock:
+        # 9. Логика отправки уведомления автору
+        # Определяем, был ли ДОБАВЛЕН новый тип эмодзи (а не просто заменен)
+        newly_added_emojis = set(limited_new_emojis) - old_emojis_from_user
+        if not newly_added_emojis or not author_id:
+            return # Не отправляем уведомление, если реакция была заменена или убрана
+
+        # 10. Проверяем rate limit для автора и отправляем уведомление
+        async with author_reaction_notify_lock:
             now = time.time()
-            # Убираем старые временные метки
-            while reaction_notify_timestamps and reaction_notify_timestamps[0] <= now - REACTION_NOTIFY_WINDOW:
-                reaction_notify_timestamps.popleft()
+            author_timestamps = author_reaction_notify_tracker[author_id]
             
-            if len(reaction_notify_timestamps) < REACTION_NOTIFY_LIMIT:
-                reaction_notify_timestamps.append(now)
+            # Убираем старые временные метки (старше минуты)
+            while author_timestamps and author_timestamps[0] <= now - 60:
+                author_timestamps.popleft()
+
+            if len(author_timestamps) < AUTHOR_NOTIFY_LIMIT_PER_MINUTE:
+                author_timestamps.append(now)
                 can_send = True
             else:
                 can_send = False
-        
-        if can_send and author_id:
+
+        if can_send:
+            emoji = list(newly_added_emojis)[0]
+            if board_id == 'int':
+                notify_text = f"🤔 Anon reacted to your post #{post_num}"
+                if emoji in POSITIVE_REACTIONS: notify_text = f"👍 Anon liked your post #{post_num}"
+                elif emoji in NEGATIVE_REACTIONS: notify_text = f"👎 Anon disliked your post #{post_num}"
+            else:
+                notify_text = f"🤔 Анон отреагировал на твой пост #{post_num}"
+                if emoji in POSITIVE_REACTIONS: notify_text = f"👍 Анон оценил твой пост #{post_num}"
+                elif emoji in NEGATIVE_REACTIONS: notify_text = f"👎 Анон осудил твой пост #{post_num}"
+            
             try:
-                # Отправляем уведомление автору поста
                 await reaction.bot.send_message(author_id, notify_text)
             except (TelegramForbiddenError, TelegramBadRequest):
                 pass # Игнорируем, если не удалось доставить
-                
+
     except Exception as e:
         import traceback
         print(f"❌ Критическая ошибка в handle_message_reaction: {e}\n{traceback.format_exc()}")
@@ -4012,7 +4028,7 @@ async def handle_message(message: Message):
 
         messages_storage[current_post_num] = {
             'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
-            'reply_to': reply_to_post, 'author_message_id': None, 'board_id': board_id
+            'author_message_id': None, 'board_id': board_id
         }
 
         try:
