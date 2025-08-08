@@ -4171,7 +4171,8 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
     except Exception as e:
         import traceback
         print(f"❌ Критическая ошибка в handle_message_reaction: {e}\n{traceback.format_exc()}")
-        
+
+@dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
     
