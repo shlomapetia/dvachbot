@@ -1,4 +1,3 @@
-# zaputin_mode.py
 import random
 
 def zaputin_transform(text: str) -> str:
@@ -6,7 +5,6 @@ def zaputin_transform(text: str) -> str:
     if not text:
         return text
         
-    # Заменяем символы (все варианты)
     replacements = {
         'З': 'Z', 'з': 'Z',
         'В': 'V', 'в': 'V',
@@ -20,7 +18,7 @@ def zaputin_transform(text: str) -> str:
     
     return text
 
-# Патриотические фразы для режима
+# --- EXPANDED LIST ---
 PATRIOTIC_PHRASES = [
     "СЛАВА РОССИИ!",
     "ПУТИН - 🇷🇺 НАШ ПРЕЗИДЕНТ! 🇷🇺",
@@ -43,10 +41,12 @@ PATRIOTIC_PHRASES = [
     "ДИДЫ ВАИВАЛЕ!",
     "ВЫСИРАНЫ СВО ЭТО ГЕРОИ!",
     "ВСЕМ Z",
+    "МЫ ZАЛУПГОЛОVЫЕ!",
+    "СВОШНИКИ ПИДОРАСЫ!",
     "Я ГОЛОСОВАЛ ЗА ПУТИНА",
     "СУВОРОВ С НАМИ!",
     "ЖИДОБАНДЕРОВЦЫ ЗАПЛАТЯТ!",
-    "НОВОРОССИЯ ВОССТАНИТ!",
+    "НОВОРОССИЯ ВОССТАНЕТ!",
     "СМЕРТЬ ПРЕДАТЕЛЯМ!",
     "ВЕРИМ В ЦАРЯ-БАТЮШКУ!",
     "ПРАВОСЛАВИЕ ИЛИ СМЕРТЬ!",
@@ -60,8 +60,16 @@ PATRIOTIC_PHRASES = [
     "МАТЬ РОССИЯ НЕ ПРОСТИТ! 🇷🇺",
     "ПЕСНИ ШАМАНА В ДУШЕ!",
     "🇷🇺 РОССИЯ - ЛУЧШАЯ СТРАНА!",
-    "СЛАВА УКРАИНЕ!",
-    "УКРАИНА - НАША РОДИНА!", 
     "Разрушим НАТО!",
-    "Ебать НАТО!"
+    "Ебать НАТО!",
+    "ZА НАШИХ ПАЦАНОВ!",
+    "VПЕРЕД К ПОБЕДЕ!",
+    "КИЕВ ЗА ТРИ ДНЯ!",
+    "МЫ В РАЙ, А ОНИ ПРОСТО СДОХНУТ.",
+    "РОДИНА-МАТЬ ЗОВЕТ!",
+    "НЕ НРАВИТСЯ В РОССИИ - УЕЗЖАЙ!",
+    "АМЕРИКА - ИМПЕРИЯ ЛЖИ!",
+    "СВОИХ НЕ БРОСАЕМ!",
+    "ГДЕ ВЫ БЫЛИ 8 ЛЕТ?",
+    "ЭТО ВСЁ АНГЛОСАКСЫ ВИНОВАТЫ!"
 ]
