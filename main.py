@@ -443,10 +443,19 @@ def get_user_msgs_deque(user_id: int, board_id: str):
     return last_user_msgs_for_board[user_id]
 
 # Конфиг
+# Конфиг
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMINS = {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
-# В начале файла с константами
-MAX_MESSAGES_IN_MEMORY = 600  # храним только последние 600 постов
+SPAM_LIMIT = 14
+SPAM_WINDOW = 15
+STATE_FILE = 'state.json'
+SAVE_INTERVAL = 900  # секунд
+STICKER_WINDOW = 10  # секунд
+STICKER_LIMIT = 7
+REST_SECONDS = 30  # время блокировки
+REPLY_CACHE = 500  # сколько постов держать в кэше для каждой доски
+REPLY_FILE = "reply_cache.json"  # отдельный файл для reply
+MAX_MESSAGES_IN_MEMORY = 500  # храним только последние 600 постов в общей памяти
 
 
 # Мотивационные сообщения для приглашений
@@ -1090,17 +1099,19 @@ async def auto_memory_cleaner():
             if users_to_purge_from_spam:
                 for user_id in users_to_purge_from_spam:
                     spam_violations_board.pop(user_id, None)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
-        # 3. Очистка трекера уведомлений о реакциях
+        # 3. Очистка трекера уведомлений о реакциях по неактивности
+        now_ts = time.time()
+        tracker_inactive_threshold_sec = 24 * 3600  # 24 часа
+
         keys_to_delete_from_tracker = [
             author_id for author_id, timestamps in author_reaction_notify_tracker.items()
-            if not timestamps
+            if not timestamps or (now_ts - timestamps[-1] > tracker_inactive_threshold_sec)
         ]
+        
         if keys_to_delete_from_tracker:
             for author_id in keys_to_delete_from_tracker:
-                if not author_reaction_notify_tracker.get(author_id):
-                    del author_reaction_notify_tracker[author_id]
+                del author_reaction_notify_tracker[author_id]
             print(f"🧹 Очистка трекера реакций: удалено {len(keys_to_delete_from_tracker)} неактивных авторов.")
 
         # 4. Агрессивная сборка мусора
@@ -1298,42 +1309,39 @@ async def apply_penalty(bot_instance: Bot, user_id: int, msg_type: str, board_id
     level = min(level, len(rules.get('penalty', [])) - 1)
     mute_seconds = rules['penalty'][level] if rules.get('penalty') else 30
     
-    # Применяем мут в контексте доски
     b_data['mutes'][user_id] = datetime.now(UTC) + timedelta(seconds=mute_seconds)
     
-    # Определяем тип нарушения
-    violation_type = {
-        'text': "текстовый спам",
-        'sticker': "спам стикерами",
-        'animation': "спам гифками"
-    }.get(msg_type, "спам")
+    violation_type = {'text': "текстовый спам", 'sticker': "спам стикерами", 'animation': "спам гифками"}.get(msg_type, "спам")
     
-    # Уведомление
     try:
-        if mute_seconds < 60:
-            time_str = f"{mute_seconds} сек"
-        elif mute_seconds < 3600:
-            time_str = f"{mute_seconds // 60} мин"
-        else:
-            time_str = f"{mute_seconds // 3600} час"
+        if mute_seconds < 60: time_str = f"{mute_seconds} сек"
+        elif mute_seconds < 3600: time_str = f"{mute_seconds // 60} мин"
+        else: time_str = f"{mute_seconds // 3600} час"
 
-        # ИЗМЕНИТЕ ЭТОТ БЛОК
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         if board_id == 'int':
             violation_type_en = {'text': "text spam", 'sticker': "sticker spam", 'animation': "gif spam"}.get(msg_type, "spam")
-            notification_text = (f"🚫 Hey faggot, you are muted for {time_str} for {violation_type_en} on the {BOARD_CONFIG[board_id]['name']} board.\n"
-                                 f"Keep spamming - get banned.")
+            phrases = [
+                "🚫 Hey faggot, you are muted for {time} for {violation} on the {board} board.\nKeep spamming - get banned.",
+                "🔇 Too much spam, buddy. Take a break for {time} on {board}.",
+                "🚨 Spam detected! You've been silenced for {time} for {violation} on {board}. Don't do it again.",
+                "🛑 Stop right there, criminal scum! You're muted for {time} on {board} for spamming."
+            ]
+            notification_text = random.choice(phrases).format(time=time_str, violation=violation_type_en, board=BOARD_CONFIG[board_id]['name'])
         else:
-            notification_text = (f"🚫 Эй пидор ты в муте на {time_str} за {violation_type} на доске {BOARD_CONFIG[board_id]['name']}\n"
-                                 f"Спамишь дальше - получишь бан")
+            phrases = [
+                "🚫 Эй пидор, ты в муте на {time} за {violation} на доске {board}\nСпамишь дальше - получишь бан.",
+                "🔇 Ты заебал спамить. Отдохни {time} на доске {board}.",
+                "🚨 Обнаружен спам! Твоя пасть завалена на {time} за {violation} на доске {board}. Повторишь - получишь по жопе.",
+                "🛑 Стой, пидорас! Ты оштрафован на {time} молчания на доске {board} за свой высер."
+            ]
+            notification_text = random.choice(phrases).format(time=time_str, violation=violation_type, board=BOARD_CONFIG[board_id]['name'])
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         await bot_instance.send_message(user_id, notification_text, parse_mode="HTML")
-        
-        # Передаем bot_instance в send_moderation_notice (потребует адаптации на след. шагах)
         await send_moderation_notice(user_id, "mute", board_id, duration=time_str)
     except Exception as e:
         print(f"Ошибка отправки уведомления о муте: {e}")
-
-# main.py
 
 async def format_header(board_id: str) -> Tuple[str, int]:
     """Асинхронное форматирование заголовка с блокировкой для безопасного инкремента счетчика постов."""
@@ -1521,7 +1529,6 @@ async def delete_single_post(post_num: int, bot_instance: Bot) -> int:
     # Ключ для `message_to_post` - это кортеж (uid, mid).
     for uid, mid in messages_to_delete:
         message_to_post.pop((uid, mid), None)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     return deleted_count
     
@@ -1533,13 +1540,46 @@ async def send_moderation_notice(user_id: int, action: str, board_id: str, durat
 
     _, post_num = await format_header(board_id)
     header = "### Админ ###"
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    lang = 'en' if board_id == 'int' else 'ru'
 
     if action == "ban":
-        text = (f"🚨 Хуесос был забанен за спам. Помянем.")
+        if lang == 'en':
+            ban_phrases = [
+                f"🚨 A faggot has been banned for spam. RIP.",
+                f"☠️ Another spammer bites the dust. Good riddance.",
+                f"🔨 The ban hammer has spoken. A degenerate was removed.",
+                f"✈️ Sent a spammer on a one-way trip to hell."
+            ]
+        else:
+            ban_phrases = [
+                f"🚨 Хуесос был забанен за спам. Помянем.",
+                f"☠️ Мир стал чище, еще один спамер отлетел в бан.",
+                f"🔨 Банхаммер опустился на голову очередного дегенерата.",
+                f"✈️ Отправили спамера в увлекательное путешествие нахуй."
+            ]
+        text = random.choice(ban_phrases)
+
     elif action == "mute":
-        text = (f"🔇 Пидораса замутили ненадолго")
+        if lang == 'en':
+            mute_phrases = [
+                f"🔇 A loudmouth has been muted for a while.",
+                f"🤫 Someone's got a timeout. Let's enjoy the silence.",
+                f"🤐 Put a sock in it! A user has been temporarily silenced.",
+                f"⌛️ A faggot is in the penalty box for a bit."
+            ]
+        else:
+            mute_phrases = [
+                f"🔇 Пидораса замутили ненадолго.",
+                f"🤫 Наслаждаемся тишиной, хуеглот временно не может писать.",
+                f"🤐 Анон отправлен в угол подумать о своем поведении.",
+                f"⌛️ Пидору выписали временный запрет на открытие рта."
+            ]
+        text = random.choice(mute_phrases)
     else:
         return
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     content = {
         'type': 'text',
@@ -2287,12 +2327,27 @@ async def check_cooldown(message: Message, board_id: str) -> bool:
         seconds = int(time_left % 60)
 
         try:
-            await message.answer(
-                f"⏳ Эй пидор, не спеши! Режимы на этой доске можно включать раз в час.\n"
-                f"Жди еще: {minutes} минут {seconds} секунд\n\n"
-                f"А пока посиди в углу и подумай о своем поведении",
-                parse_mode="HTML"
-            )
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            lang = 'en' if board_id == 'int' else 'ru'
+
+            if lang == 'en':
+                phrases = [
+                    "⏳ Hey faggot, slow down! Modes on this board can be switched once per hour.\nWait for: {minutes} minutes {seconds} seconds.",
+                    "⌛️ Cool down, cowboy. The mode switch is on cooldown.\nTime left: {minutes}m {seconds}s.",
+                    "⛔️ You're switching modes too often, cunt. Wait another {minutes} minutes {seconds} seconds.",
+                    "⚠️ Wait, I need to rest. You can switch modes in {minutes}m {seconds}s."
+                ]
+            else:
+                phrases = [
+                    "⏳ Эй пидор, не спеши! Режимы на этой доске можно включать раз в час.\nЖди еще: {minutes} минут {seconds} секунд\n\nА пока посиди в углу и подумай о своем поведении.",
+                    "⌛️ Остынь, ковбой. Кулдаун на смену режима еще не прошел.\nОсталось: {minutes}м {seconds}с.",
+                    "⛔️ Слишком часто меняешь режимы, заебал. Подожди еще {minutes} минут {seconds} секунд.",
+                    "⚠️ Подожди, я отдохну. Режимы можно будет переключить через {minutes}м {seconds}с."
+                ]
+
+            text = random.choice(phrases).format(minutes=minutes, seconds=seconds)
+            await message.answer(text, parse_mode="HTML")
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         except Exception as e:
             print(f"Ошибка отправки кулдауна: {e}")
 
@@ -2459,19 +2514,17 @@ async def cmd_roll(message: types.Message):
 async def cmd_slavaukraine(message: types.Message):
     board_id = get_board_id(message)
     if not board_id: return
-    # --- ДОБАВЬТЕ ЭТОТ БЛОК ---
     if board_id == 'int':
         try:
             await message.delete()
         except Exception: pass
         return
-    # --------------------------
+    
     b_data = board_data[board_id]
 
     if not await check_cooldown(message, board_id):
         return
 
-    # Активация режима и деактивация других на ЭТОЙ доске
     b_data['slavaukraine_mode'] = True
     b_data['last_mode_activation'] = datetime.now(UTC)
     b_data['zaputin_mode'] = False
@@ -2481,14 +2534,22 @@ async def cmd_slavaukraine(message: types.Message):
     _, pnum = await format_header(board_id)
     header = "### Админ ###"
 
-    activation_text = (
-        "УВАГА! АКТИВОВАНО УКРАЇНСЬКИЙ РЕЖИМ!\n\n"
-        "💙💛 СЛАВА УКРАЇНІ! 💛💙\n"
-        "ГЕРОЯМ СЛАВА!\n\n"
-        "Хто не скаже 'Путін хуйло' - той москаль і підар!"
-    )
-
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    activation_phrases = [
+        "УВАГА! АКТИВОВАНО УКРАЇНСЬКИЙ РЕЖИМ!\n\n💙💛 СЛАВА УКРАЇНІ! 💛💙\nГЕРОЯМ СЛАВА!\n\nХто не скаже 'Путін хуйло' - той москаль і підар!",
+        "УКРАЇНСЬКИЙ РЕЖИМ УВІМКНЕНО! 🇺🇦 Всі москалі будуть денацифіковані та демілітаризовані. Смерть ворогам!",
+        "УВАГА! В чаті оголошено контрнаступ! 🚜 СЛАВА НАЦІЇ! ПИЗДЕЦЬ РОСІЙСЬКІЙ ФЕДЕРАЦІЇ!",
+        "💙💛 Переходимо на солов'їну! Хто не скаче, той москаль! СЛАВА ЗСУ!",
+        "АКТИВОВАНО РЕЖИМ 'БАНДЕРОМОБІЛЬ'! 🇺🇦 Завантажуємо Javelin... Ціль: Кремль.",
+        "УКРАЇНСЬКИЙ ПОРЯДОК НАВЕДЕНО! 🫡 Готуйтеся до повного розгрому русні. Путін - хуйло!",
+        "ТЕРМІНОВО! В чаті виявлено русню! Активовано протокол 'АЗОВ'. 🇺🇦 Слава Україні!",
+        "Режим 'ПРИВИД КИЄВА' активовано! ✈️ Вилітаємо на бойове завдання. Рускій воєнний корабль, іді нахуй!",
+        "Наступні 5 хвилин в чаті - лише українська мова! 💙💛 За непокору - розстріл нахуй. Героям Слава!",
+        "УВАГА! Територія цього чату оголошується суверенною територією України! 🇺🇦 СЛАВА УКРАЇНІ!"
+    ]
+    activation_text = random.choice(activation_phrases)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     content = {
         "type": "text",
         "header": header,
@@ -2507,7 +2568,6 @@ async def cmd_slavaukraine(message: types.Message):
         "content": content,
         "post_num": pnum,
     })
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     asyncio.create_task(disable_slavaukraine_mode(310, board_id))
     await message.delete()
@@ -2522,12 +2582,22 @@ async def disable_slavaukraine_mode(delay: int, board_id: str):
     _, pnum = await format_header(board_id)
     header = "### Админ ###"
 
-    end_text = (
-        "💀 Визг хохлов закончен!\n\n"
-        "Украинский режим отключен. Возвращаемся к обычному трёпу."
-    )
-    
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    end_phrases = [
+        "💀 Визг хохлов закончен! Украинский режим отключен. Возвращаемся к обычному трёпу.",
+        "Контрнаступ захлебнулся! 🇷🇺 Хохлы, ваше время вышло. Возвращаемся к нормальному общению.",
+        "Перемога отменяется! 🐷 Украинский режим деактивирован. Можно снова говорить на человеческом языке.",
+        "Свинарник закрыт на дезинфекцию. 🐖 Режим 'Слава Украине' отключен.",
+        "Тарасы, по окопам! Ваша перемога оказалась зрадой. 🇷🇺 Режим отключен.",
+        "Батько наш Бандера сдох! 💀 Украинская пятиминутка ненависти окончена.",
+        "САЛО УРОНИЛИ! 🤣 Режим хохлосрача завершен. Можно выдохнуть.",
+        "Денацификация чата успешно завершена. 🇷🇺 Украинский режим подавлен.",
+        "Байрактары сбиты, джавелины проёбаны. 🐷 Режим отключен, возвращаемся в родную гавань.",
+        "Хрюканина окончена. 🐖 Москали снова победили. Возвращаемся к русскому языку."
+    ]
+    end_text = random.choice(end_phrases)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
     content = {
         "type": "text",
         "header": header,
@@ -2535,7 +2605,7 @@ async def disable_slavaukraine_mode(delay: int, board_id: str):
     }
     
     messages_storage[pnum] = {
-        'author_id': 0, # Системное сообщение
+        'author_id': 0,
         'timestamp': datetime.now(UTC),
         'content': content,
         'board_id': board_id
@@ -2546,7 +2616,6 @@ async def disable_slavaukraine_mode(delay: int, board_id: str):
         "content": content,
         "post_num": pnum,
     })
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 @dp.message(Command("stop"))
 async def cmd_stop(message: types.Message):
@@ -2717,12 +2786,22 @@ async def cmd_anime(message: types.Message):
     header = "### 管理者 ###"
     _, pnum = await format_header(board_id)
 
-    activation_text = (
-        "にゃあ～！アニメモードがアクティベートされました！\n\n"
-        "^_^"
-    )
-
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    activation_phrases = [
+        "にゃあ～！アニメモードがアクティベートされました！\n\n^_^",
+        "お兄ちゃん、大変！アニメモードの時間だよ！ UWU",
+        "アニメの力がこのチャットに満ちています！(ﾉ´ヮ´)ﾉ*:･ﾟ✧",
+        "『プロジェクトA』発動！これよりチャットはアキハバラ自治区となる！",
+        "このチャットは「人間」をやめるぞ！ジョジョーーッ！\n\nア ニ メ モ ー ド だ！",
+        "君も... 見えるのか？『チャットのスタンド』が...！アニメモード発動！",
+        "チャットの皆さん、聞いてください！私、魔法少女になっちゃった！\n\nアニメモード、オン！",
+        "三百年の孤独に、光が射した… アニメモードの時間だ。",
+        "異世界転生したらチャットが全部日本語になっていた件。\n\nアニメモード、スタート！",
+        "ばか！へんたい！すけべ！アニメモードの時間なんだからね！"
+    ]
+    activation_text = random.choice(activation_phrases)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     content = {
         "type": "text",
         "header": header,
@@ -2741,7 +2820,6 @@ async def cmd_anime(message: types.Message):
         "content": content,
         "post_num": pnum,
     })
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     asyncio.create_task(disable_anime_mode(330, board_id))
     await message.delete()
@@ -2756,12 +2834,22 @@ async def disable_anime_mode(delay: int, board_id: str):
     header = "### Админ ###"
     _, pnum = await format_header(board_id)
 
-    end_text = (
-        "アニメモードが終了しました！\n\n"
-        "通常のチャットに戻ります！"
-    )
-
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    end_phrases = [
+        "アニメモードが終了しました！通常のチャットに戻ります！",
+        "お兄ちゃん、ごめんね。もうアニメの時間じゃないんだ…",
+        "魔法の力が消えちゃった… アニメモード、オフ！",
+        "異世界から帰還しました。現実は非情である。",
+        "『プロジェクトA』は完了した。アキハバラ自治区は解散する。",
+        "スタンド能力が... 消えた...！？\n\nアニメモード解除。",
+        "夢の時間は終わりだ。チャットは通常モードに戻る。",
+        "現実に帰ろう、ここはチャットだ。",
+        "さよなら、全てのエヴァンゲリオン。アニメモード終了。",
+        "すべてのオタクに、おめでとう！\n\n(アニメモードは終わったけど)"
+    ]
+    end_text = random.choice(end_phrases)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     content = {
         "type": "text",
         "header": header,
@@ -2769,7 +2857,7 @@ async def disable_anime_mode(delay: int, board_id: str):
     }
 
     messages_storage[pnum] = {
-        'author_id': 0, # Системное сообщение
+        'author_id': 0,
         'timestamp': datetime.now(UTC),
         'content': content,
         'board_id': board_id
@@ -2780,7 +2868,6 @@ async def disable_anime_mode(delay: int, board_id: str):
         "content": content,
         "post_num": pnum,
     })
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
 
 @dp.message(Command("deanon"))
@@ -2858,13 +2945,11 @@ async def cmd_zaputin(message: types.Message):
     board_id = get_board_id(message)
     if not board_id: return
 
-        # --- ДОБАВЬТЕ ЭТОТ БЛОК ---
     if board_id == 'int':
         try:
             await message.delete()
         except Exception: pass
         return
-    # --------------------------
     
     b_data = board_data[board_id]
 
@@ -2880,12 +2965,22 @@ async def cmd_zaputin(message: types.Message):
     header = "### Админ ###"
     _, pnum = await format_header(board_id)
 
-    activation_text = (
-        "🇷🇺 СЛАВА РОССИИ! ПУТИН - НАШ ПРЕЗИДЕНТ! 🇷🇺\n\n"
-        "Активирован режим кремлеботов! Все несогласные будут приравнены к пидорасам и укронацистам!"
-    )
-
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    activation_phrases = [
+        "🇷🇺 СЛАВА РОССИИ! ПУТИН - НАШ ПРЕЗИДЕНТ! 🇷🇺\n\nАктивирован режим кремлеботов! Все несогласные будут приравнены к пидорасам и укронацистам!",
+        "ВНИМАНИЕ! АКТИВИРОВАН ПРОТОКОЛ 'КРЕМЛЬ'! 🇷🇺 Работаем, братья! За нами Путин и Сталинград!",
+        "ТРИКОЛОР ПОДНЯТ! 🇷🇺 В чате включен режим патриотизма. Кто не с нами - тот под нами! РОССИЯ!",
+        "НАЧИНАЕМ СПЕЦОПЕРАЦИЮ! 🇷🇺 Цель: денацификация чата. Потерь нет! Слава России!",
+        "🇷🇺 РЕЖИМ 'РУССКИЙ МИР' АКТИВИРОВАН! 🇷🇺 От Калининграда до Владивостока - мы великая страна! ZOV",
+        "ЗА ВДВ! 🇷🇺 В чате высадился русский десант. НАТО сосать! С нами Бог!",
+        "ПАТРИОТИЧЕСКИЙ РЕЖИМ ВКЛЮЧЕН! 🇷🇺 Можем повторить! На Берлин! Деды воевали!",
+        "🇷🇺 АКТИВИРОВАН РЕЖИМ 'БЕЗГРАНИЧНАЯ ЛЮБОВЬ К РОДИНЕ'! 🇷🇺 Гордимся страной, верим в президента!",
+        "ТОВАРИЩ ПОЛКОВНИК РАЗРЕШИЛ! 🇷🇺 Включаем режим '15 рублей'. Все на защиту Родины!",
+        "🇷🇺 РОССИЯ! СВЯЩЕННАЯ НАША ДЕРЖАВА! 🇷🇺 В чате включен патриотический режим. Хохлы, сосать!"
+    ]
+    activation_text = random.choice(activation_phrases)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     content = {
         "type": "text",
         "header": header,
@@ -2904,7 +2999,6 @@ async def cmd_zaputin(message: types.Message):
         "content": content,
         "post_num": pnum,
     })
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     asyncio.create_task(disable_zaputin_mode(309, board_id))
     await message.delete()
@@ -2918,9 +3012,22 @@ async def disable_zaputin_mode(delay: int, board_id: str):
     header = "### Админ ###"
     _, pnum = await format_header(board_id)
 
-    end_text = "💀 Долбёжка в Лахте закончена. Володин доволен. Всем спасибо, все свободны."
-
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    end_phrases = [
+        "💀 Долбёжка в Лахте закончена. Володин доволен. Всем спасибо, все свободны.",
+        "Пятнадцать рублей закончились. 💸 Кремлеботы, расходимся до следующей получки.",
+        "Спецоперация по защите чата успешно завершена. 🇷🇺 Можно снова быть либерахами.",
+        "Перегруппировка! 🫡 Патриотический режим временно отключен для пополнения запасов водки и матрешек.",
+        "Шойгу! Герасимов! Где патроны?! 💥 Режим патриотизма отключен до выяснения обстоятельств.",
+        "Митинг окончен. ✊ Расходимся, пока не приехал ОМОН. Патриотизм выключен.",
+        "Русский мир свернулся до размеров МКАДа. 🇷🇺 Режим отключен.",
+        "Жест доброй воли! 🫡 Отключаем патриотический режим и возвращаемся к обычному общению.",
+        "Выборы прошли, можно расслабиться. 🗳️ Патриотизм на паузе. До следующих выборов.",
+        "Товарищ майор приказал отбой. 👮‍♂️ Возвращаемся в обычный режим."
+    ]
+    end_text = random.choice(end_phrases)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
     content = {
         "type": "text",
         "header": header,
@@ -2928,7 +3035,7 @@ async def disable_zaputin_mode(delay: int, board_id: str):
     }
 
     messages_storage[pnum] = {
-        'author_id': 0, # Системное сообщение
+        'author_id': 0,
         'timestamp': datetime.now(UTC),
         'content': content,
         'board_id': board_id
@@ -2939,19 +3046,17 @@ async def disable_zaputin_mode(delay: int, board_id: str):
         "content": content,
         "post_num": pnum,
     })
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---```
 
 @dp.message(Command("suka_blyat"))
 async def cmd_suka_blyat(message: types.Message):
     board_id = get_board_id(message)
     if not board_id: return
-    # --- ДОБАВЬТЕ ЭТОТ БЛОК ---
     if board_id == 'int':
         try:
             await message.delete()
         except Exception: pass
         return
-    # --------------------------
+    
     b_data = board_data[board_id]
 
     if not await check_cooldown(message, board_id):
@@ -2966,12 +3071,22 @@ async def cmd_suka_blyat(message: types.Message):
     header = "### Админ ###"
     _, pnum = await format_header(board_id)
 
-    activation_text = (
-        "💢💢💢 Активирован режим СУКА БЛЯТЬ! 💢💢💢\n\n"
-        "Всех нахуй разъебало!"
-    )
-
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    activation_phrases = [
+        "💢💢💢 Активирован режим СУКА БЛЯТЬ! 💢💢💢\n\nВсех нахуй разъебало!",
+        "БЛЯЯЯЯЯТЬ! 💥 РЕЖИМ АГРЕССИИ ВКЛЮЧЕН! ПИЗДА ВСЕМУ!",
+        "ВЫ ЧЕ, ОХУЕЛИ?! 💢 Включаю режим 'сука блять', готовьтесь, пидорасы!",
+        "ЗАЕБАЛО ВСЁ НАХУЙ! 💥 Переходим в режим тотальной ненависти. СУКА!",
+        "А НУ БЛЯТЬ СУКИ СЮДА ПОДОШЛИ! 💢 Режим 'бати в ярости' активирован!",
+        "СУКАААААА! 💥 Пиздец, как меня все бесит! Включаю протокол 'РАЗЪЕБАТЬ'.",
+        "ЩА БУДЕТ МЯСО! 🔪🔪🔪 Режим 'сука блять' активирован. Нытикам здесь не место!",
+        "ЕБАНЫЙ ТЫ НАХУЙ! 💢💢💢 С этого момента говорим только матом. Поняли, уебаны?",
+        "ТАК, БЛЯТЬ! 💥 Слушать мою команду! Режим 'СУКА БЛЯТЬ' активен. Вольно, бляди!",
+        "ПОШЛИ НАХУЙ! 💥 ВСЕ ПОШЛИ НАХУЙ! Режим ярости включен, суки!"
+    ]
+    activation_text = random.choice(activation_phrases)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
     content = {
         "type": "text",
         "header": header,
@@ -2990,7 +3105,6 @@ async def cmd_suka_blyat(message: types.Message):
         "content": content,
         "post_num": pnum,
     })
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     asyncio.create_task(disable_suka_blyat_mode(303, board_id))
     await message.delete()
@@ -3004,9 +3118,22 @@ async def disable_suka_blyat_mode(delay: int, board_id: str):
     header = "### Админ ###"
     _, pnum = await format_header(board_id)
 
-    end_text = "💀 СУКА БЛЯТЬ КОНЧИЛОСЬ. Теперь можно и помолчать."
-
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    end_phrases = [
+        "💀 СУКА БЛЯТЬ КОНЧИЛОСЬ. Теперь можно и помолчать.",
+        "Так, блядь, успокоились все нахуй. 🧘‍♂️ Режим ярости выключен.",
+        "Выпустили пар, и хватит. 💨 Режим 'сука блять' деактивирован. Заебали орать.",
+        "Всё, пиздец, я спокоен. 🧊 Ярость ушла. Возвращаемся к унылому общению.",
+        "Ладно, хуй с вами, живите. 🙂 Режим 'сука блять' отключен. Пока что.",
+        "Батя ушел спать. 😴 Можно больше не материться. Режим отключен.",
+        "Разъеб окончен. 💥 Убираем за собой, суки. Режим 'сука блять' выключен.",
+        "Так, всё, наорался. 😮‍💨 Возвращаемся в обычный режим. Не бесите меня.",
+        "Мое очко остыло. 🔥 Режим ярости деактивирован.",
+        "Миссия 'ВСЕХ НАХУЙ' выполнена. 🫡 Возвращаемся на базу. Режим отключен."
+    ]
+    end_text = random.choice(end_phrases)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     content = {
         "type": "text",
         "header": header,
@@ -3014,7 +3141,7 @@ async def disable_suka_blyat_mode(delay: int, board_id: str):
     }
 
     messages_storage[pnum] = {
-        'author_id': 0, # Системное сообщение
+        'author_id': 0,
         'timestamp': datetime.now(UTC),
         'content': content,
         'board_id': board_id
@@ -3025,7 +3152,6 @@ async def disable_suka_blyat_mode(delay: int, board_id: str):
         "content": content,
         "post_num": pnum,
     })
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
 # ========== АДМИН КОМАНДЫ ==========
 
@@ -3197,20 +3323,44 @@ async def cmd_ban(message: types.Message):
     b_data['users']['banned'].add(target_id)
     b_data['users']['active'].discard(target_id)
 
-    await message.answer(
-        f"✅ Хуесос под номером <code>{target_id}</code> забанен на доске {BOARD_CONFIG[board_id]['name']}\n"
-        f"Удалено его постов за последние 5 минут: {deleted_posts}",
-        parse_mode="HTML")
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    lang = 'en' if board_id == 'int' else 'ru'
+    board_name = BOARD_CONFIG[board_id]['name']
+
+    if lang == 'en':
+        phrases = [
+            "✅ Faggot <code>{user_id}</code> has been banned from {board}.\nDeleted his posts in the last 5 minutes: {deleted}",
+            "👍 User <code>{user_id}</code> is now banned on {board}. Wiped {deleted} recent posts.",
+            "👌 Done. <code>{user_id}</code> won't be posting on {board} anymore. Deleted posts: {deleted}."
+        ]
+    else:
+        phrases = [
+            "✅ Хуесос под номером <code>{user_id}</code> забанен на доске {board}\nУдалено его постов за последние 5 минут: {deleted}",
+            "👍 Пользователь <code>{user_id}</code> успешно забанен на доске {board}. Снесено {deleted} его высеров.",
+            "👌 Готово. <code>{user_id}</code> больше не будет отсвечивать на доске {board}. Удалено постов: {deleted}."
+        ]
+    response_text = random.choice(phrases).format(user_id=target_id, board=board_name, deleted=deleted_posts)
+    await message.answer(response_text, parse_mode="HTML")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     await send_moderation_notice(target_id, "ban", board_id, deleted_posts=deleted_posts)
 
     try:
-        await message.bot.send_message(
-            target_id,
-            f"Пидорас ебаный, ты нас так заебал, что тебя блокнули нахуй на доске {BOARD_CONFIG[board_id]['name']}.\n"
-            f"Удалено твоих постов за последние 5 минут: {deleted_posts}\n"
-            "Пиздуй отсюда."
-        )
+        if lang == 'en':
+            phrases = [
+                "You have been permanently banned from the {board} board. Reason: you're a faggot.\nDeleted your posts in the last 5 minutes: {deleted}",
+                "Congratulations! You've won an all-inclusive trip to hell. You are banned from {board}.\nWe've deleted {deleted} of your recent shitposts.",
+                "The admin didn't like you. You're banned from {board}. Get out.\nDeleted posts: {deleted}."
+            ]
+        else:
+            phrases = [
+                "Пидорас ебаный, ты нас так заебал, что тебя блокнули нахуй на доске {board}.\nУдалено твоих постов за последние 5 минут: {deleted}\nПиздуй отсюда.",
+                "Поздравляю, долбоеб. Ты допизделся и получил вечный бан на доске {board}.\nТвои высеры за последние 5 минут ({deleted} шт.) удалены.",
+                "Ты был слаб, и Абу тебя сожрал. Ты забанен на доске {board}.\nУдалено постов: {deleted}."
+            ]
+        
+        notification_text = random.choice(phrases).format(board=board_name, deleted=deleted_posts)
+        await message.bot.send_message(target_id, notification_text)
     except:
         pass
     await message.delete()
@@ -3267,21 +3417,35 @@ async def cmd_mute(message: Message):
     b_data = board_data[board_id]
     b_data['mutes'][target_id] = datetime.now(UTC) + timedelta(seconds=mute_seconds)
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    board_name = BOARD_CONFIG[board_id]['name']
     await message.answer(
-        f"🔇 Хуила {target_id} замучен на {duration_text} на доске {BOARD_CONFIG[board_id]['name']}\n"
+        f"🔇 Хуила {target_id} замучен на {duration_text} на доске {board_name}\n"
         f"Удалено сообщений за последние 5 минут: {deleted_count}",
         parse_mode="HTML"
     )
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     await send_moderation_notice(target_id, "mute", board_id, duration=duration_text, deleted_posts=deleted_count)
 
     try:
-        await message.bot.send_message(
-            target_id,
-            f"🔇 Пидор ебаный, тебя замутили на доске {BOARD_CONFIG[board_id]['name']} на {duration_text}.\n"
-            f"Удалено твоих сообщений за последние 5 минут: {deleted_count}",
-            parse_mode="HTML"
-        )
+        lang = 'en' if board_id == 'int' else 'ru'
+        
+        if lang == 'en':
+            phrases = [
+                "🔇 You have been muted on the {board} board for {duration}.\nDeleted your posts in the last 5 minutes: {deleted}.",
+                "🗣️ Your right to speak has been temporarily revoked on {board} for {duration}. Think about your behavior.\nDeleted posts: {deleted}.",
+                "🤐 Shut up for {duration} on the {board} board.\nDeleted posts: {deleted}."
+            ]
+        else:
+            phrases = [
+                "🔇 Пидор ебаный, тебя замутили на доске {board} на {duration}.\nУдалено твоих сообщений за последние 5 минут: {deleted}.",
+                "🗣️ Твой рот был запечатан админской печатью на {duration} на доске {board}.\nТвои высеры ({deleted} шт.) удалены.",
+                "🤐 Помолчи, подумой. Ты в муте на {duration} на доске {board}.\nУдалено постов: {deleted}."
+            ]
+        
+        notification_text = random.choice(phrases).format(board=board_name, duration=duration_text, deleted=deleted_count)
+        await message.bot.send_message(target_id, notification_text, parse_mode="HTML")
     except:
         pass
     await message.delete()
@@ -3304,12 +3468,14 @@ async def cmd_wipe(message: types.Message):
         await message.answer("reply + /wipe или /wipe <id>")
         return
 
-    # Удаляем все посты пользователя (большой период времени) только с текущей доски
     deleted_messages = await delete_user_posts(message.bot, target_id, 999999, board_id)
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    board_name = BOARD_CONFIG[board_id]['name']
     await message.answer(
-        f"🗑 Удалено {deleted_messages} сообщений пользователя {target_id} с доски {BOARD_CONFIG[board_id]['name']}."
+        f"🗑 Удалено {deleted_messages} сообщений пользователя {target_id} с доски {board_name}."
     )
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     await message.delete()
 
 @dp.message(Command("unmute"))
@@ -3331,16 +3497,34 @@ async def cmd_unmute(message: types.Message):
         return
 
     b_data = board_data[board_id]
+    board_name = BOARD_CONFIG[board_id]['name']
     if b_data['mutes'].pop(target_id, None):
-        await message.answer(f"🔈 Пользователь {target_id} размучен на доске {BOARD_CONFIG[board_id]['name']}.")
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        await message.answer(f"🔈 Пользователь {target_id} размучен на доске {board_name}.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         try:
-            await message.bot.send_message(target_id, f"Тебя размутили на доске {BOARD_CONFIG[board_id]['name']}.")
+            lang = 'en' if board_id == 'int' else 'ru'
+            if lang == 'en':
+                phrases = [
+                    "🔊 You have been unmuted on the {board} board. Try to behave.",
+                    "✅ You can speak again on {board}. Don't make us regret this.",
+                    "🗣️ Your voice has been returned on the {board} board."
+                ]
+            else:
+                phrases = [
+                    "Тебя размутили на доске {board}.",
+                    "✅ Можешь снова открывать свою пасть на доске {board}. Но впредь будь осторожен.",
+                    "🗣️ Админ смилостивился. Ты размучен на доске {board}."
+                ]
+            notification_text = random.choice(phrases).format(board=board_name)
+            await message.bot.send_message(target_id, notification_text)
         except:
             pass
     else:
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         await message.answer(f"Пользователь {target_id} не был в муте на этой доске.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     await message.delete()
-
 
 @dp.message(Command("unban"))
 async def cmd_unban(message: types.Message):
@@ -3356,14 +3540,19 @@ async def cmd_unban(message: types.Message):
     try:
         user_id = int(args[1])
         b_data = board_data[board_id]
-        if b_data['users']['banned'].discard(user_id):
-             await message.answer(f"Пользователь {user_id} разбанен на доске {BOARD_CONFIG[board_id]['name']}.")
+        board_name = BOARD_CONFIG[board_id]['name']
+        if user_id in b_data['users']['banned']:
+             b_data['users']['banned'].discard(user_id)
+             # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+             await message.answer(f"Пользователь {user_id} разбанен на доске {board_name}.")
+             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         else:
+             # --- НАЧАЛО ИЗМЕНЕНИЙ ---
             await message.answer(f"Пользователь {user_id} не был забанен на этой доске.")
+             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     except ValueError:
         await message.answer("Неверный ID пользователя")
     await message.delete()
-
 
 @dp.message(Command("del"))
 async def cmd_del(message: types.Message):
@@ -3383,12 +3572,12 @@ async def cmd_del(message: types.Message):
         await message.answer("Не нашёл этот пост в базе (возможно, вы ответили на чужую копию).")
         return
 
-    # Используем новую, точную функцию для удаления одного поста
     deleted_count = await delete_single_post(post_num, message.bot)
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     await message.answer(f"Пост №{post_num} и все его копии ({deleted_count} сообщений) удалены.")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     await message.delete()
-
 
 @dp.message(Command("shadowmute"))
 async def cmd_shadowmute(message: Message):
@@ -3428,7 +3617,10 @@ async def cmd_shadowmute(message: Message):
         b_data = board_data[board_id]
         b_data['shadow_mutes'][target_id] = datetime.now(UTC) + timedelta(seconds=total_seconds)
 
-        await message.answer(f"👻 Тихо замучен пользователь {target_id} на {time_str} на доске {BOARD_CONFIG[board_id]['name']}.")
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        board_name = BOARD_CONFIG[board_id]['name']
+        await message.answer(f"👻 Тихо замучен пользователь {target_id} на {time_str} на доске {board_name}.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     except ValueError:
         await message.answer("❌ Неверный формат времени. Примеры: 30m, 2h, 1d")
     await message.delete()
@@ -3442,10 +3634,8 @@ async def cmd_unshadowmute(message: Message):
 
     target_id = None
     parts = message.text.split()
-    # Сначала проверяем, указан ли ID в аргументах команды
     if len(parts) >= 2 and parts[1].isdigit():
         target_id = int(parts[1])
-    # Если ID не указан, тогда проверяем, является ли сообщение ответом
     elif message.reply_to_message:
         target_id = get_author_id_by_reply(message)
 
@@ -3454,10 +3644,15 @@ async def cmd_unshadowmute(message: Message):
         return
     
     b_data = board_data[board_id]
+    board_name = BOARD_CONFIG[board_id]['name']
     if b_data['shadow_mutes'].pop(target_id, None):
-        await message.answer(f"👻 Пользователь {target_id} тихо размучен на доске {BOARD_CONFIG[board_id]['name']}.")
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        await message.answer(f"👻 Пользователь {target_id} тихо размучен на доске {board_name}.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     else:
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         await message.answer(f"ℹ️ Пользователь {target_id} не в shadow-муте на этой доске.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     await message.delete()
 
 # ========== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ==========
@@ -3479,9 +3674,7 @@ async def handle_audio(message: Message):
         await message.delete()
         return
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     b_data['last_activity'][user_id] = datetime.now(UTC)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     spam_check = await check_spam(user_id, message, board_id)
     if not spam_check:
@@ -3510,7 +3703,6 @@ async def handle_audio(message: Message):
         await message.delete()
     except TelegramBadRequest: pass
     
-    # --- ИСПРАВЛЕНИЕ: Безопасный доступ к caption_html_text ---
     caption_content = message.caption_html_text if hasattr(message, 'caption_html_text') and message.caption_html_text else (message.caption or "")
     if message.caption:
         last_messages.append(message.caption)
@@ -3565,7 +3757,6 @@ async def handle_voice(message: Message):
         
     b_data = board_data[board_id]
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавлена проверка shadow-мута ---
     is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
                        b_data['shadow_mutes'][user_id] > datetime.now(UTC))
 
@@ -3577,11 +3768,8 @@ async def handle_voice(message: Message):
         await message.delete()
         return
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     b_data['last_activity'][user_id] = datetime.now(UTC)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # Проводим спам-проверку для голосовых сообщений
     spam_check = await check_spam(user_id, message, board_id)
     if not spam_check:
         try:
@@ -3617,7 +3805,6 @@ async def handle_voice(message: Message):
     }
 
     try:
-        # Отправка автору (выполняется всегда, даже в shadow-муте)
         results = await send_message_to_users(
             bot_instance=message.bot,
             recipients={user_id},
@@ -3632,7 +3819,6 @@ async def handle_voice(message: Message):
                 post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
                 message_to_post[(user_id, m.message_id)] = current_post_num
         
-        # Постановка в очередь для остальных, только если нет shadow-мута
         if not is_shadow_muted:
             recipients = b_data['users']['active'] - {user_id}
             if recipients and user_id in b_data['users']['active']:
@@ -3787,12 +3973,10 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
     if not group or not group.get('media'):
         return
 
-    # Помечаем ID как обработанный, чтобы игнорировать возможные дубликаты
     sent_media_groups.append(media_group_id)
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: "Нарезка" и последовательная отправка ---
     all_media = group.get('media', [])
-    CHUNK_SIZE = 10  # Лимит API Telegram
+    CHUNK_SIZE = 10
     media_chunks = [all_media[i:i + CHUNK_SIZE] for i in range(0, len(all_media), CHUNK_SIZE)]
 
     for i, chunk in enumerate(media_chunks):
@@ -3802,7 +3986,6 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
         board_id = group['board_id']
         b_data = board_data[board_id]
         
-        # Первый чанк - основной пост, последующие - продолжение
         if i == 0:
             post_num = group['post_num']
             header = group['header']
@@ -3817,8 +4000,6 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
             'type': 'media_group', 'header': header, 'media': chunk,
             'caption': caption, 'reply_to_post': reply_to_post
         }
-        
-        # content = await _apply_mode_transformations(content, board_id) # <-- СТРОКА УДАЛЕНА
 
         messages_storage[post_num] = {
             'author_id': user_id, 'timestamp': group['timestamp'], 'content': content,
@@ -3830,14 +4011,11 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
             builder = MediaGroupBuilder()
             reply_to_message_id = None
 
-            # Применяем трансформацию только для копии, отправляемой автору
             content_for_author = await _apply_mode_transformations(content, board_id)
             
-            # --- Логика форматирования теперь использует content_for_author ---
             formatted_body = await _format_message_body(content_for_author, user_id, post_num)
             header_html = f"<i>{escape_html(header)}</i>"
             
-            # Собираем финальную подпись. Основной текст добавляем только к первому чанку.
             full_caption_text = ""
             if i == 0:
                 full_caption_text = f"{header_html}\n\n{formatted_body}" if formatted_body else header_html
@@ -3870,7 +4048,6 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
         recipients = b_data['users']['active'] - {user_id}
         if recipients and user_id in b_data['users']['active']:
             try:
-                # В очередь на рассылку кладем ОРИГИНАЛЬНЫЙ контент
                 await message_queues[board_id].put({
                     'recipients': recipients, 'content': content, 'post_num': post_num,
                     'reply_info': reply_info, 'board_id': board_id
@@ -3880,7 +4057,7 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
                 messages_storage.pop(post_num, None)
         
         if len(media_chunks) > 1:
-            await asyncio.sleep(1) # Небольшая задержка между отправкой частей альбома
+            await asyncio.sleep(1)
             
 def apply_greentext_formatting(text: str) -> str:
     """
@@ -3995,7 +4172,6 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
         import traceback
         print(f"❌ Критическая ошибка в handle_message_reaction: {e}\n{traceback.format_exc()}")
         
-@dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
     
@@ -4009,12 +4185,24 @@ async def handle_message(message: Message):
         if mute_until and mute_until > datetime.now(UTC):
             left = mute_until - datetime.now(UTC)
             await message.delete()
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
             if board_id == 'int':
                 time_left_str = f"{int(left.total_seconds() // 60)}m {int(left.total_seconds() % 60)}s"
-                notification_text = f"🔇 Hey faggot, you are still muted on the {BOARD_CONFIG[board_id]['name']} board for {time_left_str}"
+                phrases = [
+                    "🔇 Hey faggot, you are still muted on the {board} board for {time_left}",
+                    "🤫 Shhh! You're still in timeout on {board} for another {time_left}.",
+                    "🤐 Your mouth is still taped shut on {board}. Wait for {time_left}."
+                ]
+                notification_text = random.choice(phrases).format(board=BOARD_CONFIG[board_id]['name'], time_left=time_left_str)
             else:
                 time_left_str = f"{int(left.total_seconds() // 60)}м {int(left.total_seconds() % 60)}с"
-                notification_text = f"🔇 Эй пидор, ты в муте на доске {BOARD_CONFIG[board_id]['name']} ещё {time_left_str}"
+                phrases = [
+                    "🔇 Эй пидор, ты в муте на доске {board} ещё {time_left}",
+                    "🤫 Тссс! Твой рот все еще занят. Жди еще {time_left} на доске {board}.",
+                    "🤐 Помолчи, уебан. Тебе еще сидеть в муте {time_left} на доске {board}."
+                ]
+                notification_text = random.choice(phrases).format(board=BOARD_CONFIG[board_id]['name'], time_left=time_left_str)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             await message.bot.send_message(user_id, notification_text, parse_mode="HTML")
             return
         elif mute_until:
@@ -4034,9 +4222,7 @@ async def handle_message(message: Message):
 
     is_shadow_muted = (user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC))
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     b_data['last_activity'][user_id] = datetime.now(UTC)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if user_id not in b_data['users']['active']:
         b_data['users']['active'].add(user_id)
