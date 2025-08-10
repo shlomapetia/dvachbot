@@ -453,9 +453,9 @@ SAVE_INTERVAL = 900  # секунд
 STICKER_WINDOW = 10  # секунд
 STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
-REPLY_CACHE = 500  # сколько постов держать в кэше для каждой доски
+REPLY_CACHE = 5900  # сколько постов держать в кэше для каждой доски
 REPLY_FILE = "reply_cache.json"  # отдельный файл для reply
-MAX_MESSAGES_IN_MEMORY = 500  # храним только последние 600 постов в общей памяти
+MAX_MESSAGES_IN_MEMORY = 5900  # храним только последние 5000 постов в общей памяти
 
 
 # Мотивационные сообщения для приглашений
@@ -1001,14 +1001,17 @@ async def auto_memory_cleaner():
                 messages_storage.pop(post_num, None)
                 post_to_messages.pop(post_num, None)
 
-            keys_to_delete_from_m2p = [
-                key for key, post_num in message_to_post.items()
-                if post_num in posts_to_delete_set
-            ]
-            for key in keys_to_delete_from_m2p:
-                message_to_post.pop(key, None)
-            
             print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов.")
+
+        # 1.1. Очистка message_to_post от всех связей, которые не соответствуют актуальным постам
+        actual_post_nums = set(messages_storage.keys())
+        keys_to_delete_from_m2p = [
+            key for key, post_num in message_to_post.items()
+            if post_num not in actual_post_nums
+        ]
+        for key in keys_to_delete_from_m2p:
+            message_to_post.pop(key, None)
+        print(f"🧹 DIAG: удалено {len(keys_to_delete_from_m2p)} лишних связей из message_to_post")
 
         # 2. Очистка данных для КАЖДОЙ ДОСКИ
         now_utc = datetime.now(UTC)
@@ -1050,7 +1053,7 @@ async def auto_memory_cleaner():
                     b_data['last_user_msgs'].pop(user_id, None)
                 print(f"🧹 [{board_id}] Очистка завершена. Удалены временные данные {purged_count} пользователей.")
 
-            # --- ДОБАВЛЕНО! Чистим временные данные для всех неактивных (даже если не прошли 12 часов)
+            # Дополнительная очистка временных данных для всех неактивных
             for user_id in list(b_data['last_user_msgs']):
                 if user_id not in b_data['users']['active']:
                     b_data['last_user_msgs'].pop(user_id, None)
