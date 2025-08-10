@@ -1667,7 +1667,7 @@ async def send_moderation_notice(user_id: int, action: str, board_id: str, durat
 
 async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     """
-    Централизованно применяет все трансформации режимов.
+    Централизованно применяет все трансформации режимов с улучшенной обработкой аниме-изображений.
     """
     b_data = board_data[board_id]
     modified_content = content.copy()
@@ -1678,7 +1678,7 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     )
 
     if not is_transform_mode_active:
-        return modified_content # Если режимов нет, ничего не делаем
+        return modified_content  # Если режимов нет, ничего не делаем
 
     # Если режим активен, принудительно очищаем HTML перед трансформацией
     if 'text' in modified_content and modified_content['text']:
@@ -1693,15 +1693,31 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
         if 'caption' in modified_content and modified_content['caption']:
             modified_content['caption'] = anime_transform(modified_content['caption'])
         
+        # Улучшенная обработка замены текста на изображение
         if modified_content.get('type') == 'text' and random.random() < 0.41:
             anime_img_url = await get_random_anime_image()
+            valid_image = False
+            
+            # Проверяем URL перед использованием
             if anime_img_url:
+                try:
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
+                        async with session.head(anime_img_url) as resp:
+                            if resp.status == 200 and 'image' in resp.headers.get('Content-Type', ''):
+                                valid_image = True
+                except Exception as e:
+                    print(f"⚠️ Ошибка проверки аниме-изображения: {e}")
+            
+            if valid_image:
                 text_content = modified_content.pop('text', '')
                 modified_content.update({
                     'type': 'photo',
                     'caption': text_content,
                     'image_url': anime_img_url
                 })
+            else:
+                # Резервный вариант: добавляем аниме-эмодзи к тексту
+                modified_content['text'] = f"🌸 {modified_content.get('text', '')}"
 
     elif b_data['slavaukraine_mode']:
         if 'text' in modified_content and modified_content['text']:
@@ -1798,7 +1814,7 @@ async def send_message_to_users(
     content: dict,
     reply_info: dict | None = None,
 ) -> list:
-    """Оптимизированная рассылка сообщений пользователям с уведомлением об ограничениях."""
+    """Оптимизированная рассылка сообщений пользователям с улучшенной обработкой ошибок для изображений."""
     if not recipients or not content or 'type' not in content:
         return []
 
@@ -1810,21 +1826,9 @@ async def send_message_to_users(
     b_data = board_data[board_id]
     modified_content = content.copy()
 
-    # Добавление фраз для режимов
-    if b_data['suka_blyat_mode']:
-        b_data['suka_blyat_counter'] += 1
-        if b_data['suka_blyat_counter'] % 3 == 0:
-            if 'text' in modified_content and modified_content['text']: modified_content['text'] += " ... СУКА БЛЯТЬ!"
-            elif 'caption' in modified_content and modified_content['caption']: modified_content['caption'] += " ... СУКА БЛЯТЬ!"
-    if b_data['slavaukraine_mode'] and random.random() < 0.3:
-        phrase = "\n\n" + random.choice(UKRAINIAN_PHRASES)
-        if 'text' in modified_content and modified_content['text']: modified_content['text'] += phrase
-        elif 'caption' in modified_content and modified_content['caption']: modified_content['caption'] += phrase
-    elif b_data['zaputin_mode'] and random.random() < 0.3:
-        phrase = "\n\n" + random.choice(PATRIOTIC_PHRASES)
-        if 'text' in modified_content and modified_content['text']: modified_content['text'] += phrase
-        elif 'caption' in modified_content and modified_content['caption']: modified_content['caption'] += phrase
-
+    # Применяем трансформации режимов (включая аниме-режим)
+    modified_content = await _apply_mode_transformations(modified_content, board_id)
+    
     blocked_users = set()
     active_recipients = {uid for uid in recipients if uid not in b_data['users']['banned']}
     if not active_recipients:
@@ -1839,6 +1843,7 @@ async def send_message_to_users(
             header_text = modified_content['header']
             head = f"<i>{escape_html(header_text)}</i>"
 
+            # Подсветка постов автора ответа
             reply_to_post = modified_content.get('reply_to_post')
             original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
             if uid == original_author:
@@ -1871,6 +1876,26 @@ async def send_message_to_users(
                 
                 file_source = modified_content.get('image_url') or modified_content.get("file_id")
                 kwargs[ct] = file_source
+                
+                # Особый случай: аниме-изображения по URL
+                if ct == 'photo' and 'image_url' in modified_content:
+                    try:
+                        return await send_method(**kwargs)
+                    except TelegramBadRequest as e:
+                        if "failed to get HTTP URL content" in e.message or "wrong type" in e.message:
+                            # Отправляем текстовый плейсхолдер
+                            error_text = "⚠️ [Изображение недоступно]"
+                            fallback_content = f"{head}\n\n{error_text}\n\n{formatted_body}"
+                            return await bot_instance.send_message(
+                                chat_id=uid, 
+                                text=fallback_content, 
+                                parse_mode="HTML",
+                                reply_to_message_id=reply_to
+                            )
+                        else:
+                            raise
+                else:
+                    return await send_method(**kwargs)
             
             elif ct == 'sticker':
                 kwargs[ct] = modified_content["file_id"]
@@ -1887,41 +1912,35 @@ async def send_message_to_users(
             blocked_users.add(uid)
             return None
         except TelegramBadRequest as e:
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Замена переотправки на уведомление ---
-            lang = 'en' if board_id == 'int' else 'ru'
             current_type = modified_content.get("type")
-
             placeholder_text = None
+            
+            # Обработка запрещенных медиатипов
             if "VOICE_MESSAGES_FORBIDDEN" in e.message and current_type == "voice":
-                placeholder_text = " VOICE MESSAGE " if lang == 'en' else " ГОЛОСОВОЕ СООБЩЕНИЕ "
+                placeholder_text = " VOICE MESSAGE "
             elif "VIDEO_MESSAGES_FORBIDDEN" in e.message and current_type == "video_note":
-                placeholder_text = " VIDEO MESSAGE " if lang == 'en' else " ВИДЕО СООБЩЕНИЕ (кружок) "
-
+                placeholder_text = " VIDEO MESSAGE (кружок) "
+            
             if placeholder_text:
-                print(f"ℹ️ Пользователь {uid} запретил получение {current_type}. Отправляю плейсхолдер...")
-                try:
-                    error_info_ru = (
-                        "<b>[ Тут должно было быть ГС или кружок, но...]</b>\n\n"
-                        f"У вас в настройках приватности телеграм запрещено получение {placeholder_text}"
-                    )
-                    error_info_en = (
-                        "<b>[ 🚫 Blocked Content. There would be VM or video message but... ]</b>\n\n"
+                lang = 'en' if board_id == 'int' else 'ru'
+                if lang == 'en':
+                    error_info = (
+                        "<b>[ 🚫 Blocked Content ]</b>\n\n"
                         f"You have blocked receiving {placeholder_text} in your Telegram privacy settings."
                     )
-                    
-                    error_info = error_info_en if lang == 'en' else error_info_ru
-                    
-                    # Отправляем текстовое сообщение с тем же заголовком и информацией об ответе
-                    # Вместо тела сообщения - информация об ошибке
-                    final_text = f"{head}\n\n{error_info}"
-                    
-                    return await bot_instance.send_message(
-                        chat_id=uid, text=final_text, parse_mode="HTML", reply_to_message_id=reply_to
+                else:
+                    error_info = (
+                        "<b>[ Тут должно было быть медиа, но... ]</b>\n\n"
+                        f"У вас в настройках приватности телеграм запрещено получение {placeholder_text}"
                     )
-                except Exception as placeholder_e:
-                    print(f"❌ Не удалось отправить плейсхолдер для {uid}: {placeholder_e}")
-                    return None
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                
+                final_text = f"{head}\n\n{error_info}"
+                return await bot_instance.send_message(
+                    chat_id=uid, 
+                    text=final_text, 
+                    parse_mode="HTML", 
+                    reply_to_message_id=reply_to
+                )
             else:
                 print(f"❌ Ошибка отправки (BadRequest) {uid} ботом {bot_instance.id}: {e}")
                 return None
@@ -1951,7 +1970,6 @@ async def send_message_to_users(
         post_num = content['post_num']
         for uid, msg in results:
             if not msg: continue
-            # Важно: Сохраняем в `message_to_post` даже плейсхолдер, чтобы на него можно было ставить реакции
             messages_to_save = msg if isinstance(msg, list) else [msg]
             for m in messages_to_save:
                 post_to_messages.setdefault(post_num, {})[uid] = m.message_id
