@@ -1814,7 +1814,7 @@ async def send_message_to_users(
     content: dict,
     reply_info: dict | None = None,
 ) -> list:
-    """Оптимизированная рассылка сообщений пользователям с улучшенной обработкой ошибок для изображений."""
+    """Оптимизированная рассылка сообщений пользователям с исправлением для video_note"""
     if not recipients or not content or 'type' not in content:
         return []
 
@@ -1825,8 +1825,6 @@ async def send_message_to_users(
 
     b_data = board_data[board_id]
     modified_content = content.copy()
-
-    # Применяем трансформации режимов (включая аниме-режим)
     modified_content = await _apply_mode_transformations(modified_content, board_id)
     
     blocked_users = set()
@@ -1843,11 +1841,11 @@ async def send_message_to_users(
             header_text = modified_content['header']
             head = f"<i>{escape_html(header_text)}</i>"
 
-            # Подсветка постов автора ответа
             reply_to_post = modified_content.get('reply_to_post')
             original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
             if uid == original_author:
-                head = head.replace("Пост", "🔴 Пост").replace("Post", "🔴 Post")
+                if "Пост" in head: head = head.replace("Пост", "🔴 Пост")
+                if "Post" in head: head = head.replace("Post", "🔴 Post")
             
             post_num = modified_content.get('post_num')
             formatted_body = await _format_message_body(modified_content, uid, post_num)
@@ -1869,8 +1867,10 @@ async def send_message_to_users(
             
             if ct == 'text':
                 kwargs.update(text=full_text, parse_mode="HTML")
+                return await send_method(**kwargs)
             
-            elif ct in ['photo', 'video', 'animation', 'document', 'audio', 'voice', 'video_note']:
+            # Обработка медиа с подписями (кроме video_note)
+            elif ct in ['photo', 'video', 'animation', 'document', 'audio', 'voice']:
                 if len(full_text) > 1024: full_text = full_text[:1021] + "..."
                 kwargs.update(caption=full_text, parse_mode="HTML")
                 
@@ -1883,7 +1883,6 @@ async def send_message_to_users(
                         return await send_method(**kwargs)
                     except TelegramBadRequest as e:
                         if "failed to get HTTP URL content" in e.message or "wrong type" in e.message:
-                            # Отправляем текстовый плейсхолдер
                             error_text = "⚠️ [Изображение недоступно]"
                             fallback_content = f"{head}\n\n{error_text}\n\n{formatted_body}"
                             return await bot_instance.send_message(
@@ -1894,16 +1893,21 @@ async def send_message_to_users(
                             )
                         else:
                             raise
-                else:
-                    return await send_method(**kwargs)
+                return await send_method(**kwargs)
             
+            # Обработка видеосообщений (кружков) БЕЗ подписи
+            elif ct == 'video_note':
+                kwargs[ct] = modified_content.get("file_id")
+                return await send_method(**kwargs)
+            
+            # Обработка стикеров
             elif ct == 'sticker':
                 kwargs[ct] = modified_content["file_id"]
+                return await send_method(**kwargs)
+            
             else:
                 print(f"❌ Неизвестный тип контента для отправки: {ct}")
                 return None
-            
-            return await send_method(**kwargs)
 
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
@@ -1915,7 +1919,6 @@ async def send_message_to_users(
             current_type = modified_content.get("type")
             placeholder_text = None
             
-            # Обработка запрещенных медиатипов
             if "VOICE_MESSAGES_FORBIDDEN" in e.message and current_type == "voice":
                 placeholder_text = " VOICE MESSAGE "
             elif "VIDEO_MESSAGES_FORBIDDEN" in e.message and current_type == "video_note":
