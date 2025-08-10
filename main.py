@@ -1003,30 +1003,38 @@ async def auto_memory_cleaner():
 
             print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов.")
 
-        # 2. Жёсткая очистка message_to_post — удаляем связи для:
-        #   - несуществующих постов
-        #   - неактивных пользователей (дольше 24 часов)
+        # 2. ПЕРЕРАБОТАННАЯ очистка message_to_post
         actual_post_nums = set(messages_storage.keys())
-        all_active_users = set()
         now_utc = datetime.now(UTC)
+        
+        # Собираем ВСЕХ активных пользователей по ВСЕМ доскам
+        all_active_users = set()
         for board_id in BOARDS:
             b_data = board_data[board_id]
+            # Добавляем пользователей, активных в последние 24 часа
             all_active_users.update([
                 uid for uid in b_data['users']['active']
                 if b_data['last_activity'].get(uid, now_utc) > now_utc - timedelta(hours=24)
             ])
-
-        # ОПТИМИЗИРОВАННАЯ ОЧИСТКА MESSAGE_TO_POST
-        keys_to_delete = []
-        for key in list(message_to_post.keys()):
-            post_num = message_to_post[key]
+        
+        # ПОЛНАЯ ПЕРЕСБОРКА СЛОВАРЯ
+        initial_count = len(message_to_post)
+        valid_entries = {}
+        
+        for key, post_num in message_to_post.items():
             user_id, _ = key
-            if post_num not in actual_post_nums or user_id not in all_active_users:
-                keys_to_delete.append(key)
-                
-        for key in keys_to_delete:
-            message_to_post.pop(key, None)
-        print(f"🧹 Очистка message_to_post: удалено {len(keys_to_delete)} связей (посты и юзеры)")
+            # Критерии сохранения связи:
+            # 1. Пост существует в хранилище
+            # 2. Пользователь активен
+            if post_num in actual_post_nums and user_id in all_active_users:
+                valid_entries[key] = post_num
+        
+        # Атомарная замена словаря
+        message_to_post.clear()
+        message_to_post.update(valid_entries)
+        removed_count = initial_count - len(message_to_post)
+        
+        print(f"🧹 Очистка message_to_post: удалено {removed_count} связей (осталось {len(message_to_post)})")
 
         # 3. Очистка данных для каждой доски
         for board_id in BOARDS:
@@ -1523,34 +1531,30 @@ async def delete_single_post(post_num: int, bot_instance: Bot) -> int:
     deleted_count = 0
     # Собираем ВСЕ сообщения для удаления
     messages_to_delete = []
-    for uid, mid in post_to_messages.get(post_num, {}).items():
+    for uid, mid in post_to_messages[post_num].items():
         messages_to_delete.append((uid, mid))
 
-    # Удаляем каждое сообщение с повторными попытками
+    # Удаляем каждое сообщение
     for (uid, mid) in messages_to_delete:
         try:
             await bot_instance.delete_message(uid, mid)
             deleted_count += 1
         except (TelegramBadRequest, TelegramForbiddenError):
-            # Игнорируем ошибки, если сообщение уже удалено или бот заблокирован
             continue
         except Exception as e:
             print(f"Ошибка удаления {mid} у {uid}: {e}")
 
-    # --- ОЧИСТКА ВСЕХ ХРАНИЛИЩ ---
-    # 1. Удаляем связи из message_to_post
-    keys_to_delete = []
+    # АТОМАРНАЯ ОЧИСТКА ВСЕХ СЛЕДОВ ПОСТА
+    # 1. Удаляем из message_to_post
     for (uid, mid) in messages_to_delete:
         key = (uid, mid)
-        if key in message_to_post:
-            keys_to_delete.append(key)
-            
-    for key in keys_to_delete:
         message_to_post.pop(key, None)
     
-    # 2. Удаляем пост из остальных хранилищ
-    messages_storage.pop(post_num, None)
+    # 2. Удаляем из post_to_messages
     post_to_messages.pop(post_num, None)
+    
+    # 3. Удаляем из messages_storage
+    messages_storage.pop(post_num, None)
 
     return deleted_count
     
