@@ -1023,34 +1023,23 @@ async def auto_memory_cleaner():
                 b_data['message_counter'] = defaultdict(int, top_users)
                 print(f"🧹 [{board_id}] Очистка счетчика сообщений.")
 
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: БОЛЕЕ АГРЕССИВНАЯ, НО БЕЗОПАСНАЯ ОЧИСТКА ---
-            
-            # Устанавливаем порог неактивности - 12 часов (вместо 2 дней)
             inactive_threshold = now_utc - timedelta(hours=12)
-            
-            # Собираем ID пользователей, которых нужно очистить
             potentially_inactive_users = {
                 user_id for user_id, last_time in b_data.get('last_activity', {}).items()
                 if last_time < inactive_threshold
             }
-            
-            # Исключаем пользователей с активными мутами из списка на удаление
             users_with_active_mute = {
                 uid for uid, expiry in b_data.get('mutes', {}).items() if expiry > now_utc
             }
             users_with_active_shadow_mute = {
                 uid for uid, expiry in b_data.get('shadow_mutes', {}).items() if expiry > now_utc
             }
-            
             users_to_purge = list(
                 potentially_inactive_users - users_with_active_mute - users_with_active_shadow_mute
             )
-            
             if users_to_purge:
                 purged_count = len(users_to_purge)
                 print(f"🧹 [{board_id}] Начинаю очистку данных для {purged_count} неактивных пользователей...")
-                
-                # Удаляем данные этих пользователей из всех временных хранилищ
                 for user_id in users_to_purge:
                     b_data['last_activity'].pop(user_id, None)
                     b_data['last_texts'].pop(user_id, None)
@@ -1059,11 +1048,22 @@ async def auto_memory_cleaner():
                     b_data['spam_violations'].pop(user_id, None)
                     b_data['spam_tracker'].pop(user_id, None)
                     b_data['last_user_msgs'].pop(user_id, None)
-                    # Mutes и shadow_mutes не трогаем, так как мы их уже отфильтровали
-                
                 print(f"🧹 [{board_id}] Очистка завершена. Удалены временные данные {purged_count} пользователей.")
 
-            # 2.2. Чистим истекшие муты (логика остается)
+            # --- ДОБАВЛЕНО! Чистим временные данные для всех неактивных (даже если не прошли 12 часов)
+            for user_id in list(b_data['last_user_msgs']):
+                if user_id not in b_data['users']['active']:
+                    b_data['last_user_msgs'].pop(user_id, None)
+            for user_id in list(b_data['last_texts']):
+                if user_id not in b_data['users']['active']:
+                    b_data['last_texts'].pop(user_id, None)
+            for user_id in list(b_data['last_stickers']):
+                if user_id not in b_data['users']['active']:
+                    b_data['last_stickers'].pop(user_id, None)
+            for user_id in list(b_data['last_animations']):
+                if user_id not in b_data['users']['active']:
+                    b_data['last_animations'].pop(user_id, None)
+
             active_mutes = b_data.get('mutes', {})
             for user_id in list(active_mutes.keys()):
                 if active_mutes[user_id] < now_utc:
@@ -1074,48 +1074,46 @@ async def auto_memory_cleaner():
                  if active_shadow_mutes[user_id] < now_utc:
                     active_shadow_mutes.pop(user_id, None)
 
-            # 2.3. Чистим spam_tracker доски от старых записей
             spam_tracker_board = b_data['spam_tracker']
             for user_id in list(spam_tracker_board.keys()):
                 window_sec = SPAM_RULES.get('text', {}).get('window_sec', 15)
                 window_start = now_utc - timedelta(seconds=window_sec)
-                
                 spam_tracker_board[user_id] = [
                     t for t in spam_tracker_board[user_id]
                     if t > window_start
                 ]
                 if not spam_tracker_board[user_id]:
                     del spam_tracker_board[user_id]
-            
-            # 2.4. Чистим spam_violations
             inactive_threshold_spam = now_utc - timedelta(hours=24) 
             spam_violations_board = b_data['spam_violations']
-            
             users_to_purge_from_spam = [
                 user_id for user_id, data in spam_violations_board.items()
                 if data.get('last_reset', now_utc) < inactive_threshold_spam
             ]
-            
             if users_to_purge_from_spam:
                 for user_id in users_to_purge_from_spam:
                     spam_violations_board.pop(user_id, None)
         
-        # 3. Очистка трекера уведомлений о реакциях по неактивности
         now_ts = time.time()
         tracker_inactive_threshold_sec = 24 * 3600  # 24 часа
-
         keys_to_delete_from_tracker = [
             author_id for author_id, timestamps in author_reaction_notify_tracker.items()
             if not timestamps or (now_ts - timestamps[-1] > tracker_inactive_threshold_sec)
         ]
-        
         if keys_to_delete_from_tracker:
             for author_id in keys_to_delete_from_tracker:
                 del author_reaction_notify_tracker[author_id]
             print(f"🧹 Очистка трекера реакций: удалено {len(keys_to_delete_from_tracker)} неактивных авторов.")
 
-        # 4. Агрессивная сборка мусора
         gc.collect()
+
+        # --- Диагностика! Выводи сколько объектов осталось --- 
+        print(f"🧹 DIAG: objects in messages_storage: {len(messages_storage)}")
+        print(f"🧹 DIAG: objects in post_to_messages: {len(post_to_messages)}")
+        print(f"🧹 DIAG: objects in message_to_post: {len(message_to_post)}")
+        print(f"🧹 DIAG: objects in current_media_groups: {len(current_media_groups)}")
+        print(f"🧹 DIAG: objects in media_group_timers: {len(media_group_timers)}")
+        print(f"🧹 DIAG: objects in sent_media_groups: {len(sent_media_groups)}")
         
 async def board_statistics_broadcaster():
     """Раз в час собирает общую статистику и рассылает на каждую доску."""
@@ -2644,54 +2642,52 @@ async def cmd_stop(message: types.Message):
 
 @dp.message(Command("active"))
 async def cmd_active(message: types.Message):
-    """Выводит статистику активности досок за последние 2 часа."""
+    """Выводит статистику активности досок за последние 2 часа + за сутки."""
     board_id = get_board_id(message)
     if not board_id: return
 
-    # 1. Определяем язык для ответа
-    lang = 'en' if board_id == 'int' else 'ru'
+    # Статистика за последние сутки (24 часа)
+    now = datetime.now(UTC)
+    day_ago = now - timedelta(hours=24)
+    posts_last_24h = sum(
+        1 for post in messages_storage.values()
+        if post.get("timestamp", now) > day_ago
+    )
 
-    # 2. Собираем статистику по всем доскам
+    lang = 'en' if board_id == 'int' else 'ru'
     activity_lines = []
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     for b_id in BOARDS:
         if b_id == 'test':
             continue
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-        # Считаем активность за последние 2 часа
         activity = get_board_activity_last_hours(b_id, hours=2)
         board_name = BOARD_CONFIG[b_id]['name']
-        
-        # Форматируем строку в зависимости от языка
         if lang == 'en':
             line = f"<b>{board_name}</b> - {activity:.1f} posts/hr"
         else:
             line = f"<b>{board_name}</b> - {activity:.1f} п/ч"
         activity_lines.append(line)
 
-    # 3. Формируем полный текст сообщения
     if lang == 'en':
         header_text = "📊 Boards Activity (last 2h):"
+        full_activity_text = f"{header_text}\n\n" + "\n".join(activity_lines)
+        full_activity_text += f"\n\n📅 Total posts in last 24h: {posts_last_24h}"
     else:
         header_text = "📊 Активность досок (за 2ч):"
-    
-    full_activity_text = f"{header_text}\n\n" + "\n".join(activity_lines)
+        full_activity_text = f"{header_text}\n\n" + "\n".join(activity_lines)
+        full_activity_text += f"\n\n📅 Всего постов за последние 24 часа: {posts_last_24h}"
 
-    # 4. Отправляем сообщение в чат
     header, pnum = await format_header(board_id)
     content = {
         'type': 'text', 
         'header': header, 
         'text': full_activity_text
     }
-    
     messages_storage[pnum] = {
         'author_id': 0, 
         'timestamp': datetime.now(UTC), 
         'content': content, 
         'board_id': board_id
     }
-
     b_data = board_data[board_id]
     await message_queues[board_id].put({
         'recipients': b_data['users']['active'],
@@ -2699,7 +2695,6 @@ async def cmd_active(message: types.Message):
         'post_num': pnum,
         'board_id': board_id
     })
-    
     await message.delete()
 
 @dp.message(Command("invite"))
@@ -3942,25 +3937,28 @@ async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bo
         media_group_timers.pop(media_group_id, None)
 
         # --- НАЧАЛО ИЗМЕНЕНИЙ: Пакетное удаление ---
-        # Извлекаем ID собранных сообщений и ID автора (который является chat_id)
         source_message_ids = group.get('source_message_ids')
         author_id = group.get('author_id')
 
         if source_message_ids and author_id:
             try:
-                # Используем специальный метод API для удаления нескольких сообщений одним запросом.
                 await bot_instance.delete_messages(
                     chat_id=author_id,
                     message_ids=list(source_message_ids)
                 )
             except TelegramBadRequest as e:
-                # Игнорируем ошибки, если сообщения уже удалены или слишком старые.
                 print(f"ℹ️ Не удалось выполнить пакетное удаление для media group {media_group_id}: {e}")
             except Exception as e:
                 print(f"❌ Ошибка при пакетном удалении для media group {media_group_id}: {e}")
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         await process_complete_media_group(media_group_id, group, bot_instance)
+
+        # --- ВАЖНО! Дополнительная очистка для экономии памяти ---
+        current_media_groups.pop(media_group_id, None)
+        media_group_timers.pop(media_group_id, None)
+        if media_group_id in sent_media_groups:
+            sent_media_groups.remove(media_group_id)
 
     except asyncio.CancelledError:
         pass
