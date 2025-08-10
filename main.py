@@ -187,6 +187,24 @@ media_group_timers = {}
 # Отключаем стандартную обработку сигналов в aiogram
 os.environ["AIORGRAM_DISABLE_SIGNAL_HANDLERS"] = "1"
 
+# Глобальные переменные для cooldown /deanon
+DEANON_COOLDOWN = 120  # 2 минуты
+last_deanon_time = 0
+deanon_lock = asyncio.Lock()
+
+# Фразы для cooldown
+DEANON_COOLDOWN_PHRASES = [
+    "Эй гандон, деанонеры заняты! Подожди минутку.",
+    "Слишком часто, пидорас! Подожди хотя бы минуту.",
+    "Не спеши, еблан! Деанон раз в 2 минуты.",
+    "Подожди, уебок! Деанонеры перегружены.",
+    "Абу сосет хуй. Подожди, пидор.",
+    "Эй еблан! Подожди 060 секунд.",
+    "Терпение, анон!",
+    "Слишком много запросов!",
+    "Деанон-боты отдыхают. Подожди .",
+    "Заебали уже! Подожди 300 секунд, гандон."
+]
 
 SPAM_RULES = {
     'text': {
@@ -2914,10 +2932,30 @@ async def disable_anime_mode(delay: int, board_id: str):
 
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: Message):
+    global last_deanon_time
+    
     board_id = get_board_id(message)
     if not board_id: return
     
-    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ: Локализация ответов и вызова ---
+    # Проверка cooldown
+    current_time = time.time()
+    async with deanon_lock:
+        if current_time - last_deanon_time < DEANON_COOLDOWN:
+            # Отправляем случайное сообщение о cooldown
+            cooldown_msg = random.choice(DEANON_COOLDOWN_PHRASES)
+            try:
+                sent_msg = await message.answer(cooldown_msg)
+                # Удаляем сообщение через 5 секунд
+                asyncio.create_task(delete_message_after_delay(sent_msg, 5))
+            except Exception:
+                pass
+            await message.delete()
+            return
+        
+        # Обновляем время последнего использования
+        last_deanon_time = current_time
+    
+    # Оригинальный код команды /deanon
     lang = 'en' if board_id == 'int' else 'ru'
 
     if not message.reply_to_message:
@@ -2944,7 +2982,6 @@ async def cmd_deanon(message: Message):
         return
         
     # Передаем язык в генератор
-    # Убедитесь, что в deanonymizer.py функция generate_deanon_info принимает lang
     name, surname, city, profession, fetish, detail = generate_deanon_info(lang=lang)
     ip = f"{random.randint(10,250)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
     age = random.randint(18, 45)
@@ -2981,6 +3018,14 @@ async def cmd_deanon(message: Message):
         "board_id": board_id
     })
     await message.delete()
+
+async def delete_message_after_delay(message: types.Message, delay: int):
+    """Удаляет сообщение после задержки"""
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except Exception:
+        pass
     
 @dp.message(Command("zaputin"))
 async def cmd_zaputin(message: types.Message):
@@ -4013,7 +4058,8 @@ async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bo
         print(f"❌ Ошибка в complete_media_group_after_delay для {media_group_id}: {e}")
         current_media_groups.pop(media_group_id, None)
         media_group_timers.pop(media_group_id, None)
-        
+
+
 async def process_complete_media_group(media_group_id: str, group: dict, bot_instance: Bot):
     if not group or not group.get('media'):
         return
