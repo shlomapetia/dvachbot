@@ -197,7 +197,7 @@ SPAM_RULES = {
         'penalty': [60, 300, 600]  # Шкала наказаний: [1 мин, 5мин, 10 мин]
     },
     'sticker': {
-        'max_repeats': 4, # <-- ДОБАВЛЕНО
+        'max_repeats': 3, # <-- ДОБАВЛЕНО
         'max_per_window': 6,  # 6 стикеров за 18 сек
         'window_sec': 18,
         'penalty': [60, 600, 900]  # 1мин, 10мин, 15 мин
@@ -215,6 +215,7 @@ SPAM_RULES = {
 # Хранит информацию о текущих медиа-группах: media_group_id -> данные
 current_media_groups = {}
 media_group_timers = {}
+user_spam_locks = defaultdict(asyncio.Lock)
 
 def restore_backup_on_start():
     """Забирает все файлы *_state.json и *_reply_cache.json из backup-репозитория при запуске"""
@@ -1330,21 +1331,34 @@ async def check_spam(user_id: int, msg: Message, board_id: str) -> bool:
     return True
 
 async def apply_penalty(bot_instance: Bot, user_id: int, msg_type: str, board_id: str):
-    """Применяет мут согласно текущему уровню нарушения (с поддержкой досок)"""
-    b_data = board_data[board_id]
-    rules = SPAM_RULES.get(msg_type, {})
-    if not rules:
-        return
+    """Применяет мут согласно текущему уровню нарушения с блокировкой"""
+    async with user_spam_locks[user_id]:  # Блокировка для конкретного пользователя
+        b_data = board_data[board_id]
+        rules = SPAM_RULES.get(msg_type, {})
+        if not rules:
+            return
+            
+        violations_data = b_data['spam_violations'].get(user_id, {'level': 0, 'last_reset': datetime.now(UTC)})
+        level = violations_data['level']
         
-    level = b_data['spam_violations'].get(user_id, {}).get('level', 0)
-    level = min(level, len(rules.get('penalty', [])) - 1)
-    mute_seconds = rules['penalty'][level] if rules.get('penalty') else 30
-    
-    b_data['mutes'][user_id] = datetime.now(UTC) + timedelta(seconds=mute_seconds)
-    
-    violation_type = {'text': "текстовый спам", 'sticker': "спам стикерами", 'animation': "спам гифками"}.get(msg_type, "спам")
-    
-    try:
+        # Проверяем, не был ли уже применен мут
+        current_mute = b_data['mutes'].get(user_id)
+        if current_mute and current_mute > datetime.now(UTC):
+            return  # Мут уже активен, пропускаем
+        
+        level = min(level, len(rules.get('penalty', [])) - 1)
+        mute_seconds = rules['penalty'][level] if rules.get('penalty') else 30
+        
+        # Применяем мут
+        b_data['mutes'][user_id] = datetime.now(UTC) + timedelta(seconds=mute_seconds)
+        
+        violation_type = {'text': "текстовый спам", 'sticker': "спам стикерами", 'animation': "спам гифками"}.get(msg_type, "спам")
+        
+        # Логирование
+        mute_duration = f"{mute_seconds} сек" if mute_seconds < 60 else f"{mute_seconds//60} мин"
+        print(f"🚫 [{board_id}] Мут за спам: user {user_id}, тип: {violation_type}, уровень: {level+1}, длительность: {mute_duration}")
+        
+        try:
         if mute_seconds < 60: time_str = f"{mute_seconds} сек"
         elif mute_seconds < 3600: time_str = f"{mute_seconds // 60} мин"
         else: time_str = f"{mute_seconds // 3600} час"
