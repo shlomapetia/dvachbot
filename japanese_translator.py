@@ -697,7 +697,7 @@ def anime_transform(text):
 
 
 async def get_random_anime_image():
-    """Получает URL случайной аниме-картинки с API"""
+    """Получает URL случайной аниме-картинки с API с проверкой расширения"""
     apis = [
         "https://api.waifu.pics/sfw/waifu",
         "https://api.waifu.im/search/?included_tags=waifu"
@@ -710,10 +710,17 @@ async def get_random_anime_image():
                 async with session.get(api_url) as response:
                     if response.status == 200:
                         data = await response.json()
+                        image_url = None
+                        
                         if "api.waifu.pics" in api_url and data and 'url' in data:
-                            return data['url']
+                            image_url = data['url']
+                        
                         if "api.waifu.im" in api_url and data and 'images' in data and data['images']:
-                            return data['images'][0]['url']
+                            image_url = data['images'][0]['url']
+                        
+                        # Проверяем расширение файла
+                        if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
+                            return image_url
         except Exception as e:
             print(f"Ошибка API {api_url}: {e}")
             continue
