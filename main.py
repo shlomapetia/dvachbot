@@ -1016,14 +1016,17 @@ async def auto_memory_cleaner():
                 if b_data['last_activity'].get(uid, now_utc) > now_utc - timedelta(hours=24)
             ])
 
-        keys_to_delete_from_m2p = []
-        for key, post_num in list(message_to_post.items()):
+        # ОПТИМИЗИРОВАННАЯ ОЧИСТКА MESSAGE_TO_POST
+        keys_to_delete = []
+        for key in list(message_to_post.keys()):
+            post_num = message_to_post[key]
             user_id, _ = key
             if post_num not in actual_post_nums or user_id not in all_active_users:
-                keys_to_delete_from_m2p.append(key)
-        for key in keys_to_delete_from_m2p:
+                keys_to_delete.append(key)
+                
+        for key in keys_to_delete:
             message_to_post.pop(key, None)
-        print(f"🧹 DIAG: удалено {len(keys_to_delete_from_m2p)} связей из message_to_post (посты и юзеры)")
+        print(f"🧹 Очистка message_to_post: удалено {len(keys_to_delete)} связей (посты и юзеры)")
 
         # 3. Очистка данных для каждой доски
         for board_id in BOARDS:
@@ -1518,29 +1521,37 @@ async def delete_single_post(post_num: int, bot_instance: Bot) -> int:
         return 0
 
     deleted_count = 0
-    # Собираем копии для удаления, messages_to_delete - это список кортежей (uid, mid)
-    messages_to_delete = list(post_to_messages.get(post_num, {}).items())
+    # Собираем ВСЕ сообщения для удаления
+    messages_to_delete = []
+    for uid, mid in post_to_messages.get(post_num, {}).items():
+        messages_to_delete.append((uid, mid))
 
-    for uid, mid in messages_to_delete:
+    # Удаляем каждое сообщение с повторными попытками
+    for (uid, mid) in messages_to_delete:
         try:
             await bot_instance.delete_message(uid, mid)
             deleted_count += 1
         except (TelegramBadRequest, TelegramForbiddenError):
-            continue  # Сообщение уже удалено или бот заблокирован
+            # Игнорируем ошибки, если сообщение уже удалено или бот заблокирован
+            continue
         except Exception as e:
-            print(f"Ошибка при удалении сообщения {mid} у {uid}: {e}")
+            print(f"Ошибка удаления {mid} у {uid}: {e}")
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Эффективное удаление из message_to_post ---
-    # Очистка глобальных хранилищ
+    # --- ОЧИСТКА ВСЕХ ХРАНИЛИЩ ---
+    # 1. Удаляем связи из message_to_post
+    keys_to_delete = []
+    for (uid, mid) in messages_to_delete:
+        key = (uid, mid)
+        if key in message_to_post:
+            keys_to_delete.append(key)
+            
+    for key in keys_to_delete:
+        message_to_post.pop(key, None)
+    
+    # 2. Удаляем пост из остальных хранилищ
     messages_storage.pop(post_num, None)
     post_to_messages.pop(post_num, None)
 
-    # Вместо полного перебора `message_to_post`, мы теперь используем
-    # собранный ранее список `messages_to_delete` для точечного удаления.
-    # Ключ для `message_to_post` - это кортеж (uid, mid).
-    for uid, mid in messages_to_delete:
-        message_to_post.pop((uid, mid), None)
-    
     return deleted_count
     
 async def send_moderation_notice(user_id: int, action: str, board_id: str, duration: str = None, deleted_posts: int = 0):
