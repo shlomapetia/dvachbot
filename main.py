@@ -1359,34 +1359,49 @@ async def apply_penalty(bot_instance: Bot, user_id: int, msg_type: str, board_id
         print(f"🚫 [{board_id}] Мут за спам: user {user_id}, тип: {violation_type}, уровень: {level+1}, длительность: {mute_duration}")
         
         try:
-        if mute_seconds < 60: time_str = f"{mute_seconds} сек"
-        elif mute_seconds < 3600: time_str = f"{mute_seconds // 60} мин"
-        else: time_str = f"{mute_seconds // 3600} час"
+            # Форматируем строку времени для пользователя
+            if mute_seconds < 60:
+                time_str = f"{mute_seconds} сек"
+            elif mute_seconds < 3600:
+                time_str = f"{mute_seconds // 60} мин"
+            else:
+                time_str = f"{mute_seconds // 3600} час"
+            
+            # Формируем текст уведомления
+            lang = 'en' if board_id == 'int' else 'ru'
+            
+            if lang == 'en':
+                violation_type_en = {'text': "text spam", 'sticker': "sticker spam", 'animation': "gif spam"}.get(msg_type, "spam")
+                phrases = [
+                    "🚫 Hey faggot, you are muted for {time} for {violation} on the {board} board.\nKeep spamming - get banned.",
+                    "🔇 Too much spam, buddy. Take a break for {time} on {board}.",
+                    "🚨 Spam detected! You've been silenced for {time} for {violation} on {board}. Don't do it again.",
+                    "🛑 Stop right there, criminal scum! You're muted for {time} on {board} for spamming."
+                ]
+                notification_text = random.choice(phrases).format(
+                    time=time_str, 
+                    violation=violation_type_en, 
+                    board=BOARD_CONFIG[board_id]['name']
+                )
+            else:
+                phrases = [
+                    "🚫 Эй пидор, ты в муте на {time} за {violation} на доске {board}\nСпамишь дальше - получишь бан.",
+                    "🔇 Ты заебал спамить. Отдохни {time} на доске {board}.",
+                    "🚨 Обнаружен спам! Твоя пасть завалена на {time} за {violation} на доске {board}. Повторишь - получишь по жопе.",
+                    "🛑 Стой, пидорас! Ты оштрафован на {time} молчания на доске {board} за свой высер."
+                ]
+                notification_text = random.choice(phrases).format(
+                    time=time_str, 
+                    violation=violation_type, 
+                    board=BOARD_CONFIG[board_id]['name']
+                )
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        if board_id == 'int':
-            violation_type_en = {'text': "text spam", 'sticker': "sticker spam", 'animation': "gif spam"}.get(msg_type, "spam")
-            phrases = [
-                "🚫 Hey faggot, you are muted for {time} for {violation} on the {board} board.\nKeep spamming - get banned.",
-                "🔇 Too much spam, buddy. Take a break for {time} on {board}.",
-                "🚨 Spam detected! You've been silenced for {time} for {violation} on {board}. Don't do it again.",
-                "🛑 Stop right there, criminal scum! You're muted for {time} on {board} for spamming."
-            ]
-            notification_text = random.choice(phrases).format(time=time_str, violation=violation_type_en, board=BOARD_CONFIG[board_id]['name'])
-        else:
-            phrases = [
-                "🚫 Эй пидор, ты в муте на {time} за {violation} на доске {board}\nСпамишь дальше - получишь бан.",
-                "🔇 Ты заебал спамить. Отдохни {time} на доске {board}.",
-                "🚨 Обнаружен спам! Твоя пасть завалена на {time} за {violation} на доске {board}. Повторишь - получишь по жопе.",
-                "🛑 Стой, пидорас! Ты оштрафован на {time} молчания на доске {board} за свой высер."
-            ]
-            notification_text = random.choice(phrases).format(time=time_str, violation=violation_type, board=BOARD_CONFIG[board_id]['name'])
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-        await bot_instance.send_message(user_id, notification_text, parse_mode="HTML")
-        await send_moderation_notice(user_id, "mute", board_id, duration=time_str)
-    except Exception as e:
-        print(f"Ошибка отправки уведомления о муте: {e}")
+            # Отправляем уведомление
+            await bot_instance.send_message(user_id, notification_text, parse_mode="HTML")
+            await send_moderation_notice(user_id, "mute", board_id, duration=time_str)
+            
+        except Exception as e:
+            print(f"Ошибка отправки уведомления о муте: {e}")
 
 async def format_header(board_id: str) -> Tuple[str, int]:
     """Асинхронное форматирование заголовка с блокировкой для безопасного инкремента счетчика постов."""
