@@ -987,23 +987,33 @@ async def graceful_shutdown(bots: list[Bot]):
     print("✅ Все задачи остановлены, завершаем работу.")
     
 async def auto_memory_cleaner():
-    """Единственная унифицированная функция очистки памяти, запускается каждые 10 минут."""
+    """Полная очистка мусора каждые 10 минут. Без сокращений!"""
     while True:
         await asyncio.sleep(600)  # 10 минут
 
-        # 1. Очистка старых постов (ОБЩАЯ ЛОГИКА)
+        # 1. Очистка старых постов
         if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
             to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
             oldest_post_keys = sorted(messages_storage.keys())[:to_delete_count]
             posts_to_delete_set = set(oldest_post_keys)
 
+            # 1.1. Удаляем связи в message_to_post, которые ссылаются на эти посты
+            keys_to_delete_from_m2p = [
+                key for key, post_num in message_to_post.items()
+                if post_num in posts_to_delete_set
+            ]
+            for key in keys_to_delete_from_m2p:
+                message_to_post.pop(key, None)
+            print(f"🧹 DIAG: удалено {len(keys_to_delete_from_m2p)} связей из message_to_post при удалении старых постов")
+
+            # 1.2. Удаляем сами посты
             for post_num in oldest_post_keys:
                 messages_storage.pop(post_num, None)
                 post_to_messages.pop(post_num, None)
 
             print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов.")
 
-        # 1.1. Очистка message_to_post от всех связей, которые не соответствуют актуальным постам
+        # 2. После этого — чистим message_to_post от связей к несуществующим постам
         actual_post_nums = set(messages_storage.keys())
         keys_to_delete_from_m2p = [
             key for key, post_num in message_to_post.items()
@@ -1011,14 +1021,14 @@ async def auto_memory_cleaner():
         ]
         for key in keys_to_delete_from_m2p:
             message_to_post.pop(key, None)
-        print(f"🧹 DIAG: удалено {len(keys_to_delete_from_m2p)} лишних связей из message_to_post")
+        print(f"🧹 DIAG: дополнительно удалено {len(keys_to_delete_from_m2p)} связей из message_to_post")
 
-        # 2. Очистка данных для КАЖДОЙ ДОСКИ
+        # 3. Очистка данных для каждой доски
         now_utc = datetime.now(UTC)
         for board_id in BOARDS:
             b_data = board_data[board_id]
 
-            # 2.1. Чистим счетчик сообщений доски - оставляем топ 100
+            # 3.1. Чистим счетчик сообщений доски - оставляем топ 100
             if len(b_data['message_counter']) > 100:
                 top_users = sorted(b_data['message_counter'].items(),
                                    key=lambda x: x[1],
@@ -1026,6 +1036,7 @@ async def auto_memory_cleaner():
                 b_data['message_counter'] = defaultdict(int, top_users)
                 print(f"🧹 [{board_id}] Очистка счетчика сообщений.")
 
+            # 3.2. Чистим неактивных пользователей (12 часов)
             inactive_threshold = now_utc - timedelta(hours=12)
             potentially_inactive_users = {
                 user_id for user_id, last_time in b_data.get('last_activity', {}).items()
@@ -1053,7 +1064,7 @@ async def auto_memory_cleaner():
                     b_data['last_user_msgs'].pop(user_id, None)
                 print(f"🧹 [{board_id}] Очистка завершена. Удалены временные данные {purged_count} пользователей.")
 
-            # Дополнительная очистка временных данных для всех неактивных
+            # 3.3. Дополнительная очистка временных данных для всех неактивных (кроме активных)
             for user_id in list(b_data['last_user_msgs']):
                 if user_id not in b_data['users']['active']:
                     b_data['last_user_msgs'].pop(user_id, None)
@@ -1067,16 +1078,18 @@ async def auto_memory_cleaner():
                 if user_id not in b_data['users']['active']:
                     b_data['last_animations'].pop(user_id, None)
 
+            # 3.4. Чистим истекшие муты
             active_mutes = b_data.get('mutes', {})
             for user_id in list(active_mutes.keys()):
                 if active_mutes[user_id] < now_utc:
                     active_mutes.pop(user_id, None)
-            
+
             active_shadow_mutes = b_data.get('shadow_mutes', {})
             for user_id in list(active_shadow_mutes.keys()):
-                 if active_shadow_mutes[user_id] < now_utc:
+                if active_shadow_mutes[user_id] < now_utc:
                     active_shadow_mutes.pop(user_id, None)
 
+            # 3.5. Чистим spam_tracker доски от старых записей
             spam_tracker_board = b_data['spam_tracker']
             for user_id in list(spam_tracker_board.keys()):
                 window_sec = SPAM_RULES.get('text', {}).get('window_sec', 15)
@@ -1087,7 +1100,9 @@ async def auto_memory_cleaner():
                 ]
                 if not spam_tracker_board[user_id]:
                     del spam_tracker_board[user_id]
-            inactive_threshold_spam = now_utc - timedelta(hours=24) 
+
+            # 3.6. Чистим spam_violations
+            inactive_threshold_spam = now_utc - timedelta(hours=24)
             spam_violations_board = b_data['spam_violations']
             users_to_purge_from_spam = [
                 user_id for user_id, data in spam_violations_board.items()
@@ -1096,7 +1111,8 @@ async def auto_memory_cleaner():
             if users_to_purge_from_spam:
                 for user_id in users_to_purge_from_spam:
                     spam_violations_board.pop(user_id, None)
-        
+
+        # 4. Очистка трекера уведомлений о реакциях по неактивности
         now_ts = time.time()
         tracker_inactive_threshold_sec = 24 * 3600  # 24 часа
         keys_to_delete_from_tracker = [
@@ -1108,9 +1124,10 @@ async def auto_memory_cleaner():
                 del author_reaction_notify_tracker[author_id]
             print(f"🧹 Очистка трекера реакций: удалено {len(keys_to_delete_from_tracker)} неактивных авторов.")
 
+        # 5. Сборка мусора
         gc.collect()
 
-        # --- Диагностика! Выводи сколько объектов осталось --- 
+        # 6. Диагностика
         print(f"🧹 DIAG: objects in messages_storage: {len(messages_storage)}")
         print(f"🧹 DIAG: objects in post_to_messages: {len(post_to_messages)}")
         print(f"🧹 DIAG: objects in message_to_post: {len(message_to_post)}")
