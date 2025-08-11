@@ -48,6 +48,7 @@ import deanonymizer
 from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES 
 from deanonymizer import DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS, generate_deanon_info
 from help_text import HELP_TEXT, HELP_TEXT_EN
+from summarize import summarize_text_with_hf
 
 # ========== Глобальные настройки досок ==========
 
@@ -474,7 +475,7 @@ STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
 REPLY_CACHE = 5900  # сколько постов держать в кэше для каждой доски
 REPLY_FILE = "reply_cache.json"  # отдельный файл для reply
-MAX_MESSAGES_IN_MEMORY = 5900  # храним только последние 5000 постов в общей памяти
+MAX_MESSAGES_IN_MEMORY = 5900  # храним только последние 5900 постов в общей памяти
 
 
 # Мотивационные сообщения для приглашений
@@ -1269,7 +1270,58 @@ async def setup_pinned_messages(bots: dict[str, Bot]):
         b_data['start_message_text'] = full_help_text
         
         print(f"📌 [{board_id}] Текст для команды /start и закрепа подготовлен.")
-        
+
+def get_board_chunk(board_id: str, hours: int = 6) -> str:
+    now = datetime.now(UTC)
+    time_threshold = now - timedelta(hours=hours)
+    lines = []
+    for post in messages_storage.values():
+        try:
+            if post.get('board_id') != board_id:
+                continue
+            if post.get('timestamp', now) < time_threshold:
+                continue
+            if post.get('author_id') == 0:
+                continue  # Пропускаем системные
+
+            content = post.get('content', {})
+            ttype = content.get('type')
+
+            # Мета-замена для медиа
+            if ttype == 'photo':
+                lines.append("[Картинка]")
+                continue
+            elif ttype == 'video':
+                lines.append("[Видео]")
+                continue
+            elif ttype == 'document':
+                lines.append("[Документ]")
+                continue
+            elif ttype in ['audio', 'voice']:
+                lines.append("[Аудио]")
+                continue
+            elif ttype == 'animation':
+                lines.append("[Гифка]")
+                continue
+
+            # Обрезаем шапку (Пост №123... и всё до первой пустой строки, либо до конца строки)
+            if ttype == 'text':
+                text = content.get('text', '')
+                # Удаляем строку "Пост №..." или "Post No..." в начале текста
+                text = re.sub(r'^(Пост №\d+.*?\n|Post No\.\d+.*?\n)', '', text, flags=re.MULTILINE)
+                # Дополнительно убираем все строки типа "### ... ###" и <i>...</i>
+                text = re.sub(r'^(###.*?###|<i>.*?</i>)\s*\n?', '', text, flags=re.MULTILINE)
+                text = text.strip()
+                if text:
+                    lines.append(text)
+        except Exception as e:
+            print(f"[summarize] Error while chunking post: {e}, post: {post}")
+
+    chunk = "\n".join(lines)
+    print(f"[summarize] Chunk for board {board_id} built, len={len(chunk)}")
+    # Ограничиваем до 35_000 символов для нейросети
+    return chunk[:35000]
+
 async def check_spam(user_id: int, msg: Message, board_id: str) -> bool:
     """Проверяет спам с прогрессивным наказанием и сбросом уровня (с поддержкой досок)"""
     b_data = board_data[board_id]
@@ -1668,6 +1720,7 @@ async def send_moderation_notice(user_id: int, action: str, board_id: str, durat
 async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     """
     Централизованно применяет все трансформации режимов с улучшенной обработкой аниме-изображений.
+    Картинка в режиме аниме прикрепляется без проверки HEAD-запросом!
     """
     b_data = board_data[board_id]
     modified_content = content.copy()
@@ -1693,30 +1746,21 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
         if 'caption' in modified_content and modified_content['caption']:
             modified_content['caption'] = anime_transform(modified_content['caption'])
         
-        # Улучшенная обработка замены текста на изображение
+        # Картинка аниме без HEAD-запроса!
         if modified_content.get('type') == 'text' and random.random() < 0.41:
             anime_img_url = await get_random_anime_image()
-            valid_image = False
-            
-            # Проверяем URL перед использованием
+            print(f"[ANIME DEBUG] Got anime_img_url: {anime_img_url}")
+
             if anime_img_url:
-                try:
-                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
-                        async with session.head(anime_img_url) as resp:
-                            if resp.status == 200 and 'image' in resp.headers.get('Content-Type', ''):
-                                valid_image = True
-                except Exception as e:
-                    print(f"⚠️ Ошибка проверки аниме-изображения: {e}")
-            
-            if valid_image:
                 text_content = modified_content.pop('text', '')
                 modified_content.update({
                     'type': 'photo',
                     'caption': text_content,
                     'image_url': anime_img_url
                 })
+                print(f"[ANIME DEBUG] Картинка прикреплена: {anime_img_url}")
             else:
-                # Резервный вариант: добавляем аниме-эмодзи к тексту
+                print("[ANIME DEBUG] Не удалось получить картинку, fallback emoji")
                 modified_content['text'] = f"🌸 {modified_content.get('text', '')}"
 
     elif b_data['slavaukraine_mode']:
@@ -2553,6 +2597,65 @@ async def cmd_face(message: types.Message):
     })
     await message.delete()
 
+@dp.message(Command("summarize"))
+async def cmd_summarize(message: types.Message):
+    board_id = get_board_id(message)
+    if not board_id:
+        print("[summarize] Board ID not found")
+        await message.answer("Ошибка: не удалось определить доску.")
+        return
+
+    hf_token = os.getenv("HF_TOKEN")
+    if not hf_token:
+        print("[summarize] HF_TOKEN not set")
+        await message.answer("Ошибка: не настроен токен Hugging Face.")
+        return
+
+    # Чанкуем сообщения за последние 6 часов
+    chunk = get_board_chunk(board_id, hours=6)
+    if not chunk or len(chunk) < 100:
+        print(f"[summarize] Мало сообщений для summarize (len={len(chunk)})")
+        await message.answer("За последние 6 часов мало сообщений для саммари.")
+        return
+
+    prompt = (
+        "Ты должен коротко и забавно подвести итоги обсуждений за последние 6 часов в анонимном чате двача. Там общаются аноны."
+        "Пиши как настоящий анон, используй иронию и сарказм, выноси суть и не слишком серьёзно. "
+        "Если были картинки или медиа — просто упомяни 'Картинка', 'Гифка' и т.п. Не пиши длинно, не пиши уныло!"
+    )
+
+    await message.answer("⏳ Генерируется саммари, ждите ~30 секунд...")
+    try:
+        summary = await summarize_text_with_hf(prompt, chunk, hf_token)
+    except Exception as e:
+        print(f"[summarize] Error during HF summarize: {e}")
+        await message.answer("Ошибка при генерации саммари.")
+        return
+
+    if not summary:
+        print("[summarize] Summary empty or failed")
+        await message.answer("Не удалось сделать саммари. Попробуй позже.")
+        return
+
+    # Обрезаем summary до лимита Telegram 4096 символов (лучше 4000 для запаса)
+    summary = summary[:4000]
+    print(f"[summarize] Final summary length: {len(summary)}")
+
+    header, pnum = await format_header(board_id)
+    content = {
+        'type': 'text',
+        'header': header,
+        'text': f"Саммари за 6 часов:\n\n{summary}",
+        'is_system_message': True
+    }
+    messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
+    await message_queues[board_id].put({
+        'recipients': board_data[board_id]['users']['active'],
+        'content': content,
+        'post_num': pnum,
+        'board_id': board_id
+    })
+    print(f"[summarize] Саммари успешно отправлено ({board_id}, post_num={pnum})")
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
