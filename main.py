@@ -189,7 +189,7 @@ media_group_timers = {}
 os.environ["AIORGRAM_DISABLE_SIGNAL_HANDLERS"] = "1"
 
 # Глобальные переменные для cooldown /deanon
-DEANON_COOLDOWN = 120  # 2 минуты
+DEANON_COOLDOWN = 180  # 3 минуты
 last_deanon_time = 0
 deanon_lock = asyncio.Lock()
 
