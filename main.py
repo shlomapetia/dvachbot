@@ -238,30 +238,40 @@ media_group_timers = {}
 user_spam_locks = defaultdict(asyncio.Lock)
 
 def restore_backup_on_start():
-    """Забирает все файлы *_state.json и *_reply_cache.json из backup-репозитория при запуске"""
+    """Забирает файлы из backup-репозитория с повторными попытками"""
     repo_url = "https://github.com/shlomapetia/dvachbot-backup.git"
     backup_dir = "/app/backup"
-    try:
-        if os.path.exists(backup_dir):
-            shutil.rmtree(backup_dir)
-        subprocess.run(["git", "clone", repo_url, backup_dir], check=True)
-
-        # Ищем все файлы нужного формата
-        backup_files = glob.glob(os.path.join(backup_dir, "*_state.json"))
-        backup_files += glob.glob(os.path.join(backup_dir, "*_reply_cache.json"))
-
-        if not backup_files:
-            print("Файлы для восстановления в backup-репозитории не найдены.")
+    max_attempts = 3  # Количество попыток
+    
+    for attempt in range(max_attempts):
+        try:
+            if os.path.exists(backup_dir):
+                shutil.rmtree(backup_dir)
+            
+            print(f"Попытка клонирования #{attempt+1}")
+            # Добавляем --depth для экономии ресурсов
+            subprocess.run([
+                "git", "clone", "--depth", "1", repo_url, backup_dir
+            ], check=True, timeout=120)
+            
+            backup_files = glob.glob(os.path.join(backup_dir, "*_state.json"))
+            backup_files += glob.glob(os.path.join(backup_dir, "*_reply_cache.json"))
+            
+            if not backup_files:
+                print("Файлы для восстановления не найдены.")
+                return
+            
+            for src_path in backup_files:
+                shutil.copy2(src_path, os.getcwd())
+            
+            print(f"✅ Восстановлено {len(backup_files)} файлов из backup")
             return
-
-        for src_path in backup_files:
-            fname = os.path.basename(src_path)
-            dst_path = os.path.join(os.getcwd(), fname)
-            shutil.copy2(src_path, dst_path)
-            print(f"Восстановлен {fname} из backup-репозитория")
-
-    except Exception as e:
-        print(f"Ошибка при восстановлении backup: {e}")
+        
+        except Exception as e:
+            print(f"❌ Ошибка при восстановлении (попытка {attempt+1}): {e}")
+            time.sleep(5)  # Пауза перед повторной попыткой
+    
+    print("⚠️ Все попытки восстановления провалились")
 
 
 async def healthcheck(request):
