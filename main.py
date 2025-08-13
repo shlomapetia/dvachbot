@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import time
+time.sleep(10)
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -239,7 +240,7 @@ user_spam_locks = defaultdict(asyncio.Lock)
 def restore_backup_on_start():
     """Забирает все файлы *_state.json и *_reply_cache.json из backup-репозитория при запуске"""
     repo_url = "https://github.com/shlomapetia/dvachbot-backup.git"
-    backup_dir = "/tmp/backup"
+    backup_dir = "/app/backup"
     try:
         if os.path.exists(backup_dir):
             shutil.rmtree(backup_dir)
