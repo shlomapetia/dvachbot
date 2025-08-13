@@ -1319,6 +1319,7 @@ def get_board_chunk(board_id: str, hours: int = 6) -> str:
 
     chunk = "\n".join(lines)
     print(f"[summarize] Chunk for board {board_id} built, len={len(chunk)}")
+    print(f"[summarize] CHUNK:\n{chunk[:400]}\n---\nEND CHUNK")
     # Ограничиваем до 35_000 символов для нейросети
     return chunk[:35000]
 
