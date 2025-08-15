@@ -2068,13 +2068,12 @@ async def process_new_post(
 ):
     """
     Унифицированная функция для обработки, сохранения и постановки в очередь нового поста.
-    (ИСПРАВЛЕННАЯ ВЕРСИЯ БЕЗ DEADLOCK)
+    (ФИНАЛЬНАЯ ВЕРСИЯ)
     """
     b_data = board_data[board_id]
     current_post_num = None
     
     try:
-        # --- Блок 1: Определение контекста и генерация заголовка (без блокировки) ---
         user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
         thread_id = None
         recipients = set()
@@ -2090,10 +2089,8 @@ async def process_new_post(
                 return
 
             if user_id in thread_info.get('local_mutes', {}):
-                if time.time() < thread_info['local_mutes'][user_id]:
-                    return
-                else:
-                    del thread_info['local_mutes'][user_id]
+                if time.time() < thread_info['local_mutes'][user_id]: return
+                else: del thread_info['local_mutes'][user_id]
             
             async with b_data['thread_locks'][thread_id]:
                 local_post_num = len(thread_info.get('posts', [])) + 1
@@ -2116,25 +2113,23 @@ async def process_new_post(
 
         content['header'] = header_text
         content['reply_to_post'] = reply_to_post
-        
-        # --- Блок 2: Сохранение поста и подготовка к отправке (под блокировкой) ---
-        reply_info = {}
+        content['post_num'] = current_post_num # <-- Явное добавление post_num в content
+
+        reply_info_for_author = {}
         async with storage_lock:
             messages_storage[current_post_num] = {
                 'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
                 'author_message_id': None, 'board_id': board_id, 'thread_id': thread_id
             }
             if reply_to_post:
-                reply_info = post_to_messages.get(reply_to_post, {})
+                reply_info_for_author = post_to_messages.get(reply_to_post, {})
 
-        # --- Блок 3: Отправка автору (без блокировки) ---
         content_for_author = await _apply_mode_transformations(content, board_id)
         author_results = await send_message_to_users(
             bot_instance=bot_instance, recipients={user_id},
-            content=content_for_author, reply_info=reply_info
+            content=content_for_author, reply_info=reply_info_for_author
         )
         
-        # --- Блок 4: Обновление ID сообщения (под блокировкой) ---
         if author_results and author_results[0] and author_results[0][1]:
             sent_to_author = author_results[0][1]
             messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
@@ -2145,11 +2140,11 @@ async def process_new_post(
                     post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
                     message_to_post[(user_id, m.message_id)] = current_post_num
 
-        # --- Блок 5: Постановка в очередь для остальных (без блокировки) ---
         if not is_shadow_muted and recipients:
+            # --- ИЗМЕНЕНИЕ: Убрана передача устаревшего reply_info в очередь ---
             await message_queues[board_id].put({
                 'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                'reply_info': reply_info, 'board_id': board_id, 'thread_id': thread_id
+                'board_id': board_id, 'thread_id': thread_id
             })
 
     except TelegramForbiddenError:
@@ -2164,7 +2159,7 @@ async def process_new_post(
         if current_post_num:
             async with storage_lock:
                 messages_storage.pop(current_post_num, None)
-
+                
 async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     """
     Централизованно применяет все трансформации режимов с улучшенной обработкой аниме-изображений.
@@ -2622,7 +2617,7 @@ async def message_broadcaster(bots: dict[str, Bot]):
     await asyncio.gather(*tasks)
 
 async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
-    """Индивидуальный обработчик сообщений для одной доски."""
+    """Индивидуальный обработчик сообщений для одной доски. (ИСПРАВЛЕННАЯ ВЕРСИЯ)"""
     queue = message_queues[board_id]
     b_data = board_data[board_id]
     
@@ -2639,12 +2634,11 @@ async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
             initial_recipients = msg_data['recipients']
             content = msg_data['content']
             post_num = msg_data['post_num']
-            reply_info = msg_data.get('reply_info', {})
+            # --- ИЗМЕНЕНИЕ: reply_info теперь берется из хранилища, а не из очереди ---
+            # reply_info = msg_data.get('reply_info', {}) 
             
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
             thread_id = msg_data.get('thread_id')
             
-            # Фильтруем получателей на основе их текущей локации
             recipients_at_location = set()
             user_states = b_data.get('user_state', {})
 
@@ -2652,38 +2646,43 @@ async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
                 user_location = user_states.get(uid, {}).get('location', 'main')
                 
                 if thread_id:
-                    # Если сообщение для треда, отправляем только тем, кто в этом треде
                     if user_location == thread_id:
                         recipients_at_location.add(uid)
                 else:
-                    # Если сообщение для доски, отправляем только тем, кто на доске ('main')
                     if user_location == 'main':
                         recipients_at_location.add(uid)
             
             active_recipients = {uid for uid in recipients_at_location if uid not in b_data['users']['banned']}
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             if not active_recipients:
                 continue
             
-            # Применяем трансформации режимов ко ВСЕМ сообщениям из очереди
             content = await _apply_mode_transformations(content, board_id)
-            
-            # Добавляем post_num в словарь content перед отправкой
             content['post_num'] = post_num
+
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Извлечение reply_info под блокировкой ---
+            reply_info_copy = {}
+            async with storage_lock:
+                # Получаем самую актуальную информацию о копиях поста
+                # Это важно, так как копия для автора уже создана
+                if post_num in post_to_messages:
+                    reply_info_copy = post_to_messages[post_num].copy()
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             await send_message_to_users(
                 bot_instance,
                 active_recipients,
                 content,
-                reply_info
+                reply_info_copy # <-- Передаем актуальные данные
             )
         except Exception as e:
             print(f"{worker_name} | ⛔ Критическая ошибка: {str(e)[:200]}")
+            import traceback
+            traceback.print_exc() # <-- Добавлено для полного дебага
             await asyncio.sleep(1)
 
 async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_location: str):
-    """Отправляет пользователю пропущенные сообщения для указанной локации."""
+    """Отправляет пользователю пропущенные сообщения для указанной локации. (ИСПРАВЛЕННАЯ ВЕРСИЯ)"""
     b_data = board_data[board_id]
     user_s = b_data['user_state'].setdefault(user_id, {})
     
@@ -2712,61 +2711,40 @@ async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_loc
 
     missed_post_nums.sort()
     
-    # 2. Обрабатываем и отправляем пропущенные сообщения
-    text_chunk = []
-    
-    async def send_chunk():
-        if text_chunk:
-            full_text = "\n\n".join(text_chunk)
-            if len(full_text) > 4096:
-                full_text = full_text[:4093] + "..."
-            try:
-                await bot.send_message(user_id, full_text, parse_mode="HTML")
-            except Exception as e:
-                print(f"Ошибка отправки чанка текста {user_id}: {e}")
-            text_chunk.clear()
-
+    # 2. Обрабатываем и отправляем пропущенные сообщения (одно за другим)
     for post_num in missed_post_nums:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        async with storage_lock:
-            post_data = messages_storage.get(post_num)
-            if not post_data: continue
-
-            content = post_data.get('content', {}).copy()
-            
-            # Если это простой текстовый пост, добавляем его в пачку для отправки одним сообщением
-            if content.get('type') == 'text' and not content.get('reply_to_post'):
-                header_text = content.get('header', '')
-                head = f"<i>{escape_html(header_text)}</i>"
-                # _format_message_body требует блокировки, поэтому вызывается здесь
-                body = await _format_message_body(content, user_id, post_num)
-                text_chunk.append(f"{head}\n\n{body}" if body else head)
-                continue
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-        
-        # Если пост был не текстовый, сначала отправляем накопленную пачку текста
-        await send_chunk()
-        
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        # Получаем reply_info для медиа-сообщений также под блокировкой
-        async with storage_lock:
-            reply_info = post_to_messages.get(post_num, {})
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Сбор данных и вызов отправки для КАЖДОГО поста ---
         try:
-            # Отправляем медиа-сообщение индивидуально
-            await send_message_to_users(bot, {user_id}, content, reply_info)
+            content_copy = None
+            reply_info_copy = {}
+            
+            async with storage_lock:
+                post_data = messages_storage.get(post_num)
+                if not post_data:
+                    continue
+                # Создаем копии, чтобы работать с ними вне блокировки
+                content_copy = post_data.get('content', {}).copy()
+                # reply_info здесь - это post_to_messages[post_num]
+                reply_info_copy = post_to_messages.get(post_num, {})
+
+            if content_copy:
+                # Передаем управление основной функции отправки, которая уже умеет
+                # корректно собирать все данные и вызывать _format_message_body
+                await send_message_to_users(
+                    bot, {user_id}, content_copy, reply_info_copy
+                )
+
         except Exception as e:
-            print(f"Ошибка отправки индивидуального сообщения {post_num} юзеру {user_id}: {e}")
-                
-    await send_chunk() # Отправляем остатки текста в последней пачке
+            print(f"Ошибка отправки пропущенного сообщения #{post_num} юзеру {user_id}: {e}")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     # 3. Обновляем состояние пользователя
-    new_last_seen = missed_post_nums[-1]
-    if target_location == 'main':
-        user_s['last_seen_main'] = new_last_seen
-    else:
-        user_s.setdefault('last_seen_threads', {})[target_location] = new_last_seen
+    if missed_post_nums:
+        new_last_seen = missed_post_nums[-1]
+        if target_location == 'main':
+            user_s['last_seen_main'] = new_last_seen
+        else:
+            user_s.setdefault('last_seen_threads', {})[target_location] = new_last_seen
             
 async def motivation_broadcaster():
     """Отправляет мотивационные сообщения на каждую доску в разное время."""
