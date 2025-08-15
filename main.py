@@ -1,55 +1,60 @@
 from __future__ import annotations
 import asyncio
 import gc
-import io
+import glob
+import gzip
 import json
 import logging
-import time
-time.sleep(10)
 import os
-import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-import re 
-import glob
-import random
-import secrets
 import pickle
-import gzip
-from aiogram import types
+import random
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import time
 import weakref
+from asyncio import Semaphore
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone, UTC
 from typing import Tuple
+
 import aiohttp
 from aiohttp import web
-import shutil
-from aiogram.types import Message
-from aiogram.utils.media_group import MediaGroupBuilder
-from aiogram.exceptions import TelegramRetryAfter
-from asyncio import Semaphore
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import (
     TelegramBadRequest,
+    TelegramConflictError,
     TelegramForbiddenError,
     TelegramNetworkError,
-    TelegramConflictError,
+    TelegramRetryAfter,
 )
 from aiogram.filters import Command
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.utils.media_group import MediaGroupBuilder
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+time.sleep(10)
+
+import deanonymizer
+from deanonymizer import (
+    DEANON_CITIES,
+    DEANON_DETAILS,
+    DEANON_FETISHES,
+    DEANON_PROFESSIONS,
+    DEANON_SURNAMES,
+    generate_deanon_info,
 )
-import subprocess
-import signal
-from datetime import datetime, timedelta, timezone, UTC
-from japanese_translator import anime_transform, get_random_anime_image
-from ukrainian_mode import ukrainian_transform, UKRAINIAN_PHRASES
-import deanonymizer 
-from zaputin_mode import zaputin_transform, PATRIOTIC_PHRASES 
-from deanonymizer import DEANON_SURNAMES, DEANON_CITIES, DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS, generate_deanon_info
 from help_text import HELP_TEXT, HELP_TEXT_EN
+from japanese_translator import anime_transform, get_random_anime_image
 from summarize import summarize_text_with_hf
+from thread_texts import thread_messages
+from ukrainian_mode import UKRAINIAN_PHRASES, ukrainian_transform
+from zaputin_mode import PATRIOTIC_PHRASES, zaputin_transform
 
 # ========== Глобальные настройки досок ==========
 
@@ -60,7 +65,9 @@ BOARD_CONFIG = {
         "description_en": "RANDOM -",
         "username": "@dvach_chatbot",
         "token": os.getenv("BOT_TOKEN"),
-        "admins": {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        "admins": {int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x}
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'po': {
         "name": "/po/",
@@ -68,7 +75,9 @@ BOARD_CONFIG = {
         "description_en": "POLITICS  -",
         "username": "@dvach_po_chatbot",
         "token": os.getenv("PO_BOT_TOKEN"),
-        "admins": {int(x) for x in os.getenv("PO_ADMINS", "").split(",") if x}
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        "admins": {int(x.strip()) for x in os.getenv("PO_ADMINS", "").split(",") if x}
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'a': {
         "name": "/a/",
@@ -76,7 +85,9 @@ BOARD_CONFIG = {
         "description_en": "ANIME (🇯🇵, hentai, manga)",
         "username": "@dvach_a_chatbot",
         "token": os.getenv("A_BOT_TOKEN"),
-        "admins": {int(x) for x in os.getenv("A_ADMINS", "").split(",") if x}
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        "admins": {int(x.strip()) for x in os.getenv("A_ADMINS", "").split(",") if x}
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'sex': {
         "name": "/sex/",
@@ -84,7 +95,9 @@ BOARD_CONFIG = {
         "description_en": "SEX (relationships, sex, blackpill)",
         "username": "@dvach_sex_chatbot",
         "token": os.getenv("SEX_BOT_TOKEN"),
-        "admins": {int(x) for x in os.getenv("SEX_ADMINS", "").split(",") if x}
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        "admins": {int(x.strip()) for x in os.getenv("SEX_ADMINS", "").split(",") if x}
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'vg': {
         "name": "/vg/",
@@ -92,7 +105,9 @@ BOARD_CONFIG = {
         "description_en": "VIDEO GAMES (🎮, hobbies)",
         "username": "@dvach_vg_chatbot",
         "token": os.getenv("VG_BOT_TOKEN"),
-        "admins": {int(x) for x in os.getenv("VG_ADMINS", "").split(",") if x}
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        "admins": {int(x.strip()) for x in os.getenv("VG_ADMINS", "").split(",") if x}
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'int': {
         "name": "/int/",
@@ -100,31 +115,75 @@ BOARD_CONFIG = {
         "description_en": "INTERNATIONAL (🇬🇧🇺🇸🇨🇳🇮🇳🇪🇺)",
         "username": "@tgchan_chatbot",
         "token": os.getenv("INT_BOT_TOKEN"),
-        "admins": {int(x) for x in os.getenv("INT_ADMINS", "").split(",") if x}
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        "admins": {int(x.strip()) for x in os.getenv("INT_ADMINS", "").split(",") if x}
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    },
+    'thread': {
+        "name": "/thread/",
+        "description": "ТРЕДЫ - доска для создания тредов",
+        "description_en": "THREADS - board for creating threads",
+        "username": "@thread_chatbot", 
+        "token": os.getenv("THREAD_BOT_TOKEN"),
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        "admins": {int(x.strip()) for x in os.getenv("THREAD_ADMINS", "").split(",") if x}
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'test': {
         "name": "/test/",
         "description": "Testground",
         "description_en": "Testground",
-        "username": "@tgchan_testbot", # ЗАМЕНИТЕ НА ЮЗЕРНЕЙМ ВАШЕГО БОТА
+        "username": "@tgchan_testbot", 
         "token": os.getenv("TEST_BOT_TOKEN"),
-        "admins": {int(x) for x in os.getenv("TEST_ADMINS", "").split(",") if x}
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        "admins": {int(x.strip()) for x in os.getenv("TEST_ADMINS", "").split(",") if x}
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     }
 }
+
+# ========== НОВЫЕ КОНСТАНТЫ ДЛЯ СИСТЕМЫ ТРЕДОВ ==========
+THREAD_BOARDS = {'thread', 'test'} # Доски, на которых будет работать система тредов
+DATA_DIR = "data"  # Папка для хранения данных (например, архивов тредов)
+os.makedirs(DATA_DIR, exist_ok=True) # Гарантируем, что папка существует
+
+# --- Конфигурация уведомлений ---
+THREAD_NOTIFY_THRESHOLD = 30 # Порог постов для отправки уведомления об активности
+last_checked_post_counter_for_notify = 0 # Глобальный счетчик для уведомителя
+THREAD_BUMP_LIMIT_WARNING_THRESHOLD = 40 # За сколько постов до лимита слать уведомление
+
+# --- Конфигурация жизненного цикла тредов ---
+MAX_ACTIVE_THREADS = 100 # Макс. активных тредов на доске
+MAX_POSTS_PER_THREAD = 300 # Макс. постов в треде до архивации
+
+# --- Конфигурация кулдаунов ---
+THREAD_CREATE_COOLDOWN_USER = 1800  # 30 минут в секундах
+THREAD_HISTORY_COOLDOWN = 300 # 5 минут в секундах
+LOCATION_SWITCH_COOLDOWN = 5 # 5 секунд на смену локации (вход/выход)
+SUMMARIZE_COOLDOWN = 300 # 5 минут в секундах для команды /summarize
 
 
 # Извлекаем список ID досок для удобства
 BOARDS = list(BOARD_CONFIG.keys())
 
+# --- Конфигурация канала для архивов ---
+# ID канала, куда будут поститься архивы. Должен быть в переменных окружения.
+ARCHIVE_CHANNEL_ID = int(os.getenv("ARCHIVE_CHANNEL_ID", -1002827087363))
+# Базовый URL для формирования прямых ссылок на файлы в GitHub-репозитории
+GITHUB_ARCHIVE_BASE_URL = "https://github.com/shlomapetia/dvachbot-backup/blob/main/archives"
+# ID бота из BOARD_CONFIG, который имеет права администратора в канале архивов
+ARCHIVE_POSTING_BOT_ID = 'test' 
+
 # Очереди сообщений для каждой доски
 message_queues = {board: asyncio.Queue(maxsize=9000) for board in BOARDS}
 
 # ========== Глобальные переменные и настройки ==========
+GLOBAL_BOTS = {} # Словарь для хранения всех экземпляров ботов
 is_shutting_down = False
 git_executor = ThreadPoolExecutor(max_workers=1)
 save_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 1) # Executor для сохранения файлов
 git_semaphore = asyncio.Semaphore(1)
 post_counter_lock = asyncio.Lock()
+storage_lock = asyncio.Lock()  # Блокировка для доступа к messages_storage, post_to_messages и т.д.
 
 
 # ВВОДИМ НОВУЮ СТРУКТУРУ ДЛЯ ДАННЫХ КАЖДОЙ ДОСКИ
@@ -137,6 +196,9 @@ board_data = defaultdict(lambda: {
     'last_suka_blyat': None,
     'suka_blyat_counter': 0,
     'last_mode_activation': None,
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    'last_summarize_time': 0, # Время последнего успешного вызова /summarize
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     # --- Данные пользователей для спам-фильтров ---
     'last_texts': defaultdict(lambda: deque(maxlen=5)),
     'last_stickers': defaultdict(lambda: deque(maxlen=5)),
@@ -156,7 +218,19 @@ board_data = defaultdict(lambda: {
     'last_user_msgs': {},
     # --- Отслеживание активности для очистки памяти ---
     'last_activity': {},
+    # --- НОВЫЕ СТРУКТУРЫ ДЛЯ СИСТЕМЫ ТРЕДОВ ---
+    'threads_data': {},  # {thread_id: {'op_id', 'title', ...}}
+    'user_state': {},    # {user_id: {'location', 'last_seen_main', ...}}
+    'thread_locks': defaultdict(asyncio.Lock), # !!! ДОБАВЛЕНО: Словарь для блокировок тредов
 })
+
+# ========== НОВЫЕ СТРУКТУРЫ ДАННЫХ ДЛЯ ТРЕДОВ ==========
+# Хранилище метаданных тредов: {board_id: {thread_id: {...}}}
+threads_data = defaultdict(lambda: defaultdict(dict))
+
+# Хранилище состояния пользователя: {board_id: {user_id: {...}}}
+user_state = defaultdict(lambda: defaultdict(dict))
+
 
 # ========== Rate Limiter для уведомлений о реакциях (на пользователя) ==========
 AUTHOR_NOTIFY_LIMIT_PER_MINUTE = 4
@@ -169,6 +243,17 @@ pending_edit_lock = asyncio.Lock()
 # ========== ОБЩИЕ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (остаются без изменений) ==========
 MODE_COOLDOWN = 3600  # 1 час в секундах
 MAX_ACTIVE_USERS_IN_MEMORY = 5000 # Лимит на юзера в памяти для get_user_msgs_deque
+
+# --- Конфигурация "счастливых" номеров постов ---
+SPECIAL_NUMERALS_CONFIG = {
+    # Уровень: { 'label': 'Название', 'emojis': ('эмодзи', ...) }
+    3: {'label': 'Трипл', 'emojis': ('🎲', '✨', '🎉', '🎰')},
+    4: {'label': 'Квадрипл', 'emojis': ('🎯', '🚀', '🔥', '🍀')},
+    5: {'label': 'Пентипл', 'emojis': ('🏆', '⭐', '🥇', '💫')},
+    6: {'label': 'Секстипл', 'emojis': ('💎', '👑', ' JACKPOT ', '🤩')},
+    7: {'label': 'Септипл', 'emojis': ('🤯', '🌌', '🌠', '🪐')},
+    8: {'label': 'Октипл', 'emojis': ('🦄', '👽', '💠', '🔱')}
+}
 
 # --- ОБЩЕЕ ХРАНИЛИЩЕ ПОСТОВ (сквозная нумерация) ---
 state = {
@@ -353,16 +438,29 @@ def sync_git_operations(token: str) -> bool:
                 print(f"⚠️ Ошибка обновления (код {result.returncode}):\n--- stderr ---\n{result.stderr}\n--- stdout ---\n{result.stdout}")
                 # Не критично, продолжаем, но это плохой знак
 
-        # --- Копирование файлов ---
-        files_to_copy = glob.glob(os.path.join(os.getcwd(), "*_state.json"))
-        files_to_copy += glob.glob(os.path.join(os.getcwd(), "*_reply_cache.json"))
+        # --- Копирование файлов состояний ---
+        files_to_copy_state = glob.glob(os.path.join(os.getcwd(), "*_state.json"))
+        files_to_copy_state += glob.glob(os.path.join(os.getcwd(), "*_reply_cache.json"))
         
-        if not files_to_copy:
+        for src_path in files_to_copy_state:
+            shutil.copy2(src_path, work_dir)
+
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Копирование архивов тредов ---
+        archives_dir_in_repo = os.path.join(work_dir, "archives")
+        os.makedirs(archives_dir_in_repo, exist_ok=True) # Создаем папку archives в репозитории
+
+        # Ищем все HTML архивы в локальной папке DATA_DIR (по умолчанию "data")
+        files_to_copy_archives = glob.glob(os.path.join(DATA_DIR, "archive_*.html"))
+        
+        if files_to_copy_archives:
+            print(f"Git: Найдено {len(files_to_copy_archives)} файлов архивов для бэкапа.")
+            for src_path in files_to_copy_archives:
+                shutil.copy2(src_path, archives_dir_in_repo)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+        if not files_to_copy_state and not files_to_copy_archives:
             print("⚠️ Нет файлов для бэкапа, пропуск.")
             return True # Успешное завершение, так как нет работы
-
-        for src_path in files_to_copy:
-            shutil.copy2(src_path, work_dir)
 
         # --- Локальные Git операции (быстрые, короткий таймаут) ---
         subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True, timeout=5)
@@ -420,7 +518,8 @@ def clean_html_tags(text: str) -> str:
     return re.sub(r'<[^>]+>', '', text)
 
 def add_you_to_my_posts(text: str, user_id: int) -> str:
-    """Добавляет (You) к упоминаниям постов, если это ответ на свой же пост"""
+    """Добавляет (You) к упоминаниям постов, если это ответ на свой же пост.
+    Должна вызываться из-под storage_lock."""
     if not text:
         return text
 
@@ -434,10 +533,8 @@ def add_you_to_my_posts(text: str, user_id: int) -> str:
             original_author = post_data.get("author_id")
 
             if original_author == user_id:
-                # Добавляем "(You)", если её ещё нет
                 target = f">>{post_num}"
                 replacement = f">>{post_num} (You)"
-
                 if target in text and replacement not in text:
                     text = text.replace(target, replacement)
         except (ValueError, KeyError):
@@ -719,41 +816,45 @@ async def global_error_handler(event: types.ErrorEvent) -> bool:
             telegram_object = update.callback_query
 
         if user_id and telegram_object:
-            # Определяем, какого именно бота заблокировали
             board_id = get_board_id(telegram_object)
             if board_id:
-                # Удаляем пользователя из активных на конкретной доске
                 board_data[board_id]['users']['active'].discard(user_id)
                 print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных.")
         return True
 
-    # Логирование остальных ошибок
-    error_msg = f"⚠️ Ошибка: {type(exception).__name__}"
-    if str(exception):
-        error_msg += f": {exception}"
-    print(error_msg)
-
     # Обработка сетевых ошибок и конфликтов
     if isinstance(exception, (TelegramNetworkError, TelegramConflictError, aiohttp.ClientError)):
-        print(f"🌐 Сетевая ошибка: {exception}")
+        print(f"🌐 Сетевая ошибка: {type(exception).__name__}: {exception}")
         await asyncio.sleep(10)
         return False
 
-    # Обработка KeyError (проблемы с хранилищем)
+    # Обработка KeyError (проблемы с хранилищем) - логируем, но не останавливаемся
     elif isinstance(exception, KeyError):
-        print(f"🔑 KeyError: {exception}. Пропускаем обработку этого сообщения.")
+        print(f"🔑 Потенциальная проблема с данными (KeyError): {exception}. Пропускаем обработку этого сообщения.")
         return True
 
-    # Все остальные ошибки
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: ЛОГИРОВАНИЕ ПОЛНОГО TRACEBACK ---
+    # Все остальные ошибки считаются непредвиденными и требуют детальной отладки
     else:
-        print(f"⛔ Непредвиденная ошибка: {exception}")
+        import traceback
+        print("⛔⛔⛔ НЕПРЕДВИДЕННАЯ КРИТИЧЕСКАЯ ОШИБКА ⛔⛔⛔")
+        print(f"Exception: {type(exception).__name__}: {exception}")
+        
+        # Печатаем полный traceback
+        traceback.print_exc()
+
+        # Логируем тело update, если оно есть, для контекста
         if update:
             try:
-                print(f"Update: {update.model_dump_json(exclude_none=True, indent=2)}")
+                update_json = update.model_dump_json(exclude_none=True, indent=2)
+                print(f"--- Update Context ---\n{update_json}\n--- End Update Context ---")
             except Exception as json_e:
                 print(f"Не удалось сериализовать update: {json_e}")
-        await asyncio.sleep(10)
-        return False
+        
+        # Возвращаем True, чтобы бот не пытался повторно обработать ошибочный апдейт,
+        # но при этом продолжил работу со следующими.
+        return True
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
 def escape_html(text: str) -> str:
     """Экранирует HTML символы"""
@@ -769,7 +870,7 @@ def is_admin(uid: int, board_id: str) -> bool:
         return False
     return uid in BOARD_CONFIG.get(board_id, {}).get('admins', set())
 
-def get_board_activity_last_hours(board_id: str, hours: int = 2) -> float:
+async def get_board_activity_last_hours(board_id: str, hours: int = 2) -> float:
     """Подсчитывает среднее количество постов в час для указанной доски за последние N часов."""
     if hours <= 0:
         return 0.0
@@ -778,41 +879,23 @@ def get_board_activity_last_hours(board_id: str, hours: int = 2) -> float:
     time_threshold = now - timedelta(hours=hours)
     post_count = 0
 
-    # Проходим по всем сообщениям в памяти
-    for post_data in messages_storage.values():
-        # Проверяем, что пост принадлежит нужной доске и создан в рамках временного окна
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    async with storage_lock:
+        # Проходим по копии, чтобы не блокировать надолго при большом хранилище
+        storage_copy = list(messages_storage.values())
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    for post_data in storage_copy:
         if post_data.get('board_id') == board_id and post_data.get('timestamp', now) > time_threshold:
             post_count += 1
-
-    # Считаем среднюю активность (постов в час)
+            
     activity = post_count / hours
     return activity
     
-def _sync_save_board_state(board_id: str):
-    """Синхронная, блокирующая функция для сохранения state.json."""
+def _sync_save_board_state(board_id: str, data_to_save: dict):
+    """Синхронная, блокирующая функция для сохранения state.json. Работает только с переданными данными."""
     state_file = f"{board_id}_state.json"
-    b_data = board_data[board_id]
-    
     try:
-        post_counter_to_save = state['post_counter'] if board_id == 'b' else None
-        
-        # --- ИЗМЕНЕНО: Логика подсчета постов ---
-        # Теперь мы не пересчитываем посты, а берем актуальное значение из памяти,
-        # которое инкрементируется в format_header.
-        board_post_count = b_data.get('board_post_count', 0)
-        
-        data_to_save = {
-            'users_data': {
-                'active': list(b_data['users']['active']),
-                'banned': list(b_data['users']['banned']),
-            },
-            'message_counter': dict(b_data['message_counter']),
-            'board_post_count': board_post_count, # Записываем актуальное значение из памяти
-        }
-        if post_counter_to_save is not None:
-            # Сохраняем 'post_counter' для 'b' для ясности и обратной совместимости
-            data_to_save['post_counter'] = post_counter_to_save
-
         with open(state_file, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
         return True
@@ -821,11 +904,79 @@ def _sync_save_board_state(board_id: str):
         return False
 
 async def save_board_state(board_id: str):
-    """Асинхронная обертка для неблокирующего сохранения state.json."""
+    """Асинхронная обертка для неблокирующего и потокобезопасного сохранения state.json."""
     loop = asyncio.get_running_loop()
+    
+    # Потокобезопасно читаем и копируем все необходимые данные под блокировкой
+    async with storage_lock:
+        b_data = board_data[board_id]
+        post_counter_to_save = state.get('post_counter') if board_id == 'b' else None
+        
+        # Создаем словарь с копией данных для передачи в другой поток
+        data_for_sync_func = {
+            'users_data': {
+                'active': list(b_data['users']['active']),
+                'banned': list(b_data['users']['banned']),
+            },
+            'message_counter': dict(b_data['message_counter']),
+            'board_post_count': b_data.get('board_post_count', 0),
+        }
+        if post_counter_to_save is not None:
+            data_for_sync_func['post_counter'] = post_counter_to_save
+
+    # Передаем скопированные данные в функцию, выполняемую в другом потоке
     await loop.run_in_executor(
         save_executor,
         _sync_save_board_state,
+        board_id,
+        data_for_sync_func
+    )
+
+def _sync_save_threads_data(board_id: str):
+    """Синхронная функция для сохранения данных о тредах."""
+    if board_id not in THREAD_BOARDS:
+        return True
+    
+    threads_file = os.path.join(DATA_DIR, f"{board_id}_threads.json")
+    try:
+        data_to_save = board_data[board_id].get('threads_data', {})
+        with open(threads_file, 'w', encoding='utf-8') as f:
+            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"⛔ [{board_id}] Ошибка в потоке сохранения _threads.json: {e}")
+        return False
+
+async def save_threads_data(board_id: str):
+    """Асинхронная обертка для сохранения данных о тредах."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        save_executor,
+        _sync_save_threads_data,
+        board_id
+    )
+
+def _sync_save_user_states(board_id: str):
+    """Синхронная функция для сохранения состояний пользователей в тредах."""
+    if board_id not in THREAD_BOARDS:
+        return True
+        
+    user_states_file = os.path.join(DATA_DIR, f"{board_id}_user_states.json")
+    try:
+        data_to_save = board_data[board_id].get('user_state', {})
+        with open(user_states_file, 'w', encoding='utf-8') as f:
+            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"⛔ [{board_id}] Ошибка в потоке сохранения _user_states.json: {e}")
+        return False
+
+async def save_user_states(board_id: str):
+    """Асинхронная обертка для сохранения состояний пользователей в тредах."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        save_executor,
+        _sync_save_user_states,
         board_id
     )
 
@@ -838,7 +989,12 @@ async def save_all_boards_and_backup():
     for board_id in BOARDS:
         save_tasks.append(save_board_state(board_id))
         save_tasks.append(save_reply_cache(board_id))
-    
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        if board_id in THREAD_BOARDS:
+            save_tasks.append(save_threads_data(board_id))
+            save_tasks.append(save_user_states(board_id))
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     # 2. Запускаем все задачи сохранения одновременно и ждем их завершения
     await asyncio.gather(*save_tasks)
     
@@ -850,18 +1006,16 @@ async def save_all_boards_and_backup():
         print("❌ Не удалось отправить бэкап в GitHub.")
     return success
 
-def _sync_save_reply_cache(board_id: str):
-    """Синхронная, блокирующая функция для сохранения кэша. Выполняется в отдельном потоке."""
+def _sync_save_reply_cache(
+    board_id: str,
+    recent_board_posts: list,
+    all_post_to_messages: dict,
+    all_message_to_post: dict,
+    all_messages_storage_meta: dict
+):
+    """Синхронная, блокирующая функция для сохранения кэша. Работает с переданными ей данными."""
     reply_file = f"{board_id}_reply_cache.json"
     try:
-        # 1. Определяем посты, принадлежащие ТОЛЬКО этой доске
-        board_post_keys = {
-            p_num for p_num, data in messages_storage.items() 
-            if data.get("board_id") == board_id
-        }
-        
-        # 2. Ограничиваем количество постов для сохранения (медленная операция)
-        recent_board_posts = sorted(list(board_post_keys))[-REPLY_CACHE:]
         recent_posts_set = set(recent_board_posts)
 
         if not recent_posts_set:
@@ -869,31 +1023,27 @@ def _sync_save_reply_cache(board_id: str):
                 os.remove(reply_file)
             return True
 
-        # 3. Собираем данные для сохранения
+        # Собираем данные для сохранения из переданных копий, фильтруя по recent_posts_set
         new_data = {
             "post_to_messages": {
                 str(p_num): data
-                for p_num, data in post_to_messages.items()
+                for p_num, data in all_post_to_messages.items()
                 if p_num in recent_posts_set
             },
             "message_to_post": {
                 f"{uid}_{mid}": p_num
-                for (uid, mid), p_num in message_to_post.items()
+                for (uid, mid), p_num in all_message_to_post.items()
                 if p_num in recent_posts_set
             },
+            # Фильтруем метаданные по списку recent_board_posts, как в оригинале
             "messages_storage_meta": {
-                str(p_num): {
-                    "author_id": messages_storage[p_num].get("author_id", ""),
-                    "timestamp": messages_storage[p_num].get("timestamp", datetime.now(UTC)).isoformat(),
-                    "author_message_id": messages_storage[p_num].get("author_message_id"),
-                    "board_id": board_id
-                }
+                str(p_num): all_messages_storage_meta[p_num]
                 for p_num in recent_board_posts
-                if p_num in messages_storage
+                if p_num in all_messages_storage_meta
             }
         }
 
-        # 4. Сохраняем новые данные (блокирующая операция I/O)
+        # Сохраняем новые данные
         with open(reply_file, 'w', encoding='utf-8') as f:
             json.dump(new_data, f, ensure_ascii=False, indent=2)
 
@@ -904,12 +1054,40 @@ def _sync_save_reply_cache(board_id: str):
         return False
 
 async def save_reply_cache(board_id: str):
-    """Асинхронная обертка для неблокирующего сохранения кэша ответов."""
+    """Асинхронная обертка для неблокирующего и потокобезопасного сохранения кэша ответов."""
+    async with storage_lock:
+        # 1. Определяем все посты доски
+        board_post_keys = {
+            p_num for p_num, data in messages_storage.items()
+            if data.get("board_id") == board_id
+        }
+        
+        # 2. Определяем недавние посты (как в оригинале)
+        recent_board_posts = sorted(list(board_post_keys))[-REPLY_CACHE:]
+        
+        # 3. Создаем глубокие копии данных для передачи в поток
+        post_to_messages_copy = {k: v.copy() for k, v in post_to_messages.items()}
+        message_to_post_copy = message_to_post.copy()
+        
+        messages_storage_meta_copy = {
+            p_num: {
+                "author_id": data.get("author_id", ""),
+                "timestamp": data.get("timestamp", datetime.now(UTC)).isoformat(),
+                "author_message_id": data.get("author_message_id"),
+                "board_id": data.get("board_id")
+            }
+            for p_num, data in messages_storage.items()
+        }
+
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(
-        save_executor, 
-        _sync_save_reply_cache, 
-        board_id
+        save_executor,
+        _sync_save_reply_cache,
+        board_id,
+        recent_board_posts,  # <-- Передаем готовый список недавних постов
+        post_to_messages_copy,
+        message_to_post_copy,
+        messages_storage_meta_copy
     )
 
 def load_state():
@@ -963,6 +1141,31 @@ def load_state():
 
             # Загружаем кэш ответов для этой доски
             load_reply_cache(board_id)
+
+            # --- НАЧАЛО ИНТЕГРАЦИИ ЛОГИКИ ТРЕДОВ ---
+            if board_id in THREAD_BOARDS:
+                threads_file = os.path.join(DATA_DIR, f'{board_id}_threads.json')
+                if os.path.exists(threads_file):
+                    try:
+                        with open(threads_file, 'r', encoding='utf-8') as f:
+                            b_data['threads_data'] = json.load(f)
+                            print(f"[{board_id}] Данные тредов загружены.")
+                    except (json.JSONDecodeError, IOError) as e:
+                        print(f"[{board_id}] Ошибка загрузки _threads.json: {e}")
+                        b_data['threads_data'] = {}
+                
+                user_states_file = os.path.join(DATA_DIR, f'{board_id}_user_states.json')
+                if os.path.exists(user_states_file):
+                    try:
+                        with open(user_states_file, 'r', encoding='utf-8') as f:
+                            # Ключи в JSON всегда строки, преобразуем их обратно в int
+                            loaded_states = json.load(f)
+                            b_data['user_state'] = {int(k): v for k, v in loaded_states.items()}
+                            print(f"[{board_id}] Состояния пользователей тредов загружены.")
+                    except (json.JSONDecodeError, IOError) as e:
+                        print(f"[{board_id}] Ошибка загрузки _user_states.json: {e}")
+                        b_data['user_state'] = {}
+            # --- КОНЕЦ ИНТЕГРАЦИИ ЛОГИКИ ТРЕДОВ ---
 
         except (json.JSONDecodeError, OSError) as e:
             print(f"Ошибка загрузки состояния для доски '{board_id}': {e}")
@@ -1071,7 +1274,9 @@ async def graceful_shutdown(bots: list[Bot]):
         # Если бэкап был прерван по таймауту, поток git все еще может выполняться.
         # wait=True здесь привел бы к зависанию.
         git_executor.shutdown(wait=False, cancel_futures=True)
-        send_executor.shutdown(wait=False, cancel_futures=True)
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        save_executor.shutdown(wait=False, cancel_futures=True)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         print("🛑 Executors shutdown initiated.")
 
         if hasattr(dp, 'storage') and dp.storage:
@@ -1094,146 +1299,167 @@ async def graceful_shutdown(bots: list[Bot]):
     await asyncio.gather(*tasks, return_exceptions=True)
     print("✅ Все задачи остановлены, завершаем работу.")
     
+def _sync_clean_message_to_post(
+    current_message_to_post: dict, 
+    actual_post_nums: set, 
+    all_active_users: set
+) -> dict:
+    """
+    Синхронная функция для выполнения ресурсоемкой фильтрации словаря.
+    Выполняется в отдельном потоке, чтобы не блокировать event loop.
+    """
+    valid_entries = {}
+    for key, post_num in current_message_to_post.items():
+        user_id, _ = key
+        if post_num in actual_post_nums and user_id in all_active_users:
+            valid_entries[key] = post_num
+    return valid_entries
+
 async def auto_memory_cleaner():
-    """Полная и честная очистка мусора каждые 10 минут."""
+    """Полная и честная очистка мусора каждые 10 минут с выносом тяжелых операций."""
     cleanup_counter = 0
+    loop = asyncio.get_running_loop()
+
     while True:
         cleanup_counter += 1
         await asyncio.sleep(600)  # 10 минут
 
-        # 1. Очистка старых постов
-        if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
-            to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
-            oldest_post_keys = sorted(messages_storage.keys())[:to_delete_count]
-            posts_to_delete_set = set(oldest_post_keys)
+        posts_to_delete_set = set()
+        # --- Блок 1: Очистка общих хранилищ под блокировкой ---
+        async with storage_lock:
+            # 1. Очистка старых постов
+            if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
+                to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
+                oldest_post_keys = sorted(messages_storage.keys())[:to_delete_count]
+                posts_to_delete_set.update(oldest_post_keys)
 
-            # УДАЛЯЕМ СВЯЗИ ИЗ message_to_post ДЛЯ СТАРЫХ ПОСТОВ
-            removed_links = 0
-            for key, post_num in list(message_to_post.items()):
-                if post_num in posts_to_delete_set:
-                    del message_to_post[key]
-                    removed_links += 1
-            
-            for post_num in oldest_post_keys:
-                messages_storage.pop(post_num, None)
-                post_to_messages.pop(post_num, None)
+                removed_links = 0
+                for key, post_num in list(message_to_post.items()):
+                    if post_num in posts_to_delete_set:
+                        del message_to_post[key]
+                        removed_links += 1
+                
+                for post_num in oldest_post_keys:
+                    messages_storage.pop(post_num, None)
+                    post_to_messages.pop(post_num, None)
 
-            print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов и {removed_links} связей в message_to_post.")
-
-        # 2. ПЕРЕРАБОТАННАЯ очистка message_to_post
-        actual_post_nums = set(messages_storage.keys())
-        now_utc = datetime.now(UTC)
+                print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов и {removed_links} связей в message_to_post.")
         
-        # Собираем ВСЕХ активных пользователей по ВСЕМ доскам
+        # --- Блок 2: Неблокирующая очистка message_to_post ---
+        initial_count = len(message_to_post)
+        
+        async with storage_lock:
+            actual_post_nums = set(messages_storage.keys())
+            message_to_post_copy = message_to_post.copy()
+        
+        now_utc = datetime.now(UTC)
         all_active_users = set()
         for board_id in BOARDS:
             b_data = board_data[board_id]
-            # Добавляем пользователей, активных в последние 24 часа
             all_active_users.update([
                 uid for uid, last_act in b_data.get('last_activity', {}).items()
                 if (now_utc - last_act) < timedelta(hours=24)
             ])
         
-        # ПОЛНАЯ ПЕРЕСБОРКА СЛОВАРЯ
-        initial_count = len(message_to_post)
-        valid_entries = {}
+        cleaned_message_to_post = await loop.run_in_executor(
+            save_executor,
+            _sync_clean_message_to_post,
+            message_to_post_copy,
+            actual_post_nums,
+            all_active_users
+        )
         
-        for key, post_num in message_to_post.items():
-            user_id, _ = key
-            # Критерии сохранения связи:
-            # 1. Пост существует в хранилище
-            # 2. Пользователь активен
-            if post_num in actual_post_nums and user_id in all_active_users:
-                valid_entries[key] = post_num
+        async with storage_lock:
+            message_to_post.clear()
+            message_to_post.update(cleaned_message_to_post)
         
-        # Атомарная замена словаря
-        message_to_post.clear()
-        message_to_post.update(valid_entries)
         removed_count = initial_count - len(message_to_post)
-        
         print(f"🧹 Очистка message_to_post: удалено {removed_count} связей (осталось {len(message_to_post)})")
 
-        # 3. Очистка данных для каждой доски
-        for board_id in BOARDS:
-            b_data = board_data[board_id]
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Блок 3 под защитой ---
+        async with storage_lock:
+            # 3. Очистка данных для каждой доски
+            for board_id in BOARDS:
+                b_data = board_data[board_id]
 
-            if len(b_data['message_counter']) > 100:
-                top_users = sorted(b_data['message_counter'].items(),
-                                   key=lambda x: x[1],
-                                   reverse=True)[:100]
-                b_data['message_counter'] = defaultdict(int, top_users)
-                print(f"🧹 [{board_id}] Очистка счетчика сообщений.")
+                if len(b_data['message_counter']) > 100:
+                    top_users = sorted(b_data['message_counter'].items(),
+                                       key=lambda x: x[1],
+                                       reverse=True)[:100]
+                    b_data['message_counter'] = defaultdict(int, top_users)
+                    print(f"🧹 [{board_id}] Очистка счетчика сообщений.")
 
-            inactive_threshold = now_utc - timedelta(hours=12)
-            potentially_inactive_users = {
-                user_id for user_id, last_time in b_data.get('last_activity', {}).items()
-                if last_time < inactive_threshold
-            }
-            users_with_active_mute = {
-                uid for uid, expiry in b_data.get('mutes', {}).items() if expiry > now_utc
-            }
-            users_with_active_shadow_mute = {
-                uid for uid, expiry in b_data.get('shadow_mutes', {}).items() if expiry > now_utc
-            }
-            users_to_purge = list(
-                potentially_inactive_users - users_with_active_mute - users_with_active_shadow_mute
-            )
-            if users_to_purge:
-                purged_count = len(users_to_purge)
-                print(f"🧹 [{board_id}] Начинаю очистку данных для {purged_count} неактивных пользователей...")
-                for user_id in users_to_purge:
-                    b_data['last_activity'].pop(user_id, None)
-                    b_data['last_texts'].pop(user_id, None)
-                    b_data['last_stickers'].pop(user_id, None)
-                    b_data['last_animations'].pop(user_id, None)
-                    b_data['spam_violations'].pop(user_id, None)
-                    b_data['spam_tracker'].pop(user_id, None)
-                    b_data['last_user_msgs'].pop(user_id, None)
-                print(f"🧹 [{board_id}] Очистка завершена. Удалены временные данные {purged_count} пользователей.")
+                inactive_threshold = now_utc - timedelta(hours=12)
+                potentially_inactive_users = {
+                    user_id for user_id, last_time in b_data.get('last_activity', {}).items()
+                    if last_time < inactive_threshold
+                }
+                users_with_active_mute = {
+                    uid for uid, expiry in b_data.get('mutes', {}).items() if expiry > now_utc
+                }
+                users_with_active_shadow_mute = {
+                    uid for uid, expiry in b_data.get('shadow_mutes', {}).items() if expiry > now_utc
+                }
+                users_to_purge = list(
+                    potentially_inactive_users - users_with_active_mute - users_with_active_shadow_mute
+                )
+                if users_to_purge:
+                    purged_count = len(users_to_purge)
+                    print(f"🧹 [{board_id}] Начинаю очистку данных для {purged_count} неактивных пользователей...")
+                    for user_id in users_to_purge:
+                        b_data['last_activity'].pop(user_id, None)
+                        b_data['last_texts'].pop(user_id, None)
+                        b_data['last_stickers'].pop(user_id, None)
+                        b_data['last_animations'].pop(user_id, None)
+                        b_data['spam_violations'].pop(user_id, None)
+                        b_data['spam_tracker'].pop(user_id, None)
+                        b_data['last_user_msgs'].pop(user_id, None)
+                    print(f"🧹 [{board_id}] Очистка завершена. Удалены временные данные {purged_count} пользователей.")
 
-            for user_id in list(b_data['last_user_msgs']):
-                if user_id not in b_data['users']['active']:
-                    b_data['last_user_msgs'].pop(user_id, None)
-            for user_id in list(b_data['last_texts']):
-                if user_id not in b_data['users']['active']:
-                    b_data['last_texts'].pop(user_id, None)
-            for user_id in list(b_data['last_stickers']):
-                if user_id not in b_data['users']['active']:
-                    b_data['last_stickers'].pop(user_id, None)
-            for user_id in list(b_data['last_animations']):
-                if user_id not in b_data['users']['active']:
-                    b_data['last_animations'].pop(user_id, None)
+                for user_id in list(b_data['last_user_msgs']):
+                    if user_id not in b_data['users']['active']:
+                        b_data['last_user_msgs'].pop(user_id, None)
+                for user_id in list(b_data['last_texts']):
+                    if user_id not in b_data['users']['active']:
+                        b_data['last_texts'].pop(user_id, None)
+                for user_id in list(b_data['last_stickers']):
+                    if user_id not in b_data['users']['active']:
+                        b_data['last_stickers'].pop(user_id, None)
+                for user_id in list(b_data['last_animations']):
+                    if user_id not in b_data['users']['active']:
+                        b_data['last_animations'].pop(user_id, None)
 
-            active_mutes = b_data.get('mutes', {})
-            for user_id in list(active_mutes.keys()):
-                if active_mutes[user_id] < now_utc:
-                    active_mutes.pop(user_id, None)
+                active_mutes = b_data.get('mutes', {})
+                for user_id in list(active_mutes.keys()):
+                    if active_mutes[user_id] < now_utc:
+                        active_mutes.pop(user_id, None)
 
-            active_shadow_mutes = b_data.get('shadow_mutes', {})
-            for user_id in list(active_shadow_mutes.keys()):
-                if active_shadow_mutes[user_id] < now_utc:
-                    active_shadow_mutes.pop(user_id, None)
+                active_shadow_mutes = b_data.get('shadow_mutes', {})
+                for user_id in list(active_shadow_mutes.keys()):
+                    if active_shadow_mutes[user_id] < now_utc:
+                        active_shadow_mutes.pop(user_id, None)
 
-            spam_tracker_board = b_data['spam_tracker']
-            for user_id in list(spam_tracker_board.keys()):
-                window_sec = SPAM_RULES.get('text', {}).get('window_sec', 15)
-                window_start = now_utc - timedelta(seconds=window_sec)
-                spam_tracker_board[user_id] = [
-                    t for t in spam_tracker_board[user_id]
-                    if t > window_start
+                spam_tracker_board = b_data['spam_tracker']
+                for user_id in list(spam_tracker_board.keys()):
+                    window_sec = SPAM_RULES.get('text', {}).get('window_sec', 15)
+                    window_start = now_utc - timedelta(seconds=window_sec)
+                    spam_tracker_board[user_id] = [
+                        t for t in spam_tracker_board[user_id]
+                        if t > window_start
+                    ]
+                    if not spam_tracker_board[user_id]:
+                        del spam_tracker_board[user_id]
+
+                inactive_threshold_spam = now_utc - timedelta(hours=24)
+                spam_violations_board = b_data['spam_violations']
+                users_to_purge_from_spam = [
+                    user_id for user_id, data in spam_violations_board.items()
+                    if data.get('last_reset', now_utc) < inactive_threshold_spam
                 ]
-                if not spam_tracker_board[user_id]:
-                    del spam_tracker_board[user_id]
-
-            inactive_threshold_spam = now_utc - timedelta(hours=24)
-            spam_violations_board = b_data['spam_violations']
-            users_to_purge_from_spam = [
-                user_id for user_id, data in spam_violations_board.items()
-                if data.get('last_reset', now_utc) < inactive_threshold_spam
-            ]
-            if users_to_purge_from_spam:
-                for user_id in users_to_purge_from_spam:
-                    spam_violations_board.pop(user_id, None)
+                if users_to_purge_from_spam:
+                    for user_id in users_to_purge_from_spam:
+                        spam_violations_board.pop(user_id, None)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         now_ts = time.time()
         tracker_inactive_threshold_sec = 24 * 3600  # 24 часа
@@ -1255,7 +1481,6 @@ async def auto_memory_cleaner():
         print(f"🧹 DIAG: objects in media_group_timers: {len(media_group_timers)}")
         print(f"🧹 DIAG: objects in sent_media_groups: {len(sent_media_groups)}")
 
-
 async def board_statistics_broadcaster():
     """Раз в час собирает общую статистику и рассылает на каждую доску."""
     await asyncio.sleep(300)
@@ -1268,7 +1493,12 @@ async def board_statistics_broadcaster():
             hour_ago = now - timedelta(hours=1)
             
             posts_per_hour = defaultdict(int)
-            for post_data in messages_storage.values():
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            async with storage_lock:
+                storage_copy = list(messages_storage.values())
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
+            for post_data in storage_copy:
                 b_id = post_data.get('board_id')
                 if b_id and post_data.get('timestamp', now) > hour_ago:
                     posts_per_hour[b_id] += 1
@@ -1277,9 +1507,9 @@ async def board_statistics_broadcaster():
                 if board_id == 'test':
                     continue
 
-                activity = get_board_activity_last_hours(board_id, hours=2)
-                if activity < 20:
-                    print(f"ℹ️ [{board_id}] Пропуск отправки статистики, активность слишком низкая: {activity:.1f} п/ч (требуется > 20).")
+                activity = await get_board_activity_last_hours(board_id, hours=2)
+                if activity < 40:
+                    print(f"ℹ️ [{board_id}] Пропуск отправки статистики, активность слишком низкая: {activity:.1f} п/ч (требуется > 40).")
                     continue
 
                 b_data = board_data[board_id]
@@ -1302,8 +1532,7 @@ async def board_statistics_broadcaster():
                 full_stats_text = header_text + "\n".join(stats_lines)
                 header = "### Statistics ###" if board_id == 'int' else "### Статистика ###"
 
-                # Добавляем подпись с вероятностью 50%
-                if random.random() < 0.5:
+                if random.random() < 0.66:
                     if board_id == 'int':
                         dvach_caption = random.choice(DVACH_STATS_CAPTIONS_EN)
                     else:
@@ -1313,7 +1542,8 @@ async def board_statistics_broadcaster():
                 _, post_num = await format_header(board_id)
                 content = {"type": "text", "header": header, "text": full_stats_text, "is_system_message": True}
                 
-                messages_storage[post_num] = {'author_id': 0, 'timestamp': now, 'content': content, 'board_id': board_id}
+                async with storage_lock:
+                    messages_storage[post_num] = {'author_id': 0, 'timestamp': now, 'content': content, 'board_id': board_id}
                 
                 await message_queues[board_id].put({"recipients": recipients, "content": content, "post_num": post_num, "board_id": board_id})
                 
@@ -1330,30 +1560,49 @@ async def setup_pinned_messages(bots: dict[str, Bot]):
     for board_id, bot_instance in bots.items():
         b_data = board_data[board_id]
         
-        # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
         # Выбираем правильный текст помощи и генерируем список досок на нужном языке
         if board_id == 'int':
             base_help_text = HELP_TEXT_EN
             boards_header = "🌐 <b>All boards:</b>"
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
             board_links = "\n".join(
                 f"<b>{config['name']}</b> {config['description_en']} - {config['username']}"
                 for b_id, config in BOARD_CONFIG.items() if b_id != 'test'
             )
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            if board_id in THREAD_BOARDS:
+                thread_info = (
+                    "\n\n<b>This board supports threads!</b>\n"
+                    "/create &lt;title&gt; - Create a new thread\n"
+                    "/threads - View active threads\n"
+                    "/leave - Return to the main board from a thread"
+                )
+            else:
+                thread_info = ""
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
         else:
             base_help_text = HELP_TEXT
             boards_header = "🌐 <b>Все доски:</b>"
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
             board_links = "\n".join(
                 f"<b>{config['name']}</b> {config['description']} - {config['username']}"
                 for b_id, config in BOARD_CONFIG.items() if b_id != 'test'
             )
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            if board_id in THREAD_BOARDS:
+                thread_info = (
+                    "\n\n<b>На этой доске есть треды!</b>\n"
+                    "/create &lt;заголовок&gt; - Создать новый тред\n"
+                    "/threads - Посмотреть активные треды\n"
+                    "/leave - Вернуться на доску из треда"
+                )
+            else:
+                thread_info = ""
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-            
+
         # Собираем финальное сообщение
         full_help_text = (
-            f"{base_help_text}\n\n"
+            f"{base_help_text}\n"
+            f"{thread_info}\n\n" # Добавляем блок с информацией о тредах
             f"{boards_header}\n{board_links}"
         )
         
@@ -1362,58 +1611,65 @@ async def setup_pinned_messages(bots: dict[str, Bot]):
         
         print(f"📌 [{board_id}] Текст для команды /start и закрепа подготовлен.")
 
-def get_board_chunk(board_id: str, hours: int = 6) -> str:
+async def get_board_chunk(board_id: str, hours: int = 6, thread_id: str | None = None) -> str:
+    """Собирает и очищает текстовый чанк постов доски или конкретного треда для саммаризации."""
     now = datetime.now(UTC)
     time_threshold = now - timedelta(hours=hours)
     lines = []
-    for post in messages_storage.values():
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Адаптация логики для тредов ---
+    async with storage_lock:
+        storage_copy = list(messages_storage.values())
+
+    post_iterator = storage_copy
+    
+    # Если указан thread_id, фильтруем посты только из него
+    if thread_id:
+        b_data = board_data[board_id]
+        thread_info = b_data.get('threads_data', {}).get(thread_id)
+        if not thread_info:
+            return "" # Возвращаем пустую строку, если тред не найден
+            
+        thread_post_nums = set(thread_info.get('posts', []))
+        # Фильтруем основной итератор, оставляя только посты из нужного треда
+        post_iterator = [p for p_num, p in messages_storage.items() if p_num in thread_post_nums]
+        # Для треда игнорируем ограничение по времени (hours)
+        time_threshold = datetime.min.replace(tzinfo=UTC)
+
+    for post in post_iterator:
         try:
+            # Проверка на доску остается в любом случае
             if post.get('board_id') != board_id:
                 continue
+            # Для основного чанка - проверка по времени, для треда - она будет проигнорирована
             if post.get('timestamp', now) < time_threshold:
                 continue
-            if post.get('author_id') == 0:
-                continue  # Пропускаем системные
+            if post.get('author_id') == 0: # Игнорируем системные сообщения
+                continue
 
             content = post.get('content', {})
             ttype = content.get('type')
 
-            # Мета-замена для медиа
-            if ttype == 'photo':
-                lines.append("[Картинка]")
-                continue
-            elif ttype == 'video':
-                lines.append("[Видео]")
-                continue
-            elif ttype == 'document':
-                lines.append("[Документ]")
-                continue
-            elif ttype in ['audio', 'voice']:
-                lines.append("[Аудио]")
-                continue
-            elif ttype == 'animation':
-                lines.append("[Гифка]")
-                continue
-
-            # Обрезаем шапку (Пост №123... и всё до первой пустой строки, либо до конца строки)
             if ttype == 'text':
                 text = content.get('text', '')
-                # Удаляем строку "Пост №..." или "Post No..." в начале текста
+                text = clean_html_tags(text)
                 text = re.sub(r'^(Пост №\d+.*?\n|Post No\.\d+.*?\n)', '', text, flags=re.MULTILINE)
-                # Дополнительно убираем все строки типа "### ... ###" и <i>...</i>
                 text = re.sub(r'^(###.*?###|<i>.*?</i>)\s*\n?', '', text, flags=re.MULTILINE)
                 text = text.strip()
                 if text:
                     lines.append(text)
         except Exception as e:
             print(f"[summarize] Error while chunking post: {e}, post: {post}")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    chunk = "\n".join(lines)
-    print(f"[summarize] Chunk for board {board_id} built, len={len(chunk)}")
-    print(f"[summarize] CHUNK:\n{chunk[:400]}\n---\nEND CHUNK")
-    # Ограничиваем до 35_000 символов для нейросети
-    return chunk[:35000]
+    full_text = "\n".join(lines)
+    cleaned_chunk = re.sub(r'\n{2,}', '\n', full_text).strip()
 
+    context_name = f"thread {thread_id}" if thread_id else f"board {board_id}"
+    print(f"[summarize] Chunk for {context_name} built, len={len(cleaned_chunk)}")
+    
+    return cleaned_chunk[:35000]
+    
 async def check_spam(user_id: int, msg: Message, board_id: str) -> bool:
     """Проверяет спам с прогрессивным наказанием и сбросом уровня (с поддержкой досок)"""
     b_data = board_data[board_id]
@@ -1565,6 +1821,68 @@ async def apply_penalty(bot_instance: Bot, user_id: int, msg_type: str, board_id
         except Exception as e:
             print(f"Ошибка отправки уведомления о муте: {e}")
 
+def _get_random_header_prefix(lang: str = 'ru') -> str:
+    """Вспомогательная функция для генерации случайного префикса заголовка."""
+    rand_prefix = random.random()
+    
+    if lang == 'en':
+        if rand_prefix < 0.005: return "### ADMIN ### "
+        if rand_prefix < 0.008: return "Me - "
+        if rand_prefix < 0.01: return "Faggot - "
+        if rand_prefix < 0.012: return "### DEGENERATE ### "
+        if rand_prefix < 0.016: return "Biden - "
+        if rand_prefix < 0.021: return "EMPEROR CONAN - "
+        return ""
+
+    # Russian prefixes (default)
+    if rand_prefix < 0.005: return "### АДМИН ### "
+    if rand_prefix < 0.008: return "Абу - "
+    if rand_prefix < 0.01: return "Пидор - "
+    if rand_prefix < 0.012: return "### ДЖУЛУП ### "
+    if rand_prefix < 0.014: return "### Хуесос ### "
+    if rand_prefix < 0.016: return "Пыня - "
+    if rand_prefix < 0.018: return "Нариман Намазов - "
+    if rand_prefix < 0.021: return "ИМПЕРАТОР КОНАН - "
+    if rand_prefix < 0.023: return "Антон Бабкин - "
+    if rand_prefix < 0.025: return "### НАРИМАН НАМАЗОВ ### "
+    if rand_prefix < 0.027: return "### ПУТИН ### "
+    if rand_prefix < 0.028: return "Гей - "
+    if rand_prefix < 0.030: return "Анархист - "
+    if rand_prefix < 0.033: return "### Имбецил ### "
+    if rand_prefix < 0.035: return "### ЧМО ### "
+    if rand_prefix < 0.037: return "### ОНАНИСТ ### "
+    if rand_prefix < 0.040: return "### ЧЕЧЕНЕЦ ### "
+    if rand_prefix < 0.042: return "АААААААА - "
+    if rand_prefix < 0.044: return "### Аниме девочка ### "
+    return ""
+
+async def format_thread_post_header(board_id: str, local_post_num: int, author_id: int, thread_info: dict) -> str:
+    """Форматирует заголовок для поста ВНУТРИ треда с локальной нумерацией и меткой (OP)."""
+    b_data = board_data[board_id]
+    op_marker = ""
+    if author_id != 0 and author_id == thread_info.get('op_id'):
+        op_marker = " (OP)"
+
+    if b_data['slavaukraine_mode']:
+        return f"💙💛 Пiст №{local_post_num}/{MAX_POSTS_PER_THREAD}{op_marker}"
+    if b_data['zaputin_mode']:
+        return f"🇷🇺 Пост №{local_post_num}/{MAX_POSTS_PER_THREAD}{op_marker}"
+    if b_data['anime_mode']:
+        return f"🌸 投稿 {local_post_num}/{MAX_POSTS_PER_THREAD} 番{op_marker}"
+    if b_data['suka_blyat_mode']:
+        return f"💢 Пост №{local_post_num}/{MAX_POSTS_PER_THREAD}{op_marker}"
+
+    rand = random.random()
+    circle = ""
+    if rand < 0.003: circle = "🔴 "
+    elif rand < 0.006: circle = "🟢 "
+    
+    # --- ИЗМЕНЕНИЕ: Используем новую вспомогательную функцию ---
+    prefix = _get_random_header_prefix(lang='ru')
+    
+    header_text = f"{circle}{prefix}Пост №{local_post_num}/{MAX_POSTS_PER_THREAD}{op_marker}"
+    return header_text
+
 async def format_header(board_id: str) -> Tuple[str, int]:
     """Асинхронное форматирование заголовка с блокировкой для безопасного инкремента счетчика постов."""
     async with post_counter_lock:
@@ -1574,157 +1892,132 @@ async def format_header(board_id: str) -> Tuple[str, int]:
         board_data[board_id].setdefault('board_post_count', 0)
         board_data[board_id]['board_post_count'] += 1
     
-    # --- БЛОК ДЛЯ /int/ ---
     if board_id == 'int':
         circle = ""
         rand_circle = random.random()
         if rand_circle < 0.003: circle = "🔴 "
         elif rand_circle < 0.006: circle = "🟢 "
         
-        prefix = ""
-        rand_prefix = random.random()
-        if rand_prefix < 0.005: prefix = "### ADMIN ### "
-        elif rand_prefix < 0.008: prefix = "Me - "
-        elif rand_prefix < 0.01: prefix = "Faggot - "
-        elif rand_prefix < 0.012: prefix = "### DEGENERATE ### "
-        elif rand_prefix < 0.016: prefix = "Biden - "
-        elif rand_prefix < 0.021: prefix = "EMPEROR CONAN - "
-            
+        # --- ИЗМЕНЕНИЕ: Используем новую вспомогательную функцию ---
+        prefix = _get_random_header_prefix(lang='en')
         header_text = f"{circle}{prefix}Post No.{post_num}"
         return header_text, post_num
-    # --- КОНЕЦ БЛОКА ДЛЯ /int/ ---
 
     b_data = board_data[board_id]
 
-    # Режим /slavaukraine
     if b_data['slavaukraine_mode']:
         return f"💙💛 Пiст №{post_num}", post_num
-
-    # Режим /zaputin
     if b_data['zaputin_mode']:
         return f"🇷🇺 Пост №{post_num}", post_num
-
-    # Режим /anime
     if b_data['anime_mode']:
         return f"🌸 投稿 {post_num} 番", post_num
-
-    # Режим /suka_blyat
     if b_data['suka_blyat_mode']:
         return f"💢 Пост №{post_num}", post_num
 
-    # Обычный режим
     rand = random.random()
-    if rand < 0.003:
-        circle = "🔴 "
-    elif rand < 0.006:
-        circle = "🟢 "
-    else:
-        circle = ""
-
-    prefix = ""
-    rand_prefix = random.random()
-    if rand_prefix < 0.005:  # 0.5%
-        prefix = "### АДМИН ### "
-    elif rand_prefix < 0.008:  # 0.3%
-        prefix = "Абу - "
-    elif rand_prefix < 0.01:   # 0.2%
-        prefix = "Пидор - "
-    elif rand_prefix < 0.012:  # 0.2%
-        prefix = "### ДЖУЛУП ### "
-    elif rand_prefix < 0.014:   # 0.2%
-        prefix = "### Хуесос ### "
-    elif rand_prefix < 0.016:   # 0.2%
-        prefix = "Пыня - "
-    elif rand_prefix < 0.018:   # 0.2%
-        prefix = "Нариман Намазов - "
-    elif rand_prefix < 0.021:
-        prefix = "ИМПЕРАТОР КОНАН - "
-    elif rand_prefix < 0.023:
-        prefix = "Антон Бабкин - "
-    elif rand_prefix < 0.025:
-        prefix = "### НАРИМАН НАМАЗОВ ### "
-    elif rand_prefix < 0.027:
-        prefix = "### ПУТИН ### "
-    elif rand_prefix < 0.028:
-        prefix = "Гей - "
-    elif rand_prefix < 0.030:
-        prefix = "Анархист - "
-    elif rand_prefix < 0.033:
-        prefix = "### Имбецил ### "
-    elif rand_prefix < 0.035:
-        prefix = "### ЧМО ### "
-    elif rand_prefix < 0.037:
-        prefix = "### ОНАНИСТ ### "
-    elif rand_prefix < 0.040:
-        prefix = "### ЧЕЧЕНЕЦ ### "
-    elif rand_prefix < 0.042:
-        prefix = "АААААААА - "
-    elif rand_prefix < 0.044:
-        prefix = "### Аниме девочка ### "
-
-    # Формируем итоговый заголовок
+    circle = ""
+    if rand < 0.003: circle = "🔴 "
+    elif rand < 0.006: circle = "🟢 "
+    
+    # --- ИЗМЕНЕНИЕ: Используем новую вспомогательную функцию ---
+    prefix = _get_random_header_prefix(lang='ru')
     header_text = f"{circle}{prefix}Пост №{post_num}"
     return header_text, post_num
 
 async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes: int, board_id: str) -> int:
-    """Удаляет сообщения пользователя за период в пределах КОНКРЕТНОЙ доски"""
+    """Удаляет сообщения пользователя за период в пределах КОНКРЕТНОЙ доски, включая очистку из тредов."""
     try:
         time_threshold = datetime.now(UTC) - timedelta(minutes=time_period_minutes)
         posts_to_delete = []
-        deleted_messages = 0
 
-        # Итерируемся напрямую по .items(), избегая создания полной копии словаря в памяти.
-        for post_num, post_data in list(messages_storage.items()):
-            post_time = post_data.get('timestamp')
-            if not post_time:
-                continue
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для безопасного чтения и удаления ---
+        async with storage_lock:
+            for post_num, post_data in list(messages_storage.items()):
+                post_time = post_data.get('timestamp')
+                if not post_time: continue
 
-            if (post_data.get('author_id') == user_id and
-                post_data.get('board_id') == board_id and
-                post_time >= time_threshold):
-                posts_to_delete.append(post_num)
-        
-        if not posts_to_delete:
-            return 0
+                if (post_data.get('author_id') == user_id and
+                    post_data.get('board_id') == board_id and
+                    post_time >= time_threshold):
+                    posts_to_delete.append(post_num)
+            
+            if not posts_to_delete:
+                return 0
 
-        # УДАЛЯЕМ СВЯЗИ ИЗ message_to_post ДЛЯ ЭТИХ ПОСТОВ
-        for post_num in posts_to_delete:
-            if post_num in post_to_messages:
-                for uid, mid in list(post_to_messages[post_num].items()):
-                    key = (uid, mid)
-                    if key in message_to_post:
-                        del message_to_post[key]
-        
-        # УДАЛЯЕМ ОСНОВНЫЕ ДАННЫЕ
-        for post_num in posts_to_delete:
-            post_to_messages.pop(post_num, None)
-            messages_storage.pop(post_num, None)
+            # Очищаем посты из данных тредов
+            if board_id in THREAD_BOARDS:
+                threads_data = board_data[board_id].get('threads_data', {})
+                for post_num in posts_to_delete:
+                    post_data = messages_storage.get(post_num, {})
+                    thread_id = post_data.get('thread_id')
+                    if thread_id and thread_id in threads_data:
+                        try:
+                            # Убедимся, что 'posts' существует перед удалением
+                            if 'posts' in threads_data[thread_id]:
+                                threads_data[thread_id]['posts'].remove(post_num)
+                        except (ValueError, KeyError):
+                            pass
+
+            # Очищаем данные из глобальных хранилищ
+            for post_num in posts_to_delete:
+                if post_num in post_to_messages:
+                    for uid, mid in list(post_to_messages[post_num].items()):
+                        key = (uid, mid)
+                        if key in message_to_post:
+                            del message_to_post[key]
+            
+            for post_num in posts_to_delete:
+                post_to_messages.pop(post_num, None)
+                messages_storage.pop(post_num, None)
 
         return len(posts_to_delete)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     except Exception as e:
         print(f"Ошибка в delete_user_posts: {e}")
         return 0
         
 async def delete_single_post(post_num: int, bot_instance: Bot) -> int:
-    """Удаляет один конкретный пост (и все его копии у пользователей)."""
-    if post_num not in post_to_messages:
-        return 0
+    """Удаляет один конкретный пост, включая очистку из треда."""
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для безопасного чтения и удаления ---
+    async with storage_lock:
+        if post_num not in messages_storage:
+            return 0
 
-    # УДАЛЯЕМ СВЯЗИ ИЗ message_to_post ДЛЯ ЭТОГО ПОСТА
-    for uid, mid in list(post_to_messages[post_num].items()):
-        key = (uid, mid)
-        if key in message_to_post:
-            del message_to_post[key]
+        post_data = messages_storage.get(post_num, {})
+        board_id = post_data.get('board_id')
 
-    # УДАЛЯЕМ ОСНОВНЫЕ ДАННЫЕ
+        # Очищаем пост из данных треда
+        if board_id and board_id in THREAD_BOARDS:
+            thread_id = post_data.get('thread_id')
+            if thread_id:
+                threads_data = board_data[board_id].get('threads_data', {})
+                if thread_id in threads_data:
+                    try:
+                        if 'posts' in threads_data[thread_id]:
+                             threads_data[thread_id]['posts'].remove(post_num)
+                    except (ValueError, KeyError):
+                        pass
+
+        # Собираем все сообщения для удаления, пока держим блокировку
+        messages_to_delete_info = []
+        if post_num in post_to_messages:
+            for uid, mid in post_to_messages[post_num].items():
+                messages_to_delete_info.append((uid, mid))
+
+        # Очищаем данные из глобальных хранилищ
+        if post_num in post_to_messages:
+            for uid, mid in list(post_to_messages[post_num].items()):
+                key = (uid, mid)
+                if key in message_to_post:
+                    del message_to_post[key]
+        
+        post_to_messages.pop(post_num, None)
+        messages_storage.pop(post_num, None)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    # Выполняем медленные сетевые операции уже после освобождения блокировки
     deleted_count = 0
-    # Собираем ВСЕ сообщения для удаления
-    messages_to_delete = []
-    for uid, mid in post_to_messages[post_num].items():
-        messages_to_delete.append((uid, mid))
-
-    # Удаляем каждое сообщение
-    for (uid, mid) in messages_to_delete:
+    for (uid, mid) in messages_to_delete_info:
         try:
             await bot_instance.delete_message(uid, mid)
             deleted_count += 1
@@ -1732,10 +2025,6 @@ async def delete_single_post(post_num: int, bot_instance: Bot) -> int:
             continue
         except Exception as e:
             print(f"Ошибка удаления {mid} у {uid}: {e}")
-
-    # АТОМАРНАЯ ОЧИСТКА ВСЕХ СЛЕДОВ ПОСТА
-    post_to_messages.pop(post_num, None)
-    messages_storage.pop(post_num, None)
 
     return deleted_count
     
@@ -1809,6 +2098,118 @@ async def send_moderation_notice(user_id: int, action: str, board_id: str, durat
         "board_id": board_id
     })
 
+async def process_new_post(
+    bot_instance: Bot,
+    board_id: str,
+    user_id: int,
+    content: dict,
+    reply_to_post: int | None,
+    is_shadow_muted: bool
+):
+    """
+    Унифицированная функция для обработки, сохранения и постановки в очередь нового поста.
+    Корректно обрабатывает постинг как на доску, так и в треды.
+    """
+    b_data = board_data[board_id]
+    current_post_num = None  # Инициализируем на случай ошибки
+    
+    try:
+        user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+        thread_id = None
+        recipients = set()
+        reply_info = post_to_messages.get(reply_to_post, {}) if reply_to_post else {}
+        
+        # --- Блок 1: Определение контекста (тред или доска) и генерация заголовка ---
+        if board_id in THREAD_BOARDS and user_location != 'main':
+            thread_id = user_location
+            thread_info = b_data.get('threads_data', {}).get(thread_id)
+
+            if not thread_info or thread_info.get('is_archived'):
+                b_data['user_state'].setdefault(user_id, {})['location'] = 'main'
+                lang = 'en' if board_id == 'int' else 'ru'
+                await bot_instance.send_message(user_id, random.choice(thread_messages[lang]['thread_not_found']))
+                return
+
+            if user_id in thread_info.get('local_mutes', {}):
+                if time.time() < thread_info['local_mutes'][user_id]:
+                    return
+                else:
+                    del thread_info['local_mutes'][user_id]
+            
+            async with b_data['thread_locks'][thread_id]:
+                local_post_num = len(thread_info.get('posts', [])) + 1
+                header_text = await format_thread_post_header(board_id, local_post_num, user_id, thread_info)
+                _, current_post_num = await format_header(board_id)
+                thread_info['posts'].append(current_post_num)
+                thread_info['last_activity_at'] = time.time()
+            
+            recipients = thread_info.get('subscribers', set()) - {user_id}
+
+        else:
+            header_text, current_post_num = await format_header(board_id)
+            recipients = b_data['users']['active'] - {user_id}
+
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем GLOBAL_BOTS ---
+        numeral_level = check_post_numerals(current_post_num)
+        if numeral_level:
+            asyncio.create_task(
+                post_special_num_to_channel(
+                    bots=GLOBAL_BOTS, # <--- ИСПОЛЬЗУЕМ ГЛОБАЛЬНУЮ ПЕРЕМЕННУЮ
+                    board_id=board_id,
+                    post_num=current_post_num,
+                    level=numeral_level,
+                    content=content,
+                    author_id=user_id
+                )
+            )
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+        content['header'] = header_text
+        content['reply_to_post'] = reply_to_post
+        
+        # ... остальной код функции без изменений ...
+        async with storage_lock:
+            messages_storage[current_post_num] = {
+                'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
+                'author_message_id': None, 'board_id': board_id, 'thread_id': thread_id
+            }
+
+            content_for_author = await _apply_mode_transformations(content, board_id)
+            author_results = await send_message_to_users(
+                bot_instance=bot_instance, recipients={user_id},
+                content=content_for_author, reply_info=reply_info
+            )
+            
+            if author_results and author_results[0] and author_results[0][1]:
+                sent_to_author = author_results[0][1]
+                messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
+                for m in messages_to_save:
+                    if current_post_num in messages_storage:
+                         messages_storage[current_post_num]['author_message_id'] = m.message_id
+                    post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
+                    message_to_post[(user_id, m.message_id)] = current_post_num
+
+        if not is_shadow_muted and recipients:
+            await message_queues[board_id].put({
+                'recipients': recipients, 'content': content, 'post_num': current_post_num,
+                'reply_info': reply_info, 'board_id': board_id,
+                'thread_id': thread_id
+            })
+
+    except TelegramForbiddenError:
+        b_data['users']['active'].discard(user_id)
+        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из process_new_post).")
+        if current_post_num in messages_storage:
+            async with storage_lock:
+                messages_storage.pop(current_post_num, None)
+
+    except Exception as e:
+        import traceback
+        print(f"❌ Критическая ошибка в process_new_post для user {user_id}: {e}\n{traceback.format_exc()}")
+        if current_post_num and current_post_num in messages_storage:
+            async with storage_lock:
+                messages_storage.pop(current_post_num, None)
+
 async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     """
     Централизованно применяет все трансформации режимов с улучшенной обработкой аниме-изображений.
@@ -1825,11 +2226,14 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     if not is_transform_mode_active:
         return modified_content  # Если режимов нет, ничего не делаем
 
-    # Если режим активен, принудительно очищаем HTML перед трансформацией
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Принудительная очистка HTML ---
+    # Если режим активен, принудительно очищаем HTML перед трансформацией,
+    # чтобы предотвратить инъекции через функции-трансформеры.
     if 'text' in modified_content and modified_content['text']:
         modified_content['text'] = clean_html_tags(modified_content['text'])
     if 'caption' in modified_content and modified_content['caption']:
         modified_content['caption'] = clean_html_tags(modified_content['caption'])
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     # Теперь применяем трансформации к чистому тексту
     if b_data['anime_mode']:
@@ -1885,16 +2289,11 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
 async def _format_message_body(content: dict, user_id_for_context: int, post_num: int) -> str:
     """
     Формирует и форматирует тело сообщения (реакции, reply, greentext, (You)).
-    Эта версия разделяет обработку ответа, реакций и основного текста.
-    
-    :param content: Словарь с данными поста ('reply_to_post', 'text', 'caption').
-    :param user_id_for_context: ID пользователя, для которого форматируется сообщение.
-    :param post_num: Номер поста для поиска реакций в messages_storage.
-    :return: Готовая к отправке HTML-форматированная строка.
+    Эта функция ДОЛЖНА вызываться внутри `async with storage_lock:`.
     """
     parts = []
     
-    # 1. Формируем блок ответа (если он есть)
+    # Блок ответа
     reply_to_post = content.get('reply_to_post')
     if reply_to_post:
         original_author = messages_storage.get(reply_to_post, {}).get('author_id')
@@ -1903,18 +2302,15 @@ async def _format_message_body(content: dict, user_id_for_context: int, post_num
         formatted_reply_line = f"<code>{escape_html(reply_line)}</code>"
         parts.append(formatted_reply_line)
         
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # 2. Формируем блок с реакциями
+    # Блок реакций
     post_data = messages_storage.get(post_num, {})
     reactions_data = post_data.get('reactions')
     
     if reactions_data:
         reaction_lines = []
-        # --- НОВАЯ ЛОГИКА для структуры {'users': {uid: [emojis]}} ---
         if 'users' in reactions_data and isinstance(reactions_data.get('users'), dict):
             all_emojis = [emoji for user_emojis in reactions_data['users'].values() for emoji in user_emojis]
             
-            # Собираем и сортируем эмодзи по категориям для консистентного отображения
             positive_display = sorted([e for e in all_emojis if e in POSITIVE_REACTIONS])
             neutral_display = sorted([e for e in all_emojis if e not in POSITIVE_REACTIONS and e not in NEGATIVE_REACTIONS])
             negative_display = sorted([e for e in all_emojis if e in NEGATIVE_REACTIONS])
@@ -1923,7 +2319,6 @@ async def _format_message_body(content: dict, user_id_for_context: int, post_num
             if neutral_display: reaction_lines.append("".join(neutral_display))
             if negative_display: reaction_lines.append("".join(negative_display))
 
-        # --- СТАРАЯ ЛОГИКА для обратной совместимости ---
         elif 'positive' in reactions_data or 'negative' in reactions_data:
             if reactions_data.get('positive'): reaction_lines.append("".join(reactions_data['positive']))
             if reactions_data.get('neutral'): reaction_lines.append("".join(reactions_data['neutral']))
@@ -1932,16 +2327,14 @@ async def _format_message_body(content: dict, user_id_for_context: int, post_num
         if reaction_lines:
             reactions_block = "\n".join(reaction_lines)
             parts.append(reactions_block)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # 3. Формируем и форматируем основной текст сообщения
+    # Основной текст
     main_text_raw = content.get('text') or content.get('caption') or ''
     if main_text_raw:
         text_with_you = add_you_to_my_posts(main_text_raw, user_id_for_context)
         formatted_main_text = apply_greentext_formatting(text_with_you)
         parts.append(formatted_main_text)
         
-    # 4. Объединяем все части. Используем два переноса строки для разделения блоков.
     return '\n\n'.join(filter(None, parts))
 
 async def send_message_to_users(
@@ -1976,15 +2369,18 @@ async def send_message_to_users(
             
             header_text = modified_content['header']
             head = f"<i>{escape_html(header_text)}</i>"
-
-            reply_to_post = modified_content.get('reply_to_post')
-            original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
-            if uid == original_author:
-                if "Пост" in head: head = head.replace("Пост", "🔴 Пост")
-                if "Post" in head: head = head.replace("Post", "🔴 Post")
             
-            post_num = modified_content.get('post_num')
-            formatted_body = await _format_message_body(modified_content, uid, post_num)
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для консистентного чтения ---
+            async with storage_lock:
+                reply_to_post = modified_content.get('reply_to_post')
+                original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
+                if uid == original_author:
+                    if "Пост" in head: head = head.replace("Пост", "🔴 Пост")
+                    if "Post" in head: head = head.replace("Post", "🔴 Post")
+                
+                post_num = modified_content.get('post_num')
+                formatted_body = await _format_message_body(modified_content, uid, post_num)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
 
             if ct == "media_group":
@@ -2005,7 +2401,6 @@ async def send_message_to_users(
                 kwargs.update(text=full_text, parse_mode="HTML")
                 return await send_method(**kwargs)
             
-            # Обработка медиа с подписями (кроме video_note)
             elif ct in ['photo', 'video', 'animation', 'document', 'audio', 'voice']:
                 if len(full_text) > 1024: full_text = full_text[:1021] + "..."
                 kwargs.update(caption=full_text, parse_mode="HTML")
@@ -2013,7 +2408,6 @@ async def send_message_to_users(
                 file_source = modified_content.get('image_url') or modified_content.get("file_id")
                 kwargs[ct] = file_source
                 
-                # Особый случай: аниме-изображения по URL
                 if ct == 'photo' and 'image_url' in modified_content:
                     try:
                         return await send_method(**kwargs)
@@ -2031,12 +2425,10 @@ async def send_message_to_users(
                             raise
                 return await send_method(**kwargs)
             
-            # Обработка видеосообщений (кружков) БЕЗ подписи
             elif ct == 'video_note':
                 kwargs[ct] = modified_content.get("file_id")
                 return await send_method(**kwargs)
             
-            # Обработка стикеров
             elif ct == 'sticker':
                 kwargs[ct] = modified_content["file_id"]
                 return await send_method(**kwargs)
@@ -2091,13 +2483,16 @@ async def send_message_to_users(
     async def send_with_semaphore(uid):
         async with semaphore:
             reply_to = None
-            if reply_info and isinstance(reply_info, dict):
-                reply_to = reply_info.get(uid)
-            if reply_to is None and content.get("reply_to_post"):
-                original_post = content["reply_to_post"]
-                if original_post in post_to_messages and isinstance(post_to_messages[original_post], dict):
-                    author_mid = post_to_messages[original_post].get(uid)
-                    if author_mid: reply_to = author_mid
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для консистентного чтения ---
+            async with storage_lock:
+                if reply_info and isinstance(reply_info, dict):
+                    reply_to = reply_info.get(uid)
+                if reply_to is None and content.get("reply_to_post"):
+                    original_post = content["reply_to_post"]
+                    if original_post in post_to_messages and isinstance(post_to_messages[original_post], dict):
+                        author_mid = post_to_messages[original_post].get(uid)
+                        if author_mid: reply_to = author_mid
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             result = await really_send(uid, reply_to)
             return (uid, result)
@@ -2105,14 +2500,17 @@ async def send_message_to_users(
     tasks = [send_with_semaphore(uid) for uid in active_recipients]
     results = await asyncio.gather(*tasks)
 
-    if content.get('post_num'):
-        post_num = content['post_num']
-        for uid, msg in results:
-            if not msg: continue
-            messages_to_save = msg if isinstance(msg, list) else [msg]
-            for m in messages_to_save:
-                post_to_messages.setdefault(post_num, {})[uid] = m.message_id
-                message_to_post[(uid, m.message_id)] = post_num
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для безопасной записи ---
+    async with storage_lock:
+        if content.get('post_num'):
+            post_num = content['post_num']
+            for uid, msg in results:
+                if not msg: continue
+                messages_to_save = msg if isinstance(msg, list) else [msg]
+                for m in messages_to_save:
+                    post_to_messages.setdefault(post_num, {})[uid] = m.message_id
+                    message_to_post[(uid, m.message_id)] = post_num
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if blocked_users:
         for uid in blocked_users:
@@ -2127,67 +2525,59 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
     Находит все отправленные копии поста и редактирует их, добавляя обновленный
     список реакций.
     """
-    post_data = messages_storage.get(post_num)
-    message_copies = post_to_messages.get(post_num)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Чтение данных под блокировкой ---
+    async with storage_lock:
+        post_data = messages_storage.get(post_num)
+        message_copies = post_to_messages.get(post_num)
 
-    if not post_data or not message_copies:
-        return # Пост или его копии не найдены в памяти
+        if not post_data or not message_copies:
+            return
 
-    content = post_data.get('content', {})
+        # Создаем копии, чтобы работать с ними вне блокировки
+        content = post_data.get('content', {}).copy()
+        message_copies_copy = message_copies.copy()
+        board_id = post_data.get('board_id')
+        reply_to_post = content.get('reply_to_post')
+        original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     content_type = content.get('type')
-    
-    # Редактировать можно только текстовые сообщения или сообщения с подписью
     can_be_edited = content_type in ['text', 'photo', 'video', 'animation', 'document', 'audio']
-    if not can_be_edited:
+    if not can_be_edited or not board_id:
         return
         
-    board_id = post_data.get('board_id')
-    if not board_id:
-        return # Не удалось определить доску
-
     async def _edit_one(user_id: int, message_id: int):
         """Внутренняя корутина для редактирования одного сообщения."""
         try:
-            # 1. Формируем заголовок (с учетом подсветки для автора ответа)
             header_text = content.get('header', '')
             head = f"<i>{escape_html(header_text)}</i>"
             
-            reply_to_post = content.get('reply_to_post')
-            original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
-
             if user_id == original_author:
                 if board_id == 'int':
                     head = head.replace("Post", "🔴 Post")
                 else:
                     head = head.replace("Пост", "🔴 Пост")
 
-            # 2. Формируем тело сообщения с помощью обновленной функции
-            formatted_body = await _format_message_body(content, user_id, post_num)
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Чтение под блокировкой ---
+            async with storage_lock:
+                 formatted_body = await _format_message_body(content, user_id, post_num)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
-            # 3. Собираем итоговый текст
             full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
-            if len(full_text) > 4096: # Ограничение Telegram на длину сообщения
+            if len(full_text) > 4096:
                 full_text = full_text[:4093] + "..."
             
-            # 4. Выбираем и вызываем нужный метод редактирования
             if content_type == 'text':
                 await bot_instance.edit_message_text(
-                    text=full_text,
-                    chat_id=user_id,
-                    message_id=message_id,
-                    parse_mode="HTML"
+                    text=full_text, chat_id=user_id, message_id=message_id, parse_mode="HTML"
                 )
-            else: # photo, video, etc.
-                if len(full_text) > 1024: # Ограничение на длину подписи
+            else:
+                if len(full_text) > 1024:
                     full_text = full_text[:1021] + "..."
                 await bot_instance.edit_message_caption(
-                    caption=full_text,
-                    chat_id=user_id,
-                    message_id=message_id,
-                    parse_mode="HTML"
+                    caption=full_text, chat_id=user_id, message_id=message_id, parse_mode="HTML"
                 )
         except TelegramBadRequest as e:
-            # Игнорируем ошибки, если сообщение не изменилось или не найдено
             if "message is not modified" not in e.message and "message to edit not found" not in e.message:
                  print(f"⚠️ Ошибка (BadRequest) при редактировании поста #{post_num} для {user_id}: {e}")
         except TelegramForbiddenError:
@@ -2196,8 +2586,7 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
         except Exception as e:
             print(f"❌ Неизвестная ошибка при редактировании поста #{post_num} для {user_id}: {e}")
 
-    # Запускаем редактирование для всех получателей параллельно
-    tasks = [_edit_one(uid, mid) for uid, mid in message_copies.items()]
+    tasks = [_edit_one(uid, mid) for uid, mid in message_copies_copy.items()]
     await asyncio.gather(*tasks)
 
 async def execute_delayed_edit(post_num: int, bot_instance: Bot, author_id: int | None, notify_text: str | None, delay: float = 3.0):
@@ -2254,22 +2643,40 @@ async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
             if not await validate_message_format(msg_data):
                 continue
 
-            recipients = msg_data['recipients']
+            initial_recipients = msg_data['recipients']
             content = msg_data['content']
-            post_num = msg_data['post_num']  # Извлекаем post_num
+            post_num = msg_data['post_num']
             reply_info = msg_data.get('reply_info', {})
-            active_recipients = {uid for uid in recipients if uid not in b_data['users']['banned']}
+            
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            thread_id = msg_data.get('thread_id')
+            
+            # Фильтруем получателей на основе их текущей локации
+            recipients_at_location = set()
+            user_states = b_data.get('user_state', {})
+
+            for uid in initial_recipients:
+                user_location = user_states.get(uid, {}).get('location', 'main')
+                
+                if thread_id:
+                    # Если сообщение для треда, отправляем только тем, кто в этом треде
+                    if user_location == thread_id:
+                        recipients_at_location.add(uid)
+                else:
+                    # Если сообщение для доски, отправляем только тем, кто на доске ('main')
+                    if user_location == 'main':
+                        recipients_at_location.add(uid)
+            
+            active_recipients = {uid for uid in recipients_at_location if uid not in b_data['users']['banned']}
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             if not active_recipients:
                 continue
             
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-            # Применяем трансформации режимов ко ВСЕМ сообщениям из очереди,
-            # включая сообщения от Призрака и системные уведомления.
+            # Применяем трансформации режимов ко ВСЕМ сообщениям из очереди
             content = await _apply_mode_transformations(content, board_id)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
-            # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Добавляем post_num в словарь content перед отправкой
+            # Добавляем post_num в словарь content перед отправкой
             content['post_num'] = post_num
 
             await send_message_to_users(
@@ -2281,6 +2688,92 @@ async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
         except Exception as e:
             print(f"{worker_name} | ⛔ Критическая ошибка: {str(e)[:200]}")
             await asyncio.sleep(1)
+
+async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_location: str):
+    """Отправляет пользователю пропущенные сообщения для указанной локации."""
+    b_data = board_data[board_id]
+    user_s = b_data['user_state'].setdefault(user_id, {})
+    
+    missed_post_nums = []
+    last_seen_post = 0
+    
+    async with storage_lock:
+        # 1. Определяем, какие посты были пропущены
+        if target_location == 'main':
+            last_seen_post = user_s.get('last_seen_main', 0)
+            for p_num, p_data in messages_storage.items():
+                if p_num > last_seen_post and p_data.get('board_id') == board_id and not p_data.get('thread_id'):
+                    missed_post_nums.append(p_num)
+        else: # Если локация - это тред
+            thread_id = target_location
+            last_seen_threads = user_s.setdefault('last_seen_threads', {})
+            last_seen_post = last_seen_threads.get(thread_id, 0)
+            
+            thread_info = b_data.get('threads_data', {}).get(thread_id)
+            if thread_info:
+                all_thread_posts = thread_info.get('posts', [])
+                missed_post_nums = [p_num for p_num in all_thread_posts if p_num > last_seen_post]
+
+    if not missed_post_nums:
+        return
+
+    missed_post_nums.sort()
+    
+    # 2. Обрабатываем и отправляем пропущенные сообщения
+    text_chunk = []
+    
+    async def send_chunk():
+        if text_chunk:
+            full_text = "\n\n".join(text_chunk)
+            if len(full_text) > 4096:
+                full_text = full_text[:4093] + "..."
+            try:
+                await bot.send_message(user_id, full_text, parse_mode="HTML")
+            except Exception as e:
+                print(f"Ошибка отправки чанка текста {user_id}: {e}")
+            text_chunk.clear()
+
+    for post_num in missed_post_nums:
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        async with storage_lock:
+            post_data = messages_storage.get(post_num)
+            if not post_data: continue
+
+            content = post_data.get('content', {}).copy()
+            
+            # Если это простой текстовый пост, добавляем его в пачку для отправки одним сообщением
+            if content.get('type') == 'text' and not content.get('reply_to_post'):
+                header_text = content.get('header', '')
+                head = f"<i>{escape_html(header_text)}</i>"
+                # _format_message_body требует блокировки, поэтому вызывается здесь
+                body = await _format_message_body(content, user_id, post_num)
+                text_chunk.append(f"{head}\n\n{body}" if body else head)
+                continue
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        
+        # Если пост был не текстовый, сначала отправляем накопленную пачку текста
+        await send_chunk()
+        
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        # Получаем reply_info для медиа-сообщений также под блокировкой
+        async with storage_lock:
+            reply_info = post_to_messages.get(post_num, {})
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+        try:
+            # Отправляем медиа-сообщение индивидуально
+            await send_message_to_users(bot, {user_id}, content, reply_info)
+        except Exception as e:
+            print(f"Ошибка отправки индивидуального сообщения {post_num} юзеру {user_id}: {e}")
+                
+    await send_chunk() # Отправляем остатки текста в последней пачке
+
+    # 3. Обновляем состояние пользователя
+    new_last_seen = missed_post_nums[-1]
+    if target_location == 'main':
+        user_s['last_seen_main'] = new_last_seen
+    else:
+        user_s.setdefault('last_seen_threads', {})[target_location] = new_last_seen
             
 async def motivation_broadcaster():
     """Отправляет мотивационные сообщения на каждую доску в разное время."""
@@ -2576,6 +3069,34 @@ async def check_cooldown(message: Message, board_id: str) -> bool:
 
     return True
 
+def check_post_numerals(post_num: int) -> int | None:
+    """
+    Проверяет номер поста на наличие повторяющихся цифр в конце.
+    Использует оптимизированный посимвольный анализ с конца.
+    Возвращает "уровень редкости" (количество повторов) или None.
+    """
+    s = str(post_num)
+    length = len(s)
+    if length < 3:
+        return None
+
+    last_char = s[-1]
+    count = 1
+    
+    # Идем в обратном порядке от предпоследнего символа
+    for i in range(length - 2, -1, -1):
+        if s[i] == last_char:
+            count += 1
+        else:
+            # Прерываемся, как только найден другой символ
+            break
+            
+    # Проверяем, есть ли найденное количество в нашем конфиге
+    if count in SPECIAL_NUMERALS_CONFIG:
+        return count
+
+    return None
+
 def get_board_id(telegram_object: types.Message | types.CallbackQuery) -> str | None:
     """
     Определяет ID доски ('b', 'po', etc.) по объекту сообщения или колбэка.
@@ -2676,6 +3197,39 @@ async def cmd_face(message: types.Message):
     face = (secrets.choice(AHE_EYES) + secrets.choice(AHE_TONGUE) +
             secrets.choice(AHE_EXTRA))
 
+    user_id = message.from_user.id
+    b_data = board_data[board_id]
+    
+    # Определяем, куда постить результат
+    if board_id in THREAD_BOARDS:
+        user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+        if user_location != 'main':
+            thread_id = user_location
+            thread_info = b_data.get('threads_data', {}).get(thread_id)
+            if thread_info and not thread_info.get('is_archived'):
+                local_post_num = len(thread_info.get('posts', [])) + 1
+                # --- ИЗМЕНЕНИЕ ---
+                # Передаем author_id=0 (системное сообщение) и thread_info
+                header_text = await format_thread_post_header(board_id, local_post_num, 0, thread_info)
+                # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+                _, pnum = await format_header(board_id) # Глобальный номер
+                
+                content = {"type": "text", "header": header_text, "text": face}
+                messages_storage[pnum] = {
+                    'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content,
+                    'board_id': board_id, 'thread_id': thread_id
+                }
+                thread_info['posts'].append(pnum)
+                thread_info['last_activity_at'] = time.time()
+                
+                await message_queues[board_id].put({
+                    "recipients": thread_info.get('subscribers', set()),
+                    "content": content, "post_num": pnum, "board_id": board_id, "thread_id": thread_id
+                })
+                await message.delete()
+                return
+
+    # Стандартная логика для общего чата
     header, pnum = await format_header(board_id)
     content = {"type": "text", "header": header, "text": face}
     
@@ -2697,24 +3251,69 @@ async def cmd_summarize(message: types.Message):
         await message.answer("Ошибка: не удалось определить доску.")
         return
 
+    b_data = board_data[board_id]
+    user_id = message.from_user.id
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    # Проверка Cooldown
+    now_ts = time.time()
+    last_usage = b_data.get('last_summarize_time', 0)
+
+    if now_ts - last_usage < SUMMARIZE_COOLDOWN:
+        remaining = SUMMARIZE_COOLDOWN - (now_ts - last_usage)
+        
+        if lang == 'en':
+            cooldown_text = f"⏳ Command is on cooldown. Please wait {int(remaining)} seconds."
+        else:
+            cooldown_text = f"⏳ Команда на кулдауне. Подождите еще {int(remaining)} сек."
+        
+        try:
+            await message.answer(cooldown_text)
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Определение контекста (тред или доска) ---
+    thread_id = None
+    context_name = f"доски {BOARD_CONFIG[board_id]['name']}"
+    if board_id in THREAD_BOARDS:
+        user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+        if user_location != 'main':
+            thread_id = user_location
+            thread_info = b_data.get('threads_data', {}).get(thread_id, {})
+            thread_title = thread_info.get('title', '...')
+            context_name = f"треда «{thread_title}»"
+
+    # Адаптация prompt для треда
+    if thread_id:
+        prompt = (
+            f"Ты должен коротко и забавно подвести итоги обсуждений в треде под названием «{escape_html(thread_info.get('title', ''))}» в анонимном чате двача. "
+            "Пиши как настоящий анон, используй иронию и сарказм, выноси суть. Не будь унылым!"
+        )
+        # Для треда анализируем все его посты, а не за последние N часов
+        chunk = await get_board_chunk(board_id, thread_id=thread_id)
+        info_text = f"За последние 6 часов в треде" # для сообщения пользователю
+    else:
+        prompt = (
+            "Ты должен коротко и забавно подвести итоги обсуждений за последние 6 часов в анонимном чате двача. Там общаются аноны."
+            "Пиши как настоящий анон, используй иронию и сарказм, выноси суть и не слишком серьёзно. "
+            "Если были картинки или медиа — просто упомяни 'Картинка', 'Гифка' и т.п. Не пиши длинно, не пиши уныло!"
+        )
+        chunk = await get_board_chunk(board_id, hours=6)
+        info_text = f"За последние 6 часов на доске"
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     hf_token = os.getenv("HF_TOKEN")
     if not hf_token:
         print("[summarize] HF_TOKEN not set")
         await message.answer("Ошибка: не настроен токен Hugging Face.")
         return
 
-    # Чанкуем сообщения за последние 6 часов
-    chunk = get_board_chunk(board_id, hours=6)
     if not chunk or len(chunk) < 100:
         print(f"[summarize] Мало сообщений для summarize (len={len(chunk)})")
-        await message.answer("За последние 6 часов мало сообщений для саммари.")
+        await message.answer(f"{info_text} было мало сообщений для саммари.")
         return
-
-    prompt = (
-        "Ты должен коротко и забавно подвести итоги обсуждений за последние 6 часов в анонимном чате двача. Там общаются аноны."
-        "Пиши как настоящий анон, используй иронию и сарказм, выноси суть и не слишком серьёзно. "
-        "Если были картинки или медиа — просто упомяни 'Картинка', 'Гифка' и т.п. Не пиши длинно, не пиши уныло!"
-    )
 
     await message.answer("⏳ Генерируется саммари, ждите ~30 секунд...")
     try:
@@ -2729,25 +3328,52 @@ async def cmd_summarize(message: types.Message):
         await message.answer("Не удалось сделать саммари. Попробуй позже.")
         return
 
-    # Обрезаем summary до лимита Telegram 4096 символов (лучше 4000 для запаса)
+    b_data['last_summarize_time'] = time.time()
+
     summary = summary[:4000]
     print(f"[summarize] Final summary length: {len(summary)}")
 
-    header, pnum = await format_header(board_id)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Отправка результата в тред или на доску ---
+    header, pnum = await format_header(board_id) # Глобальный номер нужен всегда
     content = {
         'type': 'text',
-        'header': header,
-        'text': f"Саммари за 6 часов:\n\n{summary}",
+        'text': f"Саммари {context_name}:\n\n{summary}",
         'is_system_message': True
     }
-    messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
-    await message_queues[board_id].put({
-        'recipients': board_data[board_id]['users']['active'],
-        'content': content,
-        'post_num': pnum,
-        'board_id': board_id
-    })
-    print(f"[summarize] Саммари успешно отправлено ({board_id}, post_num={pnum})")
+
+    if thread_id:
+        thread_info = b_data.get('threads_data', {}).get(thread_id)
+        if thread_info and not thread_info.get('is_archived'):
+            local_post_num = len(thread_info.get('posts', [])) + 1
+            header_text = await format_thread_post_header(board_id, local_post_num, 0, thread_info)
+            content['header'] = header_text
+            
+            messages_storage[pnum] = {
+                'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content,
+                'board_id': board_id, 'thread_id': thread_id
+            }
+            thread_info['posts'].append(pnum)
+            thread_info['last_activity_at'] = time.time()
+            
+            await message_queues[board_id].put({
+                "recipients": thread_info.get('subscribers', set()),
+                "content": content, "post_num": pnum, "board_id": board_id, "thread_id": thread_id
+            })
+        else: # Если тред уже удален/архивирован, отменяем
+             await message.answer("Не удалось отправить саммари, тред больше не активен.")
+             return
+    else:
+        content['header'] = header
+        messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
+        await message_queues[board_id].put({
+            'recipients': b_data['users']['active'],
+            'content': content,
+            'post_num': pnum,
+            'board_id': board_id
+        })
+
+    print(f"[summarize] Саммари успешно отправлено ({context_name}, post_num={pnum})")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
@@ -2766,19 +3392,43 @@ async def cmd_roll(message: types.Message):
     if not board_id: return
     
     result = random.randint(1, 100)
-
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
     lang = 'en' if board_id == 'int' else 'ru'
-    
-    if lang == 'en':
-        roll_text = f"🎲 Rolled: {result}"
-    else:
-        roll_text = f"🎲 Нароллил: {result}"
-    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+    roll_text = f"🎲 Rolled: {result}" if lang == 'en' else f"🎲 Нароллил: {result}"
 
+    user_id = message.from_user.id
+    b_data = board_data[board_id]
+
+    if board_id in THREAD_BOARDS:
+        user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+        if user_location != 'main':
+            thread_id = user_location
+            thread_info = b_data.get('threads_data', {}).get(thread_id)
+            if thread_info and not thread_info.get('is_archived'):
+                local_post_num = len(thread_info.get('posts', [])) + 1
+                # --- ИЗМЕНЕНИЕ ---
+                # Передаем author_id=0 (системное сообщение) и thread_info
+                header_text = await format_thread_post_header(board_id, local_post_num, 0, thread_info)
+                # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+                _, pnum = await format_header(board_id)
+                
+                content = {"type": "text", "header": header_text, "text": roll_text}
+                messages_storage[pnum] = {
+                    'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content,
+                    'board_id': board_id, 'thread_id': thread_id
+                }
+                thread_info['posts'].append(pnum)
+                thread_info['last_activity_at'] = time.time()
+
+                await message_queues[board_id].put({
+                    "recipients": thread_info.get('subscribers', set()),
+                    "content": content, "post_num": pnum, "board_id": board_id, "thread_id": thread_id
+                })
+                await message.delete()
+                return
+
+    # Стандартная логика
     header, pnum = await format_header(board_id)
-    content = {"type": "text", "header": header, "text": roll_text} # Используем новую переменную
-
+    content = {"type": "text", "header": header, "text": roll_text}
     messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
 
     await message_queues[board_id].put({
@@ -2937,11 +3587,24 @@ async def cmd_active(message: types.Message):
     board_id = get_board_id(message)
     if not board_id: return
 
-    # Статистика за последние сутки (24 часа)
+    if board_id in THREAD_BOARDS:
+        user_id = message.from_user.id
+        b_data = board_data[board_id]
+        user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+        if user_location != 'main':
+            try: await message.delete()
+            except Exception: pass
+            return
+
     now = datetime.now(UTC)
     day_ago = now - timedelta(hours=24)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    async with storage_lock:
+        storage_copy = list(messages_storage.values())
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
     posts_last_24h = sum(
-        1 for post in messages_storage.values()
+        1 for post in storage_copy
         if post.get("timestamp", now) > day_ago
     )
 
@@ -2950,7 +3613,7 @@ async def cmd_active(message: types.Message):
     for b_id in BOARDS:
         if b_id == 'test':
             continue
-        activity = get_board_activity_last_hours(b_id, hours=2)
+        activity = await get_board_activity_last_hours(b_id, hours=2)
         board_name = BOARD_CONFIG[b_id]['name']
         if lang == 'en':
             line = f"<b>{board_name}</b> - {activity:.1f} posts/hr"
@@ -2973,12 +3636,15 @@ async def cmd_active(message: types.Message):
         'header': header, 
         'text': full_activity_text
     }
-    messages_storage[pnum] = {
-        'author_id': 0, 
-        'timestamp': datetime.now(UTC), 
-        'content': content, 
-        'board_id': board_id
-    }
+    
+    async with storage_lock:
+        messages_storage[pnum] = {
+            'author_id': 0, 
+            'timestamp': datetime.now(UTC), 
+            'content': content, 
+            'board_id': board_id
+        }
+        
     b_data = board_data[board_id]
     await message_queues[board_id].put({
         'recipients': b_data['users']['active'],
@@ -2987,7 +3653,852 @@ async def cmd_active(message: types.Message):
         'board_id': board_id
     })
     await message.delete()
+    
+# ========== КОМАНДЫ ДЛЯ СИСТЕМЫ ТРЕДОВ ==========
 
+@dp.message(Command("create"))
+async def cmd_create(message: types.Message):
+    """Создает новый тред на доске."""
+    board_id = get_board_id(message)
+    if not board_id or board_id not in THREAD_BOARDS:
+        return
+
+    user_id = message.from_user.id
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        error_text = random.choice(thread_messages[lang]['create_usage'])
+        await message.answer(error_text, parse_mode="HTML")
+        await message.delete()
+        return
+    
+    title = escape_html(parts[1].strip())
+    
+    user_s = b_data['user_state'].setdefault(user_id, {})
+    now_ts = time.time()
+    last_creation_ts = user_s.get('last_thread_creation', 0)
+    
+    if now_ts - last_creation_ts < THREAD_CREATE_COOLDOWN_USER:
+        remaining = THREAD_CREATE_COOLDOWN_USER - (now_ts - last_creation_ts)
+        remaining_str = f"{int(remaining // 60)}м {int(remaining % 60)}с"
+        minutes_str = str(THREAD_CREATE_COOLDOWN_USER // 60)
+        
+        cooldown_text = random.choice(thread_messages[lang]['create_cooldown']).format(
+            minutes=minutes_str,
+            remaining=remaining_str
+        )
+        await message.answer(cooldown_text)
+        await message.delete()
+        return
+
+    threads_data = b_data['threads_data']
+    thread_id = secrets.token_hex(4)
+    now_dt = datetime.now(UTC)
+    
+    threads_data[thread_id] = {
+        'op_id': user_id,
+        'title': title,
+        'created_at': now_dt.isoformat(),
+        'last_activity_at': now_ts,
+        'posts': [],
+        'subscribers': {user_id},
+        'local_mutes': {},
+        'local_shadow_mutes': {},
+        'is_archived': False
+    }
+
+    user_s['last_thread_creation'] = now_ts
+
+    success_text = random.choice(thread_messages[lang]['create_success']).format(title=title)
+        
+    header, pnum = await format_header(board_id)
+    content = {
+        'type': 'text',
+        'header': header,
+        'text': success_text,
+        'is_system_message': True
+    }
+    messages_storage[pnum] = {
+        'author_id': 0, 
+        'timestamp': now_dt, 
+        'content': content, 
+        'board_id': board_id
+    }
+
+    await message_queues[board_id].put({
+        'recipients': b_data['users']['active'],
+        'content': content,
+        'post_num': pnum,
+        'board_id': board_id
+    })
+    
+    await message.delete()
+
+
+
+# --- Константы для пагинации ---
+THREADS_PER_PAGE = 10
+
+@dp.message(Command("threads"))
+async def cmd_threads(message: types.Message):
+    """Выводит постраничный список активных тредов."""
+    board_id = get_board_id(message)
+    if not board_id: return
+
+    if board_id not in THREAD_BOARDS:
+        try: await message.delete()
+        except Exception: pass
+        return
+
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+    
+    threads_data = b_data.get('threads_data', {})
+    
+    if not threads_data:
+        empty_text = random.choice(thread_messages[lang]['threads_list_empty'])
+        await message.answer(empty_text)
+        await message.delete()
+        return
+
+    # Сортируем треды по последней активности
+    sorted_threads = sorted(
+        threads_data.items(),
+        key=lambda item: item[1].get('last_activity_at', 0),
+        reverse=True
+    )
+    
+    # Сохраняем отсортированный список в состоянии пользователя для пагинации
+    user_s = b_data['user_state'].setdefault(message.from_user.id, {})
+    user_s['sorted_threads_cache'] = [tid for tid, _ in sorted_threads]
+
+    # Генерируем текст и клавиатуру для первой страницы
+    text, keyboard = await generate_threads_page(b_data, message.from_user.id, page=0)
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    await message.delete()
+
+async def generate_threads_page(b_data: dict, user_id: int, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    """Генерирует текст и клавиатуру для конкретной страницы списка тредов."""
+    board_id = next((bid for bid, data in board_data.items() if data is b_data), None)
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    user_s = b_data['user_state'].get(user_id, {})
+    sorted_thread_ids = user_s.get('sorted_threads_cache', [])
+    threads_data = b_data.get('threads_data', {})
+
+    start_index = page * THREADS_PER_PAGE
+    end_index = start_index + THREADS_PER_PAGE
+    page_thread_ids = sorted_thread_ids[start_index:end_index]
+
+    header = random.choice(thread_messages[lang]['threads_list_header'])
+    
+    lines = []
+    keyboard_buttons = []
+    
+    now_ts = time.time()
+
+    for i, thread_id in enumerate(page_thread_ids):
+        thread_info = threads_data.get(thread_id)
+        if not thread_info: continue
+
+        index = start_index + i + 1
+        title = thread_info.get('title', 'Без названия')
+        posts_count = len(thread_info.get('posts', []))
+        
+        last_activity_ts = thread_info.get('last_activity_at', 0)
+        time_diff = now_ts - last_activity_ts
+        
+        if time_diff < 60: last_activity_str = f"{int(time_diff)}с"
+        elif time_diff < 3600: last_activity_str = f"{int(time_diff / 60)}м"
+        else: last_activity_str = f"{int(time_diff / 3600)}ч"
+
+        lines.append(thread_messages[lang]['thread_list_item'].format(
+            index=index,
+            title=title,
+            posts_count=posts_count,
+            last_activity=last_activity_str
+        ))
+        keyboard_buttons.append([InlineKeyboardButton(
+            text=f"{index}. {title[:40]}",
+            callback_data=f"enter_thread_{thread_id}"
+        )])
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Добавляем кнопку "Показать историю" для текущего треда, если пользователь в треде
+    current_location = user_s.get('location', 'main')
+    if current_location != 'main' and threads_data.get(current_location):
+        history_button_text = random.choice(thread_messages[lang]['show_history_button'])
+        keyboard_buttons.append([InlineKeyboardButton(
+            text=history_button_text,
+            callback_data=f"show_history_{current_location}"
+        )])
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    # Кнопки пагинации
+    pagination_row = []
+    total_pages = (len(sorted_thread_ids) + THREADS_PER_PAGE - 1) // THREADS_PER_PAGE
+    if page > 0:
+        prev_text = random.choice(thread_messages[lang]['prev_page_button'])
+        pagination_row.append(InlineKeyboardButton(text=prev_text, callback_data=f"threads_page_{page - 1}"))
+    if page < total_pages - 1:
+        next_text = random.choice(thread_messages[lang]['next_page_button'])
+        pagination_row.append(InlineKeyboardButton(text=next_text, callback_data=f"threads_page_{page + 1}"))
+
+    if pagination_row:
+        keyboard_buttons.append(pagination_row)
+
+    full_text = header + "\n" + "\n".join(lines)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+
+    return full_text, keyboard
+
+async def post_archive_to_channel(bots: dict[str, Bot], file_path: str, board_id: str, thread_info: dict) -> None:
+    """Отправляет сгенерированный HTML-архив как документ в специальный Telegram-канал."""
+    bot_instance = bots.get(ARCHIVE_POSTING_BOT_ID)
+    if not bot_instance:
+        print(f"⛔ Ошибка: бот для постинга архивов ('{ARCHIVE_POSTING_BOT_ID}') не найден в списке активных ботов.")
+        return
+
+    try:
+        from aiogram.types import FSInputFile
+        
+        # Формируем данные
+        title = escape_html(thread_info.get('title', 'Без названия'))
+        board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
+
+        # Формируем подпись к документу
+        caption = (
+            f"🗂 <b>Тред заархивирован</b>\n\n"
+            f"<b>Доска:</b> {board_name}\n"
+            f"<b>Заголовок:</b> {title}"
+        )
+
+        document = FSInputFile(file_path)
+
+        # Отправляем документ с подписью
+        await bot_instance.send_document(
+            chat_id=ARCHIVE_CHANNEL_ID,
+            document=document,
+            caption=caption,
+            parse_mode="HTML"
+        )
+        print(f"✅ Архив треда '{title}' отправлен в канал {ARCHIVE_CHANNEL_ID}.")
+
+    except Exception as e:
+        print(f"⛔ Не удалось отправить архив в канал {ARCHIVE_CHANNEL_ID}: {e}")
+
+async def post_special_num_to_channel(bots: dict[str, Bot], board_id: str, post_num: int, level: int, content: dict, author_id: int):
+    """Пересылает пост со "счастливым" номером в канал архивов."""
+    bot_instance = bots.get(ARCHIVE_POSTING_BOT_ID)
+    if not bot_instance:
+        print(f"⛔ Ошибка: бот для постинга ('{ARCHIVE_POSTING_BOT_ID}') не найден.")
+        return
+        
+    try:
+        config = SPECIAL_NUMERALS_CONFIG[level]
+        emoji = random.choice(config['emojis'])
+        label = config['label'].upper()
+        
+        board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
+
+        header = f"{emoji} <b>{label} #{post_num}</b> {emoji}\n\n<b>Доска:</b> {board_name}\n"
+        
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        text_or_caption_raw = content.get('text') or content.get('caption') or ""
+        post_text = clean_html_tags(text_or_caption_raw)
+        
+        # Если текста/подписи нет, добавляем плейсхолдер для медиа
+        if not post_text:
+            content_type = content.get('type', 'unknown')
+            media_placeholders = {
+                'photo': '[Фото]',
+                'video': '[Видео]',
+                'animation': '[GIF]',
+                'sticker': '[Стикер]',
+                'document': '[Документ]',
+                'audio': '[Аудио]',
+                'voice': '[Голосовое сообщение]',
+                'video_note': '[Кружок]'
+            }
+            post_text = media_placeholders.get(content_type, '[Медиа]')
+
+        final_text = f"{header}\n{post_text}"
+        
+        if len(final_text) > 4096:
+            final_text = final_text[:4093] + "..."
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+        await bot_instance.send_message(
+            chat_id=ARCHIVE_CHANNEL_ID,
+            text=final_text,
+            parse_mode="HTML"
+        )
+        print(f"✅ Пост #{post_num} ({label}) отправлен в канал.")
+
+    except Exception as e:
+        print(f"⛔ Не удалось отправить пост #{post_num} в канал: {e}")
+
+def _sync_generate_thread_archive(board_id: str, thread_id: str, thread_info: dict) -> str | None:
+    """
+    Синхронная функция для генерации и сохранения HTML-архива треда.
+    Возвращает путь к файлу в случае успеха или None в случае ошибки.
+    """
+    try:
+        title = escape_html(thread_info.get('title', 'Без названия'))
+        filepath = os.path.join(DATA_DIR, f"archive_{board_id}_{thread_id}.html")
+
+        # ... (содержимое функции по генерации HTML остается без изменений) ...
+        html_style = """
+        <style>
+            body { font-family: sans-serif; background-color: #f0f0f0; color: #333; line-height: 1.6; margin: 20px; }
+            .container { max-width: 800px; margin: auto; background-color: #fff; padding: 20px; border-radius: 5px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+            h1 { color: #d00; border-bottom: 2px solid #ccc; padding-bottom: 10px; }
+            .post { border: 1px solid #ddd; padding: 10px; margin-bottom: 15px; border-radius: 4px; background-color: #fafafa; }
+            .post-header { font-size: 0.9em; color: #888; margin-bottom: 10px; }
+            .post-header b { color: #d00; }
+            .post-content { white-space: pre-wrap; word-wrap: break-word; }
+            .greentext { color: #789922; }
+            .reply-link { color: #d00; text-decoration: none; }
+        </style>
+        """
+        html_parts = [
+            '<!DOCTYPE html>\n', '<html lang="ru">\n', '<head>\n', '    <meta charset="UTF-8">\n',
+            f'    <title>Архив треда: {title}</title>\n', f'    {html_style}\n', '</head>\n',
+            '<body>\n', '    <div class="container">\n', f'        <h1>{title}</h1>\n'
+        ]
+        post_nums = thread_info.get('posts', [])
+        for post_num in post_nums:
+            post_data = messages_storage.get(post_num)
+            if not post_data: continue
+            content = post_data.get('content', {})
+            timestamp = post_data.get('timestamp', datetime.now(UTC)).strftime('%Y-%m-%d %H:%M:%S UTC')
+            post_body = ""
+            if content.get('type') == 'text':
+                text = clean_html_tags(content.get('text', ''))
+                lines = text.split('\n')
+                formatted_lines = []
+                for line in lines:
+                    safe_line = escape_html(line)
+                    if safe_line.strip().startswith('&gt;'):
+                        formatted_lines.append(f'<span class="greentext">{safe_line}</span>')
+                    else:
+                        formatted_lines.append(safe_line)
+                post_body = "<br>".join(formatted_lines)
+            elif content.get('type') in ['photo', 'video', 'animation', 'document', 'audio']:
+                media_type_map = {'photo': 'Изображение', 'video': 'Видео', 'animation': 'GIF', 'document': 'Документ', 'audio': 'Аудио'}
+                media_type = media_type_map.get(content.get('type'), 'Медиа')
+                caption = escape_html(clean_html_tags(content.get('caption', '')))
+                post_body = f"<b>[{media_type}]</b><br>{caption}"
+            else:
+                 post_body = f"<i>[{content.get('type', 'Системное сообщение')}]</i>"
+            reply_to = content.get('reply_to_post')
+            reply_html = f'<a href="#{reply_to}" class="reply-link">&gt;&gt;{reply_to}</a><br>' if reply_to else ""
+            html_parts.append(
+                f'        <div class="post" id="{post_num}">\n'
+                '            <div class="post-header">\n'
+                f'                <b>Пост №{post_num}</b> - {timestamp}\n'
+                '            </div>\n'
+                '            <div class="post-content">\n'
+                f'                {reply_html}{post_body}\n'
+                '            </div>\n'
+                '        </div>\n'
+            )
+        html_parts.extend(['    </div>\n', '</body>\n', '</html>\n'])
+        final_html_content = "".join(html_parts)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(final_html_content)
+        
+        print(f"✅ [{board_id}] Архив для треда {thread_id} сохранен в {filepath}")
+        return filepath
+
+    except Exception as e:
+        print(f"⛔ [{board_id}] Ошибка генерации архива для треда {thread_id}: {e}")
+        return None
+        
+async def archive_thread(bots: dict[str, Bot], board_id: str, thread_id: str, thread_info: dict):
+    """Асинхронная обертка для генерации архива треда и отправки его в канал."""
+    loop = asyncio.get_running_loop()
+    filepath = await loop.run_in_executor(
+        save_executor,
+        _sync_generate_thread_archive,
+        board_id, thread_id, thread_info
+    )
+    # Если файл успешно создан (путь получен), отправляем его в канал
+    if filepath:
+        await post_archive_to_channel(bots, filepath, board_id, thread_info)
+
+async def thread_lifecycle_manager(bots: dict[str, Bot]):
+    """Фоновая задача для управления жизненным циклом тредов: архивация и удаление."""
+    while True:
+        await asyncio.sleep(60) # Проверка раз в минуту
+        now_dt = datetime.now(UTC)
+
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Вся логика под блокировкой ---
+        async with storage_lock:
+            for board_id in THREAD_BOARDS:
+                b_data = board_data.get(board_id)
+                if not b_data: continue
+
+                threads_data = b_data.get('threads_data', {})
+                threads_to_delete = []
+
+                # Этап 1: Проверка на архивацию по лимиту постов
+                for thread_id, thread_info in threads_data.items():
+                    if not thread_info.get('is_archived') and len(thread_info.get('posts', [])) >= MAX_POSTS_PER_THREAD:
+                        thread_info['is_archived'] = True
+                        
+                        # Запускаем генерацию HTML архива в отдельном потоке
+                        # Важно: передаем копию thread_info, а не ссылку
+                        await archive_thread(bots, board_id, thread_id, thread_info.copy())
+                        
+                        lang = 'en' if board_id == 'int' else 'ru'
+                        archive_text = random.choice(thread_messages[lang]['thread_archived']).format(
+                            limit=MAX_POSTS_PER_THREAD,
+                            title=thread_info.get('title', '...')
+                        )
+                        header, pnum = await format_header(board_id)
+                        content = {'type': 'text', 'header': header, 'text': archive_text, 'is_system_message': True}
+                        
+                        messages_storage[pnum] = {
+                            'author_id': 0, 'timestamp': now_dt, 'content': content, 
+                            'board_id': board_id, 'thread_id': thread_id
+                        }
+                        
+                        recipients = thread_info.get('subscribers', set())
+                        if recipients:
+                             await message_queues[board_id].put({
+                                'recipients': recipients, 'content': content, 'post_num': pnum,
+                                'board_id': board_id, 'thread_id': thread_id
+                            })
+
+                # Этап 2: Проверка на удаление старейшего треда при переполнении
+                active_threads = {tid: tdata for tid, tdata in threads_data.items() if not tdata.get('is_archived')}
+
+                if len(active_threads) > MAX_ACTIVE_THREADS:
+                    num_to_remove = len(active_threads) - MAX_ACTIVE_THREADS
+                    
+                    oldest_threads = sorted(
+                        active_threads.items(),
+                        key=lambda item: item[1].get('last_activity_at', 0)
+                    )[:num_to_remove]
+
+                    for thread_id, thread_info in oldest_threads:
+                        removed_title = thread_info.get('title', '...')
+                        lang = 'en' if board_id == 'int' else 'ru'
+                        
+                        removal_text = random.choice(thread_messages[lang]['oldest_thread_removed']).format(title=removed_title)
+                        header, pnum = await format_header(board_id)
+                        content = {'type': 'text', 'header': header, 'text': removal_text, 'is_system_message': True}
+                        
+                        messages_storage[pnum] = {
+                            'author_id': 0, 'timestamp': now_dt, 'content': content, 'board_id': board_id
+                        }
+                        
+                        await message_queues[board_id].put({
+                            'recipients': b_data['users']['active'], 'content': content,
+                            'post_num': pnum, 'board_id': board_id
+                        })
+                        
+                        threads_to_delete.append(thread_id)
+
+                # Этап 3: Физическое удаление тредов
+                if threads_to_delete:
+                    for thread_id in threads_to_delete:
+                        threads_data.pop(thread_id, None)
+                    print(f"🧹 [{board_id}] Удалено {len(threads_to_delete)} старых тредов.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                
+@dp.callback_query(F.data.startswith("threads_page_"))
+async def cq_threads_page(callback: types.CallbackQuery):
+    """Обрабатывает переключение страниц в списке тредов."""
+    board_id = get_board_id(callback)
+    if not board_id or board_id not in THREAD_BOARDS:
+        await callback.answer("This action is not available here.", show_alert=True)
+        return
+
+    try:
+        page = int(callback.data.split("_")[-1])
+    except (ValueError, IndexError):
+        await callback.answer("Invalid page number.", show_alert=True)
+        return
+        
+    b_data = board_data[board_id]
+    
+    text, keyboard = await generate_threads_page(b_data, callback.from_user.id, page=page)
+    
+    try:
+        if callback.message.text != text:
+             await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            print(f"Ошибка обновления списка тредов: {e}")
+            
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("show_history_"))
+async def cq_thread_history(callback: types.CallbackQuery):
+    """Отправляет полную историю сообщений треда."""
+    board_id = get_board_id(callback)
+    if not board_id or board_id not in THREAD_BOARDS:
+        await callback.answer("This action is not available here.", show_alert=True)
+        return
+        
+    try:
+        thread_id = callback.data.split("_")[-1]
+    except (ValueError, IndexError):
+        await callback.answer("Invalid thread ID.", show_alert=True)
+        return
+
+    user_id = callback.from_user.id
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+    
+    # Проверка кулдауна
+    user_s = b_data['user_state'].setdefault(user_id, {})
+    now_ts = time.time()
+    last_history_req = user_s.get('last_history_request', 0)
+    
+    if now_ts - last_history_req < THREAD_HISTORY_COOLDOWN:
+        cooldown_msg = random.choice(thread_messages[lang]['history_cooldown']).format(
+            minutes=str(THREAD_HISTORY_COOLDOWN // 60)
+        )
+        await callback.answer(cooldown_msg, show_alert=True)
+        return
+
+    thread_info = b_data.get('threads_data', {}).get(thread_id)
+    if not thread_info:
+        await callback.answer(random.choice(thread_messages[lang]['thread_not_found']), show_alert=True)
+        return
+
+    # Обновляем время последнего запроса
+    user_s['last_history_request'] = now_ts
+    await callback.answer("⏳ Загружаю историю...")
+
+    # Используем уже существующую логику отправки пропущенных сообщений,
+    # просто сбрасывая точку отсчета на 0
+    temp_user_state = user_s.copy()
+    temp_user_state['last_seen_threads'] = {thread_id: 0}
+    b_data['user_state'][user_id] = temp_user_state
+
+    await send_missed_messages(callback.bot, board_id, user_id, thread_id)
+
+@dp.callback_query(F.data.startswith("enter_thread_"))
+async def cq_enter_thread(callback: types.CallbackQuery):
+    """Обрабатывает вход пользователя в тред по нажатию кнопки."""
+    board_id = get_board_id(callback)
+    if not board_id or board_id not in THREAD_BOARDS:
+        await callback.answer("This action is not available here.", show_alert=True)
+        return
+        
+    try:
+        thread_id = callback.data.split("_")[-1]
+    except (ValueError, IndexError):
+        await callback.answer("Invalid thread ID.", show_alert=True)
+        return
+        
+    user_id = callback.from_user.id
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+    
+    threads_data = b_data.get('threads_data', {})
+    if thread_id not in threads_data:
+        await callback.answer(random.choice(thread_messages[lang]['thread_not_found']), show_alert=True)
+        text, keyboard = await generate_threads_page(b_data, user_id, page=0)
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except TelegramBadRequest: pass
+        return
+
+    user_s = b_data['user_state'].setdefault(user_id, {})
+    
+    now_ts = time.time()
+    last_switch = user_s.get('last_location_switch', 0)
+    if now_ts - last_switch < LOCATION_SWITCH_COOLDOWN:
+        await callback.answer(random.choice(thread_messages[lang]['location_switch_cooldown']), show_alert=True)
+        return
+
+    current_location = user_s.get('location', 'main')
+
+    if current_location == thread_id:
+        await callback.answer()
+        return
+        
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Сохраняем, какой пост был последним на доске перед уходом
+    if current_location == 'main':
+        user_s['last_seen_main'] = state.get('post_counter', 0)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    user_s['location'] = thread_id
+    user_s['last_location_switch'] = now_ts
+    threads_data[thread_id].setdefault('subscribers', set()).add(user_id)
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Подгружаем пропущенные сообщения
+    await send_missed_messages(callback.bot, board_id, user_id, thread_id)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    thread_title = threads_data[thread_id].get('title', '...')
+    
+    seen_threads = user_s.setdefault('last_seen_threads', {})
+    if thread_id not in seen_threads:
+        response_text = random.choice(thread_messages[lang]['enter_thread_prompt']).format(title=thread_title)
+    else:
+        response_text = random.choice(thread_messages[lang]['enter_thread_success']).format(title=thread_title)
+
+    await callback.message.answer(response_text, parse_mode="HTML")
+    
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
+        
+    await callback.answer()
+
+@dp.message(Command("leave"))
+async def cmd_leave(message: types.Message):
+    """Выводит пользователя из треда обратно на доску."""
+    board_id = get_board_id(message)
+    if not board_id: return
+
+    if board_id not in THREAD_BOARDS:
+        try: await message.delete()
+        except Exception: pass
+        return
+
+    user_id = message.from_user.id
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    user_s = b_data['user_state'].setdefault(user_id, {})
+    current_location = user_s.get('location', 'main')
+
+    if current_location == 'main':
+        await message.delete()
+        return
+
+    now_ts = time.time()
+    last_switch = user_s.get('last_location_switch', 0)
+    if now_ts - last_switch < LOCATION_SWITCH_COOLDOWN:
+        cooldown_text = random.choice(thread_messages[lang]['location_switch_cooldown'])
+        await message.answer(cooldown_text)
+        await message.delete()
+        return
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Сохраняем, какой пост был последним в треде перед уходом
+    thread_id = current_location
+    thread_info = b_data.get('threads_data', {}).get(thread_id)
+    if thread_info:
+        last_thread_post = thread_info.get('posts', [0])[-1] if thread_info.get('posts') else 0
+        user_s.setdefault('last_seen_threads', {})[thread_id] = last_thread_post
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    user_s['location'] = 'main'
+    user_s['last_location_switch'] = now_ts
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Подгружаем пропущенные сообщения с доски
+    await send_missed_messages(message.bot, board_id, user_id, 'main')
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
+    response_text = random.choice(thread_messages[lang]['leave_thread_success'])
+    await message.answer(response_text)
+    await message.delete()
+
+@dp.message(Command("mute"))
+async def cmd_op_mute(message: types.Message):
+    """Обрабатывает локальный мут пользователя ОПом в треде."""
+    board_id = get_board_id(message)
+    if not board_id or board_id not in THREAD_BOARDS:
+        return
+
+    # Если это админ, то команда уже отработала в предыдущем хендлере
+    if is_admin(message.from_user.id, board_id):
+        return
+
+    user_id = message.from_user.id
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    user_s = b_data.get('user_state', {}).get(user_id, {})
+    location = user_s.get('location', 'main')
+
+    if location == 'main':
+        await message.delete()
+        return
+
+    thread_id = location
+    threads_data = b_data.get('threads_data', {})
+    thread_info = threads_data.get(thread_id)
+
+    if not thread_info or thread_info.get('op_id') != user_id:
+        await message.delete()
+        return
+
+    if not message.reply_to_message:
+        await message.delete()
+        return
+        
+    target_id = None
+    async with storage_lock:
+        target_id = get_author_id_by_reply(message)
+
+    if not target_id or target_id == user_id:
+        await message.delete()
+        return
+        
+    duration_seconds = 600
+    expires_ts = time.time() + duration_seconds
+    
+    thread_info.setdefault('local_mutes', {})[target_id] = expires_ts
+
+    duration_text = str(duration_seconds // 60)
+    response_text = random.choice(thread_messages[lang]['op_mute_success']).format(duration=duration_text)
+    
+    await message.answer(response_text)
+    await message.delete()
+
+@dp.message(Command("unmute"))
+async def cmd_op_unmute(message: types.Message):
+    """Обрабатывает локальный размут пользователя ОПом в треде."""
+    board_id = get_board_id(message)
+    if not board_id or board_id not in THREAD_BOARDS:
+        return
+
+    if is_admin(message.from_user.id, board_id):
+        return
+
+    user_id = message.from_user.id
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    user_s = b_data.get('user_state', {}).get(user_id, {})
+    location = user_s.get('location', 'main')
+
+    if location == 'main':
+        await message.delete()
+        return
+
+    thread_id = location
+    threads_data = b_data.get('threads_data', {})
+    thread_info = threads_data.get(thread_id)
+
+    if not thread_info or thread_info.get('op_id') != user_id:
+        await message.delete()
+        return
+
+    if not message.reply_to_message:
+        await message.delete()
+        return
+
+    target_id = None
+    async with storage_lock:
+        target_id = get_author_id_by_reply(message)
+
+    if not target_id:
+        await message.delete()
+        return
+
+    local_mutes = thread_info.get('local_mutes', {})
+    if target_id in local_mutes:
+        del local_mutes[target_id]
+        response_text = random.choice(thread_messages[lang]['op_unmute_success'])
+        await message.answer(response_text)
+    
+    await message.delete()
+    
+@dp.message(Command("shadowmute"))
+async def cmd_op_shadowmute(message: types.Message):
+    """Обрабатывает локальный теневой мут пользователя ОПом в треде."""
+    board_id = get_board_id(message)
+    if not board_id or board_id not in THREAD_BOARDS: return
+    # Если это админ, пусть работает админская команда /shadowmute, которая идет следующей
+    if is_admin(message.from_user.id, board_id): return
+
+    user_id = message.from_user.id
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+    if location == 'main':
+        await message.delete()
+        return
+
+    thread_info = b_data.get('threads_data', {}).get(location)
+    if not thread_info or thread_info.get('op_id') != user_id:
+        await message.delete()
+        return
+
+    if not message.reply_to_message:
+        await message.delete()
+        return
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    target_id = None
+    async with storage_lock:
+        target_id = get_author_id_by_reply(message)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
+    if not target_id or target_id == user_id:
+        await message.delete()
+        return
+        
+    duration_seconds = 600 # 10 минут
+    expires_ts = time.time() + duration_seconds
+    thread_info.setdefault('local_shadow_mutes', {})[target_id] = expires_ts
+    
+    duration_text = str(duration_seconds // 60)
+    response_text = random.choice(thread_messages[lang]['op_mute_success']).format(duration=duration_text)
+    await message.answer(f"👻 (shadow) {response_text}")
+    await message.delete()
+
+@dp.message(Command("unshadowmute"))
+async def cmd_op_unshadowmute(message: types.Message):
+    """Обрабатывает локальный теневой размут пользователя ОПом в треде."""
+    board_id = get_board_id(message)
+    if not board_id or board_id not in THREAD_BOARDS: return
+    if is_admin(message.from_user.id, board_id): return
+
+    user_id = message.from_user.id
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+    if location == 'main':
+        await message.delete()
+        return
+
+    thread_info = b_data.get('threads_data', {}).get(location)
+    if not thread_info or thread_info.get('op_id') != user_id:
+        await message.delete()
+        return
+
+    if not message.reply_to_message:
+        await message.delete()
+        return
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    target_id = None
+    async with storage_lock:
+        target_id = get_author_id_by_reply(message)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    if not target_id:
+        await message.delete()
+        return
+
+    local_shadow_mutes = thread_info.get('local_shadow_mutes', {})
+    if target_id in local_shadow_mutes:
+        del local_shadow_mutes[target_id]
+        response_text = random.choice(thread_messages[lang]['op_unmute_success'])
+        await message.answer(f"👻 (shadow) {response_text}")
+    
+    await message.delete()
 @dp.message(Command("invite"))
 async def cmd_invite(message: types.Message):
     board_id = get_board_id(message)
@@ -3017,6 +4528,18 @@ async def cmd_stats(message: types.Message):
     board_id = get_board_id(message)
     if not board_id: return
     
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Блокируем команду, если пользователь находится внутри треда
+    if board_id in THREAD_BOARDS:
+        user_id = message.from_user.id
+        b_data = board_data[board_id]
+        user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+        if user_location != 'main':
+            try: await message.delete()
+            except Exception: pass
+            return
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     b_data = board_data[board_id]
     total_users_on_board = len(b_data['users']['active'])
     total_posts_on_board = b_data.get('board_post_count', 0)
@@ -3035,7 +4558,6 @@ async def cmd_stats(message: types.Message):
                       f"📨 Постов на доске: {total_posts_on_board}\n"
                       f"📈 Всего постов в тгаче: {state['post_counter']}")
         
-    # Добавляем подпись с вероятностью 50%
     if random.random() < 0.5:
         if board_id == 'int':
             dvach_caption = random.choice(DVACH_STATS_CAPTIONS_EN)
@@ -3165,89 +4687,96 @@ async def disable_anime_mode(delay: int, board_id: str):
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: Message):
     global last_deanon_time
-    
     board_id = get_board_id(message)
     if not board_id: return
     
-    # Проверка cooldown
     current_time = time.time()
     async with deanon_lock:
         if current_time - last_deanon_time < DEANON_COOLDOWN:
-            # Отправляем случайное сообщение о cooldown
             cooldown_msg = random.choice(DEANON_COOLDOWN_PHRASES)
             try:
                 sent_msg = await message.answer(cooldown_msg)
-                # Удаляем сообщение через 5 секунд
                 asyncio.create_task(delete_message_after_delay(sent_msg, 5))
-            except Exception:
-                pass
+            except Exception: pass
             await message.delete()
             return
-        
-        # Обновляем время последнего использования
         last_deanon_time = current_time
     
-    # Оригинальный код команды /deanon
     lang = 'en' if board_id == 'int' else 'ru'
-
     if not message.reply_to_message:
         reply_text = "⚠️ Reply to a message to de-anonymize!" if lang == 'en' else "⚠️ Ответь на сообщение для деанона!"
         await message.answer(reply_text)
         await message.delete()
         return
 
-    target_mid = message.reply_to_message.message_id
     user_id = message.from_user.id
-    target_post = message_to_post.get((user_id, target_mid))
+    b_data = board_data[board_id]
+    user_location = 'main'
+    if board_id in THREAD_BOARDS:
+        user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
 
-    if not target_post or target_post not in messages_storage:
-        reply_text = "🚫 Could not find the post to de-anonymize (you might have replied to someone else's copy or an old message)." if lang == 'en' else "🚫 Не удалось найти пост для деанона (возможно, вы ответили на чужую копию или старое сообщение)."
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    original_author_id = None
+    target_post = None
+    reply_info = {}
+
+    async with storage_lock:
+        target_mid = message.reply_to_message.message_id
+        target_post = message_to_post.get((user_id, target_mid))
+        
+        if target_post and target_post in messages_storage:
+            original_author_id = messages_storage[target_post].get('author_id')
+            reply_info = post_to_messages.get(target_post, {})
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    if not target_post or original_author_id is None:
+        reply_text = "🚫 Could not find the post to de-anonymize..." if lang == 'en' else "🚫 Не удалось найти пост для деанона..."
         await message.answer(reply_text)
         await message.delete()
         return
 
-    original_author_id = messages_storage[target_post].get('author_id')
     if original_author_id == 0:
-        reply_text = "⚠️ System messages cannot be de-anonymized." if lang == 'en' else "⚠️ Нельзя деанонимизировать системные сообщения."
+        reply_text = "⚠️ System messages cannot be de-anonymized." if lang == 'en' else "⚠️ Системные сообщения нельзя деанонить."
         await message.answer(reply_text)
         await message.delete()
         return
         
-    # Передаем язык в генератор
     name, surname, city, profession, fetish, detail = generate_deanon_info(lang=lang)
     ip = f"{random.randint(10,250)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
     age = random.randint(18, 45)
     
+    deanon_text, header_text = "", ""
     if lang == 'en':
-        deanon_text = (f"\nThis anon's name is: {name} {surname}\n"
-                       f"Age: {age}\n"
-                       f"Address: {city}\n"
-                       f"Profession: {profession}\n"
-                       f"Fetish: {fetish}\n"
-                       f"IP address: {ip}\n"
-                       f"Additional info: {detail}")
+        deanon_text = (f"\nThis anon's name is: {name} {surname}...")
         header_text = "### DEANON ###"
     else:
-        deanon_text = (f"\nЭтого анона зовут: {name} {surname}\n"
-                       f"Возраст: {age}\n"
-                       f"Адрес проживания: {city}\n"
-                       f"Профессия: {profession}\n"
-                       f"Фетиш: {fetish}\n"
-                       f"IP-адрес: {ip}\n"
-                       f"Дополнительная информация о нём: {detail}")
+        deanon_text = (f"\nЭтого анона зовут: {name} {surname}...")
         header_text = "### ДЕАНОН ###"
 
-    _, pnum = await format_header(board_id)
     content = {"type": "text", "header": header_text, "text": deanon_text, "reply_to_post": target_post}
 
-    messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
-
+    if board_id in THREAD_BOARDS and user_location != 'main':
+        thread_id = user_location
+        thread_info = b_data.get('threads_data', {}).get(thread_id)
+        if thread_info and not thread_info.get('is_archived'):
+            _, pnum = await format_header(board_id)
+            async with storage_lock:
+                messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id, 'thread_id': thread_id}
+            thread_info['posts'].append(pnum)
+            thread_info['last_activity_at'] = time.time()
+            await message_queues[board_id].put({
+                "recipients": thread_info.get('subscribers', set()), "content": content, "post_num": pnum,
+                "reply_info": reply_info, "board_id": board_id, "thread_id": thread_id
+            })
+            await message.delete()
+            return
+            
+    _, pnum = await format_header(board_id)
+    async with storage_lock:
+        messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
     await message_queues[board_id].put({
-        "recipients": board_data[board_id]['users']['active'],
-        "content": content,
-        "post_num": pnum,
-        "reply_info": post_to_messages.get(target_post, {}),
-        "board_id": board_id
+        "recipients": board_data[board_id]['users']['active'], "content": content, "post_num": pnum,
+        "reply_info": reply_info, "board_id": board_id
     })
     await message.delete()
 
@@ -3564,18 +5093,16 @@ async def admin_banned_board(callback: types.CallbackQuery):
 def get_author_id_by_reply(msg: types.Message) -> int | None:
     """
     Получает ID автора поста по ответу на его копию.
-    Работает через прямой поиск по ключу, а не перебор.
+    Эта функция НЕБЕЗОПАСНА для вызова без блокировки.
+    Предполагается, что она вызывается в контексте, где `storage_lock` уже захвачен.
     """
     if not msg.reply_to_message:
         return None
 
-    # Ключ для поиска - это ID того, КТО ответил (админ), 
-    # и ID сообщения, НА КОТОРОЕ он ответил.
     admin_id = msg.from_user.id
     reply_mid = msg.reply_to_message.message_id
     lookup_key = (admin_id, reply_mid)
 
-    # Прямой поиск поста по этому ключу
     post_num = message_to_post.get(lookup_key)
 
     if post_num and post_num in messages_storage:
@@ -3589,7 +5116,6 @@ async def cmd_get_id(message: types.Message):
     board_id = get_board_id(message)
     if not board_id: return
     
-    # Проверяем, является ли вызвавший команду админом на текущей доске
     if not is_admin(message.from_user.id, board_id):
         await message.delete()
         return
@@ -3598,20 +5124,20 @@ async def cmd_get_id(message: types.Message):
     info_header = "🆔 <b>Информация о вас:</b>\n\n"
     
     if message.reply_to_message:
-        replied_author_id = get_author_id_by_reply(message)
-        
+        replied_author_id = None
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        async with storage_lock:
+            replied_author_id = get_author_id_by_reply(message)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        
         if replied_author_id == 0:
             await message.answer("ℹ️ Вы ответили на системное сообщение (автор: бот).")
             await message.delete()
             return
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         if replied_author_id:
             target_id = replied_author_id
             info_header = "🆔 <b>Информация о пользователе:</b>\n\n"
-        # Если replied_author_id is None, target_id останется равным ID админа,
-        # и команда покажет его инфу (например, при ответе на чужую копию).
 
     try:
         user_chat_info = await message.bot.get_chat(target_id)
@@ -3647,8 +5173,11 @@ async def cmd_ban(message: types.Message):
         return
 
     target_id: int | None = None
-    if message.reply_to_message:
-        target_id = get_author_id_by_reply(message)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    async with storage_lock:
+        if message.reply_to_message:
+            target_id = get_author_id_by_reply(message)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     parts = message.text.split()
     if len(parts) == 2 and parts[1].isdigit():
@@ -3664,7 +5193,6 @@ async def cmd_ban(message: types.Message):
     b_data['users']['banned'].add(target_id)
     b_data['users']['active'].discard(target_id)
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     lang = 'en' if board_id == 'int' else 'ru'
     board_name = BOARD_CONFIG[board_id]['name']
 
@@ -3682,7 +5210,6 @@ async def cmd_ban(message: types.Message):
         ]
     response_text = random.choice(phrases).format(user_id=target_id, board=board_name, deleted=deleted_posts)
     await message.answer(response_text, parse_mode="HTML")
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     await send_moderation_notice(target_id, "ban", board_id, deleted_posts=deleted_posts)
 
@@ -3712,9 +5239,10 @@ async def cmd_ban(message: types.Message):
 @dp.message(Command("mute"))
 async def cmd_mute(message: Message):
     board_id = get_board_id(message)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Админская команда теперь отделена от OP-команды ---
     if not is_admin(message.from_user.id, board_id):
-        await message.delete()
-        return
+        return # Если не админ, передаем управление следующему обработчику (OP-команде)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     command_args = message.text.split()[1:]
     if not command_args and not message.reply_to_message:
@@ -3726,7 +5254,8 @@ async def cmd_mute(message: Message):
     duration_str = "24h"
 
     if message.reply_to_message:
-        target_id = get_author_id_by_reply(message)
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
         if command_args:
             duration_str = command_args[0]
     elif command_args:
@@ -3761,14 +5290,12 @@ async def cmd_mute(message: Message):
     b_data = board_data[board_id]
     b_data['mutes'][target_id] = datetime.now(UTC) + timedelta(seconds=mute_seconds)
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     board_name = BOARD_CONFIG[board_id]['name']
     await message.answer(
         f"🔇 Хуила {target_id} замучен на {duration_text} на доске {board_name}\n"
         f"Удалено сообщений за последние 5 минут: {deleted_count}",
         parse_mode="HTML"
     )
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     await send_moderation_notice(target_id, "mute", board_id, duration=duration_text, deleted_posts=deleted_count)
 
@@ -3804,7 +5331,8 @@ async def cmd_wipe(message: types.Message):
 
     target_id = None
     if message.reply_to_message:
-        target_id = get_author_id_by_reply(message)
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
     else:
         parts = message.text.split()
         if len(parts) == 2 and parts[1].isdigit():
@@ -3816,23 +5344,24 @@ async def cmd_wipe(message: types.Message):
 
     deleted_messages = await delete_user_posts(message.bot, target_id, 999999, board_id)
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     board_name = BOARD_CONFIG[board_id]['name']
     await message.answer(
         f"🗑 Удалено {deleted_messages} сообщений пользователя {target_id} с доски {board_name}."
     )
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     await message.delete()
 
 @dp.message(Command("unmute"))
 async def cmd_unmute(message: types.Message):
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Админская команда теперь отделена от OP-команды ---
     board_id = get_board_id(message)
     if not is_admin(message.from_user.id, board_id):
         return
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     target_id = None
     if message.reply_to_message:
-        target_id = get_author_id_by_reply(message)
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
     else:
         parts = message.text.split()
         if len(parts) == 2 and parts[1].isdigit():
@@ -3845,9 +5374,7 @@ async def cmd_unmute(message: types.Message):
     b_data = board_data[board_id]
     board_name = BOARD_CONFIG[board_id]['name']
     if b_data['mutes'].pop(target_id, None):
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         await message.answer(f"🔈 Пользователь {target_id} размучен на доске {board_name}.")
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         try:
             lang = 'en' if board_id == 'int' else 'ru'
             if lang == 'en':
@@ -3867,9 +5394,7 @@ async def cmd_unmute(message: types.Message):
         except:
             pass
     else:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         await message.answer(f"Пользователь {target_id} не был в муте на этой доске.")
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     await message.delete()
 
 @dp.message(Command("unban"))
@@ -3910,9 +5435,11 @@ async def cmd_del(message: types.Message):
         await message.answer("Ответь на сообщение, которое нужно удалить")
         return
 
-    target_mid = message.reply_to_message.message_id
-    lookup_key = (message.from_user.id, target_mid)
-    post_num = message_to_post.get(lookup_key)
+    post_num = None
+    async with storage_lock:
+        target_mid = message.reply_to_message.message_id
+        lookup_key = (message.from_user.id, target_mid)
+        post_num = message_to_post.get(lookup_key)
 
     if post_num is None:
         await message.answer("Не нашёл этот пост в базе (возможно, вы ответили на чужую копию).")
@@ -3920,16 +5447,13 @@ async def cmd_del(message: types.Message):
 
     deleted_count = await delete_single_post(post_num, message.bot)
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     await message.answer(f"Пост №{post_num} и все его копии ({deleted_count} сообщений) удалены.")
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     await message.delete()
 
 @dp.message(Command("shadowmute"))
 async def cmd_shadowmute(message: Message):
     board_id = get_board_id(message)
     if not is_admin(message.from_user.id, board_id):
-        await message.delete()
         return
 
     args = message.text.split()[1:]
@@ -3937,7 +5461,8 @@ async def cmd_shadowmute(message: Message):
     duration_str = "24h"
 
     if message.reply_to_message:
-        target_id = get_author_id_by_reply(message)
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
         if args:
             duration_str = args[0]
     elif args:
@@ -3963,10 +5488,8 @@ async def cmd_shadowmute(message: Message):
         b_data = board_data[board_id]
         b_data['shadow_mutes'][target_id] = datetime.now(UTC) + timedelta(seconds=total_seconds)
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         board_name = BOARD_CONFIG[board_id]['name']
         await message.answer(f"👻 Тихо замучен пользователь {target_id} на {time_str} на доске {board_name}.")
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     except ValueError:
         await message.answer("❌ Неверный формат времени. Примеры: 30m, 2h, 1d")
     await message.delete()
@@ -3974,16 +5497,19 @@ async def cmd_shadowmute(message: Message):
 
 @dp.message(Command("unshadowmute"))
 async def cmd_unshadowmute(message: Message):
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Админская команда теперь отделена от OP-команды ---
     board_id = get_board_id(message)
     if not is_admin(message.from_user.id, board_id):
         return
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     target_id = None
     parts = message.text.split()
     if len(parts) >= 2 and parts[1].isdigit():
         target_id = int(parts[1])
     elif message.reply_to_message:
-        target_id = get_author_id_by_reply(message)
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
 
     if not target_id:
         await message.answer("Использование: /unshadowmute <user_id> или ответ на сообщение.")
@@ -3992,13 +5518,62 @@ async def cmd_unshadowmute(message: Message):
     b_data = board_data[board_id]
     board_name = BOARD_CONFIG[board_id]['name']
     if b_data['shadow_mutes'].pop(target_id, None):
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         await message.answer(f"👻 Пользователь {target_id} тихо размучен на доске {board_name}.")
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     else:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         await message.answer(f"ℹ️ Пользователь {target_id} не в shadow-муте на этой доске.")
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    await message.delete()
+
+@dp.message(Command("shadowmute_threads"))
+async def cmd_shadowmute_threads(message: Message):
+    """Теневой мут пользователя во всех тредах доски."""
+    board_id = get_board_id(message)
+    if not is_admin(message.from_user.id, board_id) or board_id not in THREAD_BOARDS:
+        await message.delete()
+        return
+
+    args = message.text.split()[1:]
+    target_id = None
+    duration_str = "10m" # По умолчанию 10 минут
+
+    if message.reply_to_message:
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
+        if args: duration_str = args[0]
+    elif args:
+        try:
+            target_id = int(args[0])
+            if len(args) > 1: duration_str = args[1]
+        except ValueError: pass
+
+    if not target_id:
+        await message.answer("Использование: /shadowmute_threads <user_id> [время] или ответ на сообщение.")
+        return
+
+    try:
+        duration_str = duration_str.lower().replace(" ", "")
+        if duration_str.endswith("m"): total_seconds, time_str = int(duration_str[:-1]) * 60, f"{int(duration_str[:-1])} мин"
+        elif duration_str.endswith("h"): total_seconds, time_str = int(duration_str[:-1]) * 3600, f"{int(duration_str[:-1])} час"
+        elif duration_str.endswith("d"): total_seconds, time_str = int(duration_str[:-1]) * 86400, f"{int(duration_str[:-1])} дней"
+        else: total_seconds, time_str = int(duration_str) * 60, f"{int(duration_str)} мин"
+    except (ValueError, AttributeError):
+        await message.answer("❌ Неверный формат времени. Примеры: 10m, 2h, 1d")
+        await message.delete()
+        return
+        
+    expires_ts = time.time() + total_seconds
+    b_data = board_data[board_id]
+    threads_data = b_data.get('threads_data', {})
+    
+    # Применяем мут во всех тредах
+    for thread_info in threads_data.values():
+        thread_info.setdefault('local_mutes', {})[target_id] = expires_ts
+    
+    lang = 'en' if board_id == 'int' else 'ru'
+    response_text = random.choice(thread_messages[lang]['shadowmute_threads_success']).format(
+        user_id=target_id, 
+        duration=str(int(total_seconds / 60))
+    )
+    await message.answer(response_text)
     await message.delete()
 
 # ========== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ==========
@@ -4012,87 +5587,61 @@ async def handle_audio(message: Message):
     
     b_data = board_data[board_id]
 
+    # --- Блок 1: Первичные проверки (аналогично handle_message) ---
     if user_id in b_data['users']['banned']:
         await message.delete()
         return
-
     if b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC):
         await message.delete()
         return
 
     b_data['last_activity'][user_id] = datetime.now(UTC)
     
-    spam_check = await check_spam(user_id, message, board_id)
-    if not spam_check:
+    if not await check_spam(user_id, message, board_id):
         try:
             await message.delete()
+            msg_type = 'text' if message.caption else 'animation'
+            await apply_penalty(message.bot, user_id, msg_type, board_id)
         except TelegramBadRequest: pass
-        msg_type = 'text' if message.caption else 'animation'
-        await apply_penalty(message.bot, user_id, msg_type, board_id)
         return
-        
+    
+    await message.delete()
+
+    # --- Блок 2: Подготовка данных для process_new_post ---
     is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
                        b_data['shadow_mutes'][user_id] > datetime.now(UTC))
 
-    recipients = b_data['users']['active'] - {user_id}
-    reply_to_post, reply_info = None, {}
+    reply_to_post = None
     if message.reply_to_message:
-        lookup_key = (user_id, message.reply_to_message.message_id)
-        reply_to_post = message_to_post.get(lookup_key)
-        if reply_to_post and reply_to_post in post_to_messages:
-            reply_info = post_to_messages[reply_to_post]
-        else:
-            reply_to_post = None
+        async with storage_lock:
+            lookup_key = (user_id, message.reply_to_message.message_id)
+            reply_to_post = message_to_post.get(lookup_key)
             
-    header, current_post_num = await format_header(board_id)
-    try:
-        await message.delete()
-    except TelegramBadRequest: pass
-    
-    caption_content = message.caption_html_text if hasattr(message, 'caption_html_text') and message.caption_html_text else (message.caption or "")
-    if message.caption:
-        last_messages.append(message.caption)
-        
-    content = {
-        'type': 'audio', 'header': header, 'file_id': message.audio.file_id,
-        'caption': caption_content, 'reply_to_post': reply_to_post
-    }
+    is_transform_mode_active = (
+        b_data['anime_mode'] or b_data['slavaukraine_mode'] or
+        b_data['zaputin_mode'] or b_data['suka_blyat_mode']
+    )
+    caption_to_process = (message.caption or "") if is_transform_mode_active else (getattr(message, 'caption_html_text', message.caption or ""))
 
-    messages_storage[current_post_num] = {
-        'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
-        'board_id': board_id, 'author_message_id': None
+    content = {
+        'type': 'audio',
+        'file_id': message.audio.file_id,
+        'caption': caption_to_process
     }
     
-    try:
-        content_for_author = await _apply_mode_transformations(content, board_id)
-        
-        results = await send_message_to_users(
-            bot_instance=message.bot,
-            recipients={user_id},
-            content=content_for_author,
-            reply_info=reply_info
-        )
-        if results and results[0] and results[0][1]:
-            sent_to_author = results[0][1]
-            messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
-            for m in messages_to_save:
-                messages_storage[current_post_num]['author_message_id'] = m.message_id
-                post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
-                message_to_post[(user_id, m.message_id)] = current_post_num
-        
-        if not is_shadow_muted:
-            if recipients and user_id in b_data['users']['active']:
-                await message_queues[board_id].put({
-                    'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                    'reply_info': reply_info if reply_info else None, 'board_id': board_id
-                })
-            
-    except TelegramForbiddenError:
-        b_data['users']['active'].discard(user_id)
-        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из handle_audio).")
-    except Exception as e:
-        print(f"❌ Критическая ошибка постановки в очередь аудио-поста. Пост #{current_post_num} удален. Ошибка: {e}")
-        messages_storage.pop(current_post_num, None)
+    if message.caption:
+        async with storage_lock:
+            last_messages.append(message.caption)
+
+    # --- Блок 3: Вызов унифицированного обработчика ---
+    await process_new_post(
+        bot_instance=message.bot,
+        board_id=board_id,
+        user_id=user_id,
+        content=content,
+        reply_to_post=reply_to_post,
+        is_shadow_muted=is_shadow_muted
+    )
         
 @dp.message(F.voice)
 async def handle_voice(message: Message):
@@ -4103,89 +5652,50 @@ async def handle_voice(message: Message):
         
     b_data = board_data[board_id]
 
-    is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
-                       b_data['shadow_mutes'][user_id] > datetime.now(UTC))
-
-    if user_id in b_data['users']['banned']:
-        await message.delete()
-        return
-
-    if b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC):
+    # --- Блок 1: Первичные проверки ---
+    if user_id in b_data['users']['banned'] or (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
         await message.delete()
         return
 
     b_data['last_activity'][user_id] = datetime.now(UTC)
 
-    spam_check = await check_spam(user_id, message, board_id)
-    if not spam_check:
+    if not await check_spam(user_id, message, board_id):
         try:
             await message.delete()
+            await apply_penalty(message.bot, user_id, 'animation', board_id)
         except TelegramBadRequest: pass
-        await apply_penalty(message.bot, user_id, 'animation', board_id)
         return
-
-    header, current_post_num = await format_header(board_id)
-    reply_to_post, reply_info = None, {}
-
-    if message.reply_to_message:
-        lookup_key = (user_id, message.reply_to_message.message_id)
-        reply_to_post = message_to_post.get(lookup_key)
         
-        if reply_to_post and reply_to_post in post_to_messages:
-            reply_info = post_to_messages[reply_to_post]
-        else:
-            reply_to_post = None
+    await message.delete()
+    
+    # --- Блок 2: Подготовка данных ---
+    is_shadow_muted = (user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC))
 
-    try:
-        await message.delete()
-    except TelegramBadRequest: pass
+    reply_to_post = None
+    if message.reply_to_message:
+        async with storage_lock:
+            lookup_key = (user_id, message.reply_to_message.message_id)
+            reply_to_post = message_to_post.get(lookup_key)
 
     content = {
-        'type': 'voice', 'header': header, 'file_id': message.voice.file_id,
-        'reply_to_post': reply_to_post
+        'type': 'voice',
+        'file_id': message.voice.file_id
     }
 
-    messages_storage[current_post_num] = {
-        'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
-        'board_id': board_id, 'author_message_id': None
-    }
-
-    try:
-        results = await send_message_to_users(
-            bot_instance=message.bot,
-            recipients={user_id},
-            content=content,
-            reply_info=reply_info
-        )
-        if results and results[0] and results[0][1]:
-            sent_to_author = results[0][1]
-            messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
-            for m in messages_to_save:
-                messages_storage[current_post_num]['author_message_id'] = m.message_id
-                post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
-                message_to_post[(user_id, m.message_id)] = current_post_num
-        
-        if not is_shadow_muted:
-            recipients = b_data['users']['active'] - {user_id}
-            if recipients and user_id in b_data['users']['active']:
-                await message_queues[board_id].put({
-                    'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                    'reply_info': reply_info, 'board_id': board_id
-                })
-
-    except TelegramForbiddenError:
-        b_data['users']['active'].discard(user_id)
-        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (из handle_voice).")
-    except Exception as e:
-        print(f"❌ Критическая ошибка постановки в очередь голосового поста. Пост #{current_post_num} удален. Ошибка: {e}")
-        messages_storage.pop(current_post_num, None)
+    # --- Блок 3: Вызов унифицированного обработчика ---
+    await process_new_post(
+        bot_instance=message.bot,
+        board_id=board_id,
+        user_id=user_id,
+        content=content,
+        reply_to_post=reply_to_post,
+        is_shadow_muted=is_shadow_muted
+    )
         
 @dp.message(F.media_group_id)
 async def handle_media_group_init(message: Message):
     media_group_id = message.media_group_id
-    # Ранний выход для уже обработанных групп
     if not media_group_id or media_group_id in sent_media_groups:
-        # НЕ УДАЛЯЕМ СООБЩЕНИЕ, ЧТОБЫ ИЗБЕЖАТЬ FLOOD-ОШИБОК
         return
 
     user_id = message.from_user.id
@@ -4194,15 +5704,11 @@ async def handle_media_group_init(message: Message):
 
     b_data = board_data[board_id]
 
-    # Быстрый выход для забаненных или замученных
     if user_id in b_data['users']['banned'] or \
        (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
-        # НЕ УДАЛЯЕМ СООБЩЕНИЕ
         return
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     b_data['last_activity'][user_id] = datetime.now(UTC)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     group = current_media_groups.get(media_group_id)
     is_leader = False
@@ -4213,19 +5719,11 @@ async def handle_media_group_init(message: Message):
             is_leader = True
     
     if is_leader:
-        # Симулируем текстовое сообщение для спам-проверки
         fake_text_message = types.Message(
-            message_id=message.message_id,
-            date=message.date,
-            chat=message.chat,
-            from_user=message.from_user,
-            content_type='text',
-            text=f"media_group_{media_group_id}"
+            message_id=message.message_id, date=message.date, chat=message.chat,
+            from_user=message.from_user, content_type='text', text=f"media_group_{media_group_id}"
         )
-        
-        spam_check_passed = await check_spam(user_id, fake_text_message, board_id)
-        
-        if not spam_check_passed:
+        if not await check_spam(user_id, fake_text_message, board_id):
             current_media_groups.pop(media_group_id, None) 
             await apply_penalty(message.bot, user_id, 'text', board_id)
             return
@@ -4235,15 +5733,34 @@ async def handle_media_group_init(message: Message):
             lookup_key = (user_id, message.reply_to_message.message_id)
             reply_to_post = message_to_post.get(lookup_key)
 
-        header, post_num = await format_header(board_id)
-        # --- ИСПРАВЛЕНИЕ: Безопасный доступ к caption_html_text ---
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: ОПРЕДЕЛЕНИЕ ЛОКАЦИИ И ЗАГОЛОВКА ---
+        user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+        thread_id = None
+        
+        if board_id in THREAD_BOARDS and user_location != 'main':
+            thread_id = user_location
+            thread_info = b_data.get('threads_data', {}).get(thread_id)
+            if thread_info and not thread_info.get('is_archived'):
+                _, post_num = await format_header(board_id)
+                local_post_num = len(thread_info.get('posts', [])) + 1
+                # --- ИЗМЕНЕНИЕ ---
+                header = await format_thread_post_header(board_id, local_post_num, user_id, thread_info)
+                # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+            else: # Если тред не найден или закрыт, постим в общий чат
+                thread_id = None
+                header, post_num = await format_header(board_id)
+        else:
+            header, post_num = await format_header(board_id)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
         caption = message.caption_html_text if hasattr(message, 'caption_html_text') and message.caption_html_text else (message.caption or "")
         
         group.update({
             'board_id': board_id, 'post_num': post_num, 'header': header, 'author_id': user_id,
             'timestamp': datetime.now(UTC), 'media': [], 'caption': caption,
             'reply_to_post': reply_to_post, 'processed_messages': set(),
-            'source_message_ids': set()
+            'source_message_ids': set(),
+            'thread_id': thread_id # Сохраняем thread_id (или None) в данных группы
         })
         group.pop('is_initializing', None)
     else:
@@ -4325,6 +5842,13 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
 
     sent_media_groups.append(media_group_id)
 
+    user_id = group['author_id']
+    board_id = group['board_id']
+    b_data = board_data[board_id]
+    
+    is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
+                       b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+    
     all_media = group.get('media', [])
     CHUNK_SIZE = 10
     media_chunks = [all_media[i:i + CHUNK_SIZE] for i in range(0, len(all_media), CHUNK_SIZE)]
@@ -4332,79 +5856,29 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
     for i, chunk in enumerate(media_chunks):
         if not chunk: continue
 
-        user_id = group['author_id']
-        board_id = group['board_id']
-        b_data = board_data[board_id]
-        
+        # Для первого чанка используем данные из группы, для последующих - генерируем заново
         if i == 0:
-            post_num = group['post_num']
-            header = group['header']
-            caption = group.get('caption')
             reply_to_post = group.get('reply_to_post')
+            caption = group.get('caption')
         else:
-            header, post_num = await format_header(board_id)
-            caption = None
             reply_to_post = None
+            caption = None
 
         content = {
-            'type': 'media_group', 'header': header, 'media': chunk,
-            'caption': caption, 'reply_to_post': reply_to_post
+            'type': 'media_group',
+            'media': chunk,
+            'caption': caption
         }
-
-        messages_storage[post_num] = {
-            'author_id': user_id, 'timestamp': group['timestamp'], 'content': content,
-            'board_id': board_id
-        }
-
-        reply_info = {}
-        try:
-            builder = MediaGroupBuilder()
-            reply_to_message_id = None
-
-            content_for_author = await _apply_mode_transformations(content, board_id)
-            
-            formatted_body = await _format_message_body(content_for_author, user_id, post_num)
-            header_html = f"<i>{escape_html(header)}</i>"
-            
-            full_caption_text = ""
-            if i == 0:
-                full_caption_text = f"{header_html}\n\n{formatted_body}" if formatted_body else header_html
-            else:
-                full_caption_text = header_html
-
-            if reply_to_post:
-                reply_info = post_to_messages.get(reply_to_post, {})
-                reply_to_message_id = reply_info.get(user_id)
-            
-            for idx, media in enumerate(chunk):
-                caption_for_media = full_caption_text if idx == 0 else None
-                builder.add(type=media['type'], media=media['file_id'], caption=caption_for_media, parse_mode="HTML" if caption_for_media else None)
-            
-            if builder.build():
-                sent_messages = await bot_instance.send_media_group(
-                    chat_id=user_id, media=builder.build(), reply_to_message_id=reply_to_message_id
-                )
-                if sent_messages:
-                    messages_storage[post_num]['author_message_id'] = sent_messages[0].message_id
-                    post_to_messages.setdefault(post_num, {})[user_id] = sent_messages[0].message_id
-                    for msg in sent_messages: message_to_post[(user_id, msg.message_id)] = post_num
         
-        except TelegramForbiddenError:
-            b_data['users']['active'].discard(user_id)
-            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (media_group).")
-        except Exception as e:
-            print(f"⚠️ Ошибка отправки медиа-альбома #{post_num} автору {user_id}: {e}")
-        
-        recipients = b_data['users']['active'] - {user_id}
-        if recipients and user_id in b_data['users']['active']:
-            try:
-                await message_queues[board_id].put({
-                    'recipients': recipients, 'content': content, 'post_num': post_num,
-                    'reply_info': reply_info, 'board_id': board_id
-                })
-            except Exception as e:
-                print(f"❌ Критическая ошибка постановки в очередь медиагруппы #{post_num}: {e}")
-                messages_storage.pop(post_num, None)
+        # Вызываем унифицированный обработчик, который сам разберется с тредом/доской
+        await process_new_post(
+            bot_instance=bot_instance,
+            board_id=board_id,
+            user_id=user_id,
+            content=content,
+            reply_to_post=reply_to_post,
+            is_shadow_muted=is_shadow_muted
+        )
         
         if len(media_chunks) > 1:
             await asyncio.sleep(1)
@@ -4443,38 +5917,40 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
         # 1. Получаем ключевые ID и данные
         user_id = reaction.user.id
         chat_id = reaction.chat.id
-        message_id = reaction.message_id
+        message_id = reaction.message.id
         board_id = get_board_id(reaction)
         if not board_id: return
 
-        # 2. Находим пост и его автора
-        post_num = message_to_post.get((chat_id, message_id))
-        if not post_num or post_num not in messages_storage:
-            return
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для атомарного обновления ---
+        async with storage_lock:
+            # 2. Находим пост и его автора
+            post_num = message_to_post.get((chat_id, message_id))
+            if not post_num or post_num not in messages_storage:
+                return
 
-        post_data = messages_storage[post_num]
-        author_id = post_data.get('author_id')
+            post_data = messages_storage[post_num]
+            author_id = post_data.get('author_id')
 
-        # 3. Игнорируем реакции на собственные сообщения
-        if author_id == user_id:
-            return
+            # 3. Игнорируем реакции на собственные сообщения
+            if author_id == user_id:
+                return
 
-        # 4. Обновляем состояние реакций в памяти
-        if 'reactions' not in post_data or 'users' not in post_data.get('reactions', {}):
-            post_data['reactions'] = {'users': {}}
+            # 4. Обновляем состояние реакций в памяти
+            if 'reactions' not in post_data or 'users' not in post_data.get('reactions', {}):
+                post_data['reactions'] = {'users': {}}
+            
+            reactions_storage = post_data['reactions']['users']
+            old_emojis_from_user = set(reactions_storage.get(user_id, []))
+
+            new_emojis = [r.emoji for r in reaction.new_reaction if r.type == 'emoji']
+            if not new_emojis:
+                if user_id in reactions_storage: del reactions_storage[user_id]
+                else: return
+            else:
+                reactions_storage[user_id] = new_emojis[:2]
+        # --- КОНЕЦ ИЗМЕНЕНИЙ: Блокировка для атомарного обновления ---
         
-        reactions_storage = post_data['reactions']['users']
-        old_emojis_from_user = set(reactions_storage.get(user_id, []))
-
-        new_emojis = [r.emoji for r in reaction.new_reaction if r.type == 'emoji']
-        if not new_emojis:
-            if user_id in reactions_storage: del reactions_storage[user_id]
-            else: return
-        else:
-            reactions_storage[user_id] = new_emojis[:2]
-        
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Подготовка данных для отложенной задачи ---
-        
+        # --- Логика уведомлений и отложенного редактирования остается снаружи ---
         # 5. Готовим данные для уведомления (но пока не отправляем)
         author_id_for_notify = None
         text_for_notify = None
@@ -4516,7 +5992,6 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
                 )
             )
             pending_edit_tasks[post_num] = new_task
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                 
     except Exception as e:
         import traceback
@@ -4525,18 +6000,22 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
 @dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
-    
     board_id = get_board_id(message)
-    if not board_id: return 
-    
+    if not board_id: return
+
     b_data = board_data[board_id]
 
     try:
+        # --- Блок 1: Первичные проверки пользователя ---
+        if user_id in b_data['users']['banned']:
+            await message.delete()
+            return
+            
         mute_until = b_data['mutes'].get(user_id)
         if mute_until and mute_until > datetime.now(UTC):
-            left = mute_until - datetime.now(UTC)
             await message.delete()
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            # Уведомление о муте отправляется здесь, т.к. process_new_post не будет вызван
+            left = mute_until - datetime.now(UTC)
             if board_id == 'int':
                 time_left_str = f"{int(left.total_seconds() // 60)}m {int(left.total_seconds() % 60)}s"
                 phrases = [
@@ -4553,131 +6032,170 @@ async def handle_message(message: Message):
                     "🤐 Помолчи, уебан. Тебе еще сидеть в муте {time_left} на доске {board}."
                 ]
                 notification_text = random.choice(phrases).format(board=BOARD_CONFIG[board_id]['name'], time_left=time_left_str)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             await message.bot.send_message(user_id, notification_text, parse_mode="HTML")
             return
         elif mute_until:
-             b_data['mutes'].pop(user_id, None)
-
-        if user_id in b_data['users']['banned']:
-            await message.delete()
-            return
+            b_data['mutes'].pop(user_id, None)
 
         if message.media_group_id or not (message.text or message.caption or message.content_type):
             return
-    except (TelegramBadRequest, TelegramForbiddenError):
-        return
-    except Exception as e:
-        print(f"Ошибка на этапе блочных проверок для user {user_id}: {e}")
-        return
 
-    is_shadow_muted = (user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+        b_data['last_activity'][user_id] = datetime.now(UTC)
+        if user_id not in b_data['users']['active']:
+            b_data['users']['active'].add(user_id)
+            print(f"✅ [{board_id}] Добавлен новый пользователь: ID {user_id}")
 
-    b_data['last_activity'][user_id] = datetime.now(UTC)
-
-    if user_id not in b_data['users']['active']:
-        b_data['users']['active'].add(user_id)
-        print(f"✅ [{board_id}] Добавлен новый пользователь: ID {user_id}")
-
-    if not await check_spam(user_id, message, board_id):
-        try:
+        if not await check_spam(user_id, message, board_id):
             await message.delete()
             msg_type = message.content_type
             if msg_type in ['photo', 'video', 'document'] and message.caption:
                 msg_type = 'text'
             await apply_penalty(message.bot, user_id, msg_type, board_id)
-        except TelegramBadRequest: pass
+            return
+            
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return
+    except Exception as e:
+        print(f"Ошибка на этапе первичных проверок для user {user_id}: {e}")
         return
 
-    try:
-        reply_to_post, reply_info = None, {}
-        if message.reply_to_message:
+    # --- Блок 2: Подготовка данных для process_new_post ---
+    await message.delete()
+    
+    is_shadow_muted = (user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+
+    reply_to_post = None
+    if message.reply_to_message:
+        async with storage_lock: # Безопасно читаем message_to_post
             lookup_key = (user_id, message.reply_to_message.message_id)
             reply_to_post = message_to_post.get(lookup_key)
-            if reply_to_post and reply_to_post in post_to_messages:
-                reply_info = post_to_messages[reply_to_post]
-            else:
-                reply_to_post = None
+    
+    content = {'type': message.content_type}
+    text_for_corpus = None
+    is_transform_mode_active = (
+        b_data['anime_mode'] or b_data['slavaukraine_mode'] or
+        b_data['zaputin_mode'] or b_data['suka_blyat_mode']
+    )
+    
+    if message.content_type == 'text':
+        text_for_corpus = message.text
+        text_to_process = message.text if is_transform_mode_active else message.html_text
+        content.update({'text': text_to_process})
+    
+    elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio', 'voice']:
+        text_for_corpus = message.caption
+        file_id_obj = getattr(message, message.content_type, [])
+        if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
+        caption_to_process = (message.caption or "") if is_transform_mode_active else (getattr(message, 'caption_html_text', message.caption or ""))
+        content.update({'file_id': file_id_obj.file_id, 'caption': caption_to_process})
+    
+    elif message.content_type in ['sticker', 'video_note']:
+        file_id_obj = getattr(message, message.content_type)
+        content.update({'file_id': file_id_obj.file_id})
+        if message.content_type == 'sticker' and message.sticker and message.sticker.emoji:
+             text_for_corpus = message.sticker.emoji
+    
+    if text_for_corpus:
+        async with storage_lock:
+            last_messages.append(text_for_corpus)
 
-        header, current_post_num = await format_header(board_id)
-        await message.delete()
+    # --- Блок 3: Вызов унифицированного обработчика ---
+    await process_new_post(
+        bot_instance=message.bot,
+        board_id=board_id,
+        user_id=user_id,
+        content=content,
+        reply_to_post=reply_to_post,
+        is_shadow_muted=is_shadow_muted
+    )
+            
+async def thread_notifier():
+    """
+    Фоновая задача для уведомления пользователей в общем чате об активности в тредах.
+    """
+    global last_checked_post_counter_for_notify
+    await asyncio.sleep(45)
+    last_checked_post_counter_for_notify = state.get('post_counter', 0)
 
-        content = {'type': message.content_type, 'header': header, 'reply_to_post': reply_to_post}
-        text_for_corpus = None
+    while True:
+        await asyncio.sleep(300) # Проверка каждые 5 минут
 
-        is_transform_mode_active = (
-            b_data['anime_mode'] or b_data['slavaukraine_mode'] or
-            b_data['zaputin_mode'] or b_data['suka_blyat_mode']
-        )
-        
-        if message.content_type == 'text':
-            text_for_corpus = message.text
-            text_to_process = message.text if is_transform_mode_active else message.html_text
-            content.update({'text': text_to_process})
-        
-        elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio']:
-            text_for_corpus = message.caption
-            file_id_obj = getattr(message, message.content_type, [])
-            if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
-            caption_to_process = message.caption or "" if is_transform_mode_active else getattr(message, 'caption_html_text', message.caption or "")
-            content.update({'file_id': file_id_obj.file_id, 'caption': caption_to_process})
-        
-        elif message.content_type in ['sticker', 'voice', 'video_note']:
-            file_id_obj = getattr(message, message.content_type)
-            content.update({'file_id': file_id_obj.file_id})
-            if message.content_type == 'sticker' and message.sticker and message.sticker.emoji:
-                 text_for_corpus = message.sticker.emoji
-        
-        if text_for_corpus: last_messages.append(text_for_corpus)
+        # --- Блок 1: Уведомления о высокой активности за период ---
+        current_post_counter = state.get('post_counter', 0)
+        if current_post_counter > last_checked_post_counter_for_notify:
+            new_thread_posts_count = defaultdict(lambda: defaultdict(int))
+            for p_num in range(last_checked_post_counter_for_notify + 1, current_post_counter + 1):
+                post_data = messages_storage.get(p_num)
+                if not post_data: continue
+                b_id = post_data.get('board_id')
+                if b_id in THREAD_BOARDS:
+                    t_id = post_data.get('thread_id')
+                    if t_id: new_thread_posts_count[b_id][t_id] += 1
+            
+            last_checked_post_counter_for_notify = current_post_counter
 
-        messages_storage[current_post_num] = {
-            'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
-            'author_message_id': None, 'board_id': board_id
-        }
+            for board_id, threads in new_thread_posts_count.items():
+                b_data = board_data[board_id]
+                lang = 'en' if board_id == 'int' else 'ru'
+                threads_data = b_data.get('threads_data', {})
+                
+                recipients_in_main = {
+                    uid for uid, u_state in b_data.get('user_state', {}).items() 
+                    if u_state.get('location', 'main') == 'main'
+                }
+                if not recipients_in_main: continue
 
-        try:
-            content_for_author = await _apply_mode_transformations(content, board_id)
-            results = await send_message_to_users(
-                bot_instance=message.bot, recipients={user_id},
-                content=content_for_author, reply_info=reply_info
-            )
-            if results and results[0] and results[0][1]:
-                sent_to_author = results[0][1]
-                messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
-                for m in messages_to_save:
-                    messages_storage[current_post_num]['author_message_id'] = m.message_id
-                    post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
-                    message_to_post[(user_id, m.message_id)] = current_post_num
-        except TelegramForbiddenError:
-            b_data['users']['active'].discard(user_id)
-            print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из handle_message).")
-        except Exception as e:
-            print(f"Ошибка при отправке сообщения автору: {e}")
-            messages_storage.pop(current_post_num, None)
-            return
+                for thread_id, count in threads.items():
+                    if count >= THREAD_NOTIFY_THRESHOLD:
+                        thread_info = threads_data.get(thread_id)
+                        if not thread_info or thread_info.get('is_archived'): continue
+                        
+                        title = thread_info.get('title', '...')
+                        notification_text = random.choice(thread_messages[lang]['thread_activity_notification']).format(title=title, count=count)
+                        
+                        header, pnum = await format_header(board_id)
+                        content = {'type': 'text', 'header': header, 'text': notification_text, 'is_system_message': True}
+                        messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
+                        
+                        await message_queues[board_id].put({
+                            'recipients': recipients_in_main, 'content': content, 'post_num': pnum, 'board_id': board_id
+                        })
 
-        if not is_shadow_muted:
-            recipients = b_data['users']['active'] - {user_id}
-            if recipients:
-                await message_queues[board_id].put({
-                    'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                    'reply_info': reply_info if reply_info else None, 'board_id': board_id
-                })
+        # --- Блок 2: Уведомления о приближении к бамп-лимиту ---
+        for board_id in THREAD_BOARDS:
+            b_data = board_data[board_id]
+            lang = 'en' if board_id == 'int' else 'ru'
+            threads_data = b_data.get('threads_data', {})
+            
+            recipients_in_main = {
+                uid for uid, u_state in b_data.get('user_state', {}).items() 
+                if u_state.get('location', 'main') == 'main'
+            }
+            if not recipients_in_main: continue
 
-    except TelegramBadRequest:
-        pass
-    except Exception as e:
-        import traceback
-        print(f"Критическая ошибка в основной обработке handle_message для user {user_id}: {e}\n{traceback.format_exc()}")
-        if 'current_post_num' in locals():
-            messages_storage.pop(current_post_num, None)
-        
+            for thread_id, thread_info in threads_data.items():
+                if thread_info.get('is_archived') or thread_info.get('bump_limit_notified'):
+                    continue
+
+                current_posts = len(thread_info.get('posts', []))
+                remaining = MAX_POSTS_PER_THREAD - current_posts
+
+                if 0 < remaining <= THREAD_BUMP_LIMIT_WARNING_THRESHOLD:
+                    thread_info['bump_limit_notified'] = True # Ставим флаг, чтобы не спамить
+                    title = thread_info.get('title', '...')
+                    notification_text = random.choice(thread_messages[lang]['thread_reaching_bump_limit']).format(title=title, remaining=remaining)
+
+                    header, pnum = await format_header(board_id)
+                    content = {'type': 'text', 'header': header, 'text': notification_text, 'is_system_message': True}
+                    messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
+                    
+                    await message_queues[board_id].put({
+                        'recipients': recipients_in_main, 'content': content, 'post_num': pnum, 'board_id': board_id
+                    })
+                    
 async def start_background_tasks(bots: dict[str, Bot]):
     """Поднимаем все фоновые корутины ОДИН раз за весь runtime"""
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Локальный импорт для разрыва цикла зависимостей, который вызывает NameError
     from conan import conan_roaster
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     tasks = [
         asyncio.create_task(auto_backup()),
@@ -4689,6 +6207,10 @@ async def start_background_tasks(bots: dict[str, Bot]):
         asyncio.create_task(motivation_broadcaster()),
         asyncio.create_task(auto_memory_cleaner()),
         asyncio.create_task(board_statistics_broadcaster()),
+        asyncio.create_task(thread_lifecycle_manager(bots)),
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        asyncio.create_task(thread_notifier()),
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
     return tasks
@@ -4703,7 +6225,9 @@ async def supervisor():
         f.write(str(os.getpid()))
     
     session = None
-    bots = {}
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем глобальную переменную ---
+    global GLOBAL_BOTS
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     try:
         global is_shutting_down
         loop = asyncio.get_running_loop()
@@ -4713,18 +6237,17 @@ async def supervisor():
 
         from aiogram.client.session.aiohttp import AiohttpSession
 
-        # 1. <--- ИСПРАВЛЕНИЕ TypeError: unsupported operand type(s) for +: 'ClientTimeout' and 'int'
-        # Передаем таймаут как число, а не объект ClientTimeout.
         session = AiohttpSession(
             timeout=60
         )
         
         default_properties = DefaultBotProperties(parse_mode="HTML")
         
+        bots_temp = {}
         for board_id, config in BOARD_CONFIG.items():
             token = config.get("token")
             if token:
-                bots[board_id] = Bot(
+                bots_temp[board_id] = Bot(
                     token=token, 
                     default=default_properties, 
                     session=session
@@ -4732,31 +6255,34 @@ async def supervisor():
             else:
                 print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
         
-        if not bots:
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Присваиваем словарь глобальной переменной ---
+        GLOBAL_BOTS = bots_temp
+        if not GLOBAL_BOTS:
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             print("❌ Не найдено ни одного токена бота. Завершение работы.")
             if session:
                 await session.close()
             return
 
-        print(f"✅ Инициализировано {len(bots)} ботов: {list(bots.keys())}")
+        print(f"✅ Инициализировано {len(GLOBAL_BOTS)} ботов: {list(GLOBAL_BOTS.keys())}")
         
-        bots_list = list(bots.values())
+        bots_list = list(GLOBAL_BOTS.values())
         if hasattr(signal, 'SIGTERM'):
             loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown(bots_list)))
         if hasattr(signal, 'SIGINT'):
             loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown(bots_list)))
         
-        await setup_pinned_messages(bots)
+        await setup_pinned_messages(GLOBAL_BOTS)
         healthcheck_site = await start_healthcheck()
-        background_tasks = await start_background_tasks(bots)
+        background_tasks = await start_background_tasks(GLOBAL_BOTS)
 
         print("⏳ Даем 7 секунд на инициализацию перед обработкой сообщений...")
         await asyncio.sleep(7)
 
         print("🚀 Запускаем polling для всех ботов...")
         await dp.start_polling(
-            *bots.values(), 
-            skip_updates=False,  # Обрабатывать накопившиеся сообщения
+            *GLOBAL_BOTS.values(), 
+            skip_updates=False,
             allowed_updates=dp.resolve_used_update_types(),
             reset_webhook=True,
             timeout=60
@@ -4767,11 +6293,8 @@ async def supervisor():
         print(f"🔥 Critical error in supervisor: {e}\n{traceback.format_exc()}")
     finally:
         if not is_shutting_down:
-             await graceful_shutdown(list(bots.values()))
+             await graceful_shutdown(list(GLOBAL_BOTS.values()))
         
-        # 2. <--- ИСПРАВЛЕНИЕ AttributeError: 'AiohttpSession' object has no attribute 'closed'
-        # Убрана проверка session.closed, так как у объекта сессии нет такого атрибута.
-        # Метод close() можно безопасно вызывать, даже если сессия уже закрыта.
         if session:
             print("Закрытие общей HTTP сессии...")
             await session.close()
