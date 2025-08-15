@@ -4341,6 +4341,210 @@ async def cmd_leave(message: types.Message):
     await message.delete()
 
 @dp.message(Command("mute"))
+async def cmd_mute(message: Message):
+    board_id = get_board_id(message)
+    if not is_admin(message.from_user.id, board_id):
+        # Если не админ, передаем управление следующему обработчику (OP-команде)
+        # Для этого нужно, чтобы aiogram продолжил поиск
+        # В данном случае, мы ничего не делаем, и aiogram пойдет дальше по списку
+        return
+
+    command_args = message.text.split()[1:]
+    if not command_args and not message.reply_to_message:
+        await message.answer("Использование: /mute <user_id> [время] или ответом на сообщение.")
+        await message.delete()
+        return
+
+    target_id = None
+    duration_str = "24h"
+
+    if message.reply_to_message:
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
+        if command_args:
+            duration_str = command_args[0]
+    elif command_args:
+        try:
+            target_id = int(command_args[0])
+            if len(command_args) > 1:
+                duration_str = command_args[1]
+        except ValueError:
+            await message.answer("❌ Неверный ID пользователя")
+            await message.delete()
+            return
+            
+    if not target_id:
+        await message.answer("❌ Не удалось определить пользователя")
+        await message.delete()
+        return
+
+    try:
+        duration_str = duration_str.lower().replace(" ", "")
+        if duration_str.endswith("m"): mute_seconds, duration_text = int(duration_str[:-1]) * 60, f"{int(duration_str[:-1])} минут"
+        elif duration_str.endswith("h"): mute_seconds, duration_text = int(duration_str[:-1]) * 3600, f"{int(duration_str[:-1])} часов"
+        elif duration_str.endswith("d"): mute_seconds, duration_text = int(duration_str[:-1]) * 86400, f"{int(duration_str[:-1])} дней"
+        else: mute_seconds, duration_text = int(duration_str) * 60, f"{int(duration_str)} минут"
+        mute_seconds = min(mute_seconds, 2592000)
+    except (ValueError, AttributeError):
+        await message.answer("❌ Неверный формат времени (Примеры: 30m, 2h, 1d)")
+        await message.delete()
+        return
+
+    deleted_count = await delete_user_posts(message.bot, target_id, 5, board_id)
+    
+    b_data = board_data[board_id]
+    b_data['mutes'][target_id] = datetime.now(UTC) + timedelta(seconds=mute_seconds)
+
+    board_name = BOARD_CONFIG[board_id]['name']
+    await message.answer(
+        f"🔇 Хуила {target_id} замучен на {duration_text} на доске {board_name}\n"
+        f"Удалено сообщений за последние 5 минут: {deleted_count}",
+        parse_mode="HTML"
+    )
+
+    await send_moderation_notice(target_id, "mute", board_id, duration=duration_text, deleted_posts=deleted_count)
+
+    try:
+        lang = 'en' if board_id == 'int' else 'ru'
+        
+        if lang == 'en':
+            phrases = [
+                "🔇 You have been muted on the {board} board for {duration}.\nDeleted your posts in the last 5 minutes: {deleted}.",
+                "🗣️ Your right to speak has been temporarily revoked on {board} for {duration}. Think about your behavior.\nDeleted posts: {deleted}.",
+                "🤐 Shut up for {duration} on the {board} board.\nDeleted posts: {deleted}."
+            ]
+        else:
+            phrases = [
+                "🔇 Пидор ебаный, тебя замутили на доске {board} на {duration}.\nУдалено твоих сообщений за последние 5 минут: {deleted}.",
+                "🗣️ Твой рот был запечатан админской печатью на {duration} на доске {board}.\nТвои высеры ({deleted} шт.) удалены.",
+                "🤐 Помолчи, подумой. Ты в муте на {duration} на доске {board}.\nУдалено постов: {deleted}."
+                "🔇 ТЫ - ГОВНО. ОТПРАВЛЯЙСЯ В МУТ НА {time}.",
+                "🤐 ЗАВАЛИ ХАВАЛКУ! ТВОЙ РОТ ЗАКЛЕЕН СКОТЧЕМ НА {time}",
+            ]
+        
+        notification_text = random.choice(phrases).format(board=board_name, duration=duration_text, deleted=deleted_count)
+        await message.bot.send_message(target_id, notification_text, parse_mode="HTML")
+    except:
+        pass
+    await message.delete()
+
+@dp.message(Command("unmute"))
+async def cmd_unmute(message: types.Message):
+    board_id = get_board_id(message)
+    if not is_admin(message.from_user.id, board_id):
+        return
+
+    target_id = None
+    if message.reply_to_message:
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
+    else:
+        parts = message.text.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            target_id = int(parts[1])
+
+    if not target_id:
+        await message.answer("Нужно reply или /unmute <id>")
+        return
+
+    b_data = board_data[board_id]
+    board_name = BOARD_CONFIG[board_id]['name']
+    if b_data['mutes'].pop(target_id, None):
+        await message.answer(f"🔈 Пользователь {target_id} размучен на доске {board_name}.")
+        try:
+            lang = 'en' if board_id == 'int' else 'ru'
+            if lang == 'en':
+                phrases = [
+                    "🔊 You have been unmuted on the {board} board. Try to behave.",
+                    "✅ You can speak again on {board}. Don't make us regret this.",
+                    "🗣️ Your voice has been returned on the {board} board."
+                ]
+            else:
+                phrases = [
+                    "Тебя размутили на доске {board}.",
+                    "✅ Можешь снова открывать свою пасть на доске {board}. Но впредь будь осторожен.",
+                    "🗣️ Админ смилостивился. Ты размучен на доске {board}."
+                ]
+            notification_text = random.choice(phrases).format(board=board_name)
+            await message.bot.send_message(target_id, notification_text)
+        except:
+            pass
+    else:
+        await message.answer(f"Пользователь {target_id} не был в муте на этой доске.")
+    await message.delete()
+
+@dp.message(Command("shadowmute"))
+async def cmd_shadowmute(message: Message):
+    board_id = get_board_id(message)
+    if not is_admin(message.from_user.id, board_id):
+        return
+
+    args = message.text.split()[1:]
+    target_id = None
+    duration_str = "24h"
+
+    if message.reply_to_message:
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
+        if args:
+            duration_str = args[0]
+    elif args:
+        try:
+            target_id = int(args[0])
+            if len(args) > 1:
+                duration_str = args[1]
+        except ValueError:
+            pass
+
+    if not target_id:
+        await message.answer("Использование: /shadowmute <user_id> [время] или ответ на сообщение.")
+        return
+
+    try:
+        duration_str = duration_str.lower().replace(" ", "")
+        if duration_str.endswith("m"): total_seconds, time_str = int(duration_str[:-1]) * 60, f"{int(duration_str[:-1])} мин"
+        elif duration_str.endswith("h"): total_seconds, time_str = int(duration_str[:-1]) * 3600, f"{int(duration_str[:-1])} час"
+        elif duration_str.endswith("d"): total_seconds, time_str = int(duration_str[:-1]) * 86400, f"{int(duration_str[:-1])} дней"
+        else: total_seconds, time_str = int(duration_str) * 60, f"{int(duration_str)} мин"
+        
+        total_seconds = min(total_seconds, 2592000)
+        b_data = board_data[board_id]
+        b_data['shadow_mutes'][target_id] = datetime.now(UTC) + timedelta(seconds=total_seconds)
+
+        board_name = BOARD_CONFIG[board_id]['name']
+        await message.answer(f"👻 Тихо замучен пользователь {target_id} на {time_str} на доске {board_name}.")
+    except ValueError:
+        await message.answer("❌ Неверный формат времени. Примеры: 30m, 2h, 1d")
+    await message.delete()
+
+
+@dp.message(Command("unshadowmute"))
+async def cmd_unshadowmute(message: Message):
+    board_id = get_board_id(message)
+    if not is_admin(message.from_user.id, board_id):
+        return
+
+    target_id = None
+    parts = message.text.split()
+    if len(parts) >= 2 and parts[1].isdigit():
+        target_id = int(parts[1])
+    elif message.reply_to_message:
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
+
+    if not target_id:
+        await message.answer("Использование: /unshadowmute <user_id> или ответ на сообщение.")
+        return
+    
+    b_data = board_data[board_id]
+    board_name = BOARD_CONFIG[board_id]['name']
+    if b_data['shadow_mutes'].pop(target_id, None):
+        await message.answer(f"👻 Пользователь {target_id} тихо размучен на доске {board_name}.")
+    else:
+        await message.answer(f"ℹ️ Пользователь {target_id} не в shadow-муте на этой доске.")
+    await message.delete()
+
+@dp.message(Command("mute"))
 async def cmd_op_mute(message: types.Message):
     """Обрабатывает локальный мут пользователя ОПом в треде."""
     board_id = get_board_id(message)
@@ -5273,213 +5477,7 @@ async def cmd_ban(message: types.Message):
         pass
     await message.delete()
 
-# --- НАЧАЛО ИЗМЕНЕНИЙ: ИЗМЕНЕН ПОРЯДОК ОБРАБОТЧИКОВ ---
 
-@dp.message(Command("mute"))
-async def cmd_mute(message: Message):
-    board_id = get_board_id(message)
-    if not is_admin(message.from_user.id, board_id):
-        # Если не админ, передаем управление следующему обработчику (OP-команде)
-        # Для этого нужно, чтобы aiogram продолжил поиск
-        # В данном случае, мы ничего не делаем, и aiogram пойдет дальше по списку
-        return
-
-    command_args = message.text.split()[1:]
-    if not command_args and not message.reply_to_message:
-        await message.answer("Использование: /mute <user_id> [время] или ответом на сообщение.")
-        await message.delete()
-        return
-
-    target_id = None
-    duration_str = "24h"
-
-    if message.reply_to_message:
-        async with storage_lock:
-            target_id = get_author_id_by_reply(message)
-        if command_args:
-            duration_str = command_args[0]
-    elif command_args:
-        try:
-            target_id = int(command_args[0])
-            if len(command_args) > 1:
-                duration_str = command_args[1]
-        except ValueError:
-            await message.answer("❌ Неверный ID пользователя")
-            await message.delete()
-            return
-            
-    if not target_id:
-        await message.answer("❌ Не удалось определить пользователя")
-        await message.delete()
-        return
-
-    try:
-        duration_str = duration_str.lower().replace(" ", "")
-        if duration_str.endswith("m"): mute_seconds, duration_text = int(duration_str[:-1]) * 60, f"{int(duration_str[:-1])} минут"
-        elif duration_str.endswith("h"): mute_seconds, duration_text = int(duration_str[:-1]) * 3600, f"{int(duration_str[:-1])} часов"
-        elif duration_str.endswith("d"): mute_seconds, duration_text = int(duration_str[:-1]) * 86400, f"{int(duration_str[:-1])} дней"
-        else: mute_seconds, duration_text = int(duration_str) * 60, f"{int(duration_str)} минут"
-        mute_seconds = min(mute_seconds, 2592000)
-    except (ValueError, AttributeError):
-        await message.answer("❌ Неверный формат времени (Примеры: 30m, 2h, 1d)")
-        await message.delete()
-        return
-
-    deleted_count = await delete_user_posts(message.bot, target_id, 5, board_id)
-    
-    b_data = board_data[board_id]
-    b_data['mutes'][target_id] = datetime.now(UTC) + timedelta(seconds=mute_seconds)
-
-    board_name = BOARD_CONFIG[board_id]['name']
-    await message.answer(
-        f"🔇 Хуила {target_id} замучен на {duration_text} на доске {board_name}\n"
-        f"Удалено сообщений за последние 5 минут: {deleted_count}",
-        parse_mode="HTML"
-    )
-
-    await send_moderation_notice(target_id, "mute", board_id, duration=duration_text, deleted_posts=deleted_count)
-
-    try:
-        lang = 'en' if board_id == 'int' else 'ru'
-        
-        if lang == 'en':
-            phrases = [
-                "🔇 You have been muted on the {board} board for {duration}.\nDeleted your posts in the last 5 minutes: {deleted}.",
-                "🗣️ Your right to speak has been temporarily revoked on {board} for {duration}. Think about your behavior.\nDeleted posts: {deleted}.",
-                "🤐 Shut up for {duration} on the {board} board.\nDeleted posts: {deleted}."
-            ]
-        else:
-            phrases = [
-                "🔇 Пидор ебаный, тебя замутили на доске {board} на {duration}.\nУдалено твоих сообщений за последние 5 минут: {deleted}.",
-                "🗣️ Твой рот был запечатан админской печатью на {duration} на доске {board}.\nТвои высеры ({deleted} шт.) удалены.",
-                "🤐 Помолчи, подумой. Ты в муте на {duration} на доске {board}.\nУдалено постов: {deleted}."
-                "🔇 ТЫ - ГОВНО. ОТПРАВЛЯЙСЯ В МУТ НА {time}.",
-                "🤐 ЗАВАЛИ ХАВАЛКУ! ТВОЙ РОТ ЗАКЛЕЕН СКОТЧЕМ НА {time}",
-            ]
-        
-        notification_text = random.choice(phrases).format(board=board_name, duration=duration_text, deleted=deleted_count)
-        await message.bot.send_message(target_id, notification_text, parse_mode="HTML")
-    except:
-        pass
-    await message.delete()
-
-@dp.message(Command("unmute"))
-async def cmd_unmute(message: types.Message):
-    board_id = get_board_id(message)
-    if not is_admin(message.from_user.id, board_id):
-        return
-
-    target_id = None
-    if message.reply_to_message:
-        async with storage_lock:
-            target_id = get_author_id_by_reply(message)
-    else:
-        parts = message.text.split()
-        if len(parts) == 2 and parts[1].isdigit():
-            target_id = int(parts[1])
-
-    if not target_id:
-        await message.answer("Нужно reply или /unmute <id>")
-        return
-
-    b_data = board_data[board_id]
-    board_name = BOARD_CONFIG[board_id]['name']
-    if b_data['mutes'].pop(target_id, None):
-        await message.answer(f"🔈 Пользователь {target_id} размучен на доске {board_name}.")
-        try:
-            lang = 'en' if board_id == 'int' else 'ru'
-            if lang == 'en':
-                phrases = [
-                    "🔊 You have been unmuted on the {board} board. Try to behave.",
-                    "✅ You can speak again on {board}. Don't make us regret this.",
-                    "🗣️ Your voice has been returned on the {board} board."
-                ]
-            else:
-                phrases = [
-                    "Тебя размутили на доске {board}.",
-                    "✅ Можешь снова открывать свою пасть на доске {board}. Но впредь будь осторожен.",
-                    "🗣️ Админ смилостивился. Ты размучен на доске {board}."
-                ]
-            notification_text = random.choice(phrases).format(board=board_name)
-            await message.bot.send_message(target_id, notification_text)
-        except:
-            pass
-    else:
-        await message.answer(f"Пользователь {target_id} не был в муте на этой доске.")
-    await message.delete()
-
-@dp.message(Command("shadowmute"))
-async def cmd_shadowmute(message: Message):
-    board_id = get_board_id(message)
-    if not is_admin(message.from_user.id, board_id):
-        return
-
-    args = message.text.split()[1:]
-    target_id = None
-    duration_str = "24h"
-
-    if message.reply_to_message:
-        async with storage_lock:
-            target_id = get_author_id_by_reply(message)
-        if args:
-            duration_str = args[0]
-    elif args:
-        try:
-            target_id = int(args[0])
-            if len(args) > 1:
-                duration_str = args[1]
-        except ValueError:
-            pass
-
-    if not target_id:
-        await message.answer("Использование: /shadowmute <user_id> [время] или ответ на сообщение.")
-        return
-
-    try:
-        duration_str = duration_str.lower().replace(" ", "")
-        if duration_str.endswith("m"): total_seconds, time_str = int(duration_str[:-1]) * 60, f"{int(duration_str[:-1])} мин"
-        elif duration_str.endswith("h"): total_seconds, time_str = int(duration_str[:-1]) * 3600, f"{int(duration_str[:-1])} час"
-        elif duration_str.endswith("d"): total_seconds, time_str = int(duration_str[:-1]) * 86400, f"{int(duration_str[:-1])} дней"
-        else: total_seconds, time_str = int(duration_str) * 60, f"{int(duration_str)} мин"
-        
-        total_seconds = min(total_seconds, 2592000)
-        b_data = board_data[board_id]
-        b_data['shadow_mutes'][target_id] = datetime.now(UTC) + timedelta(seconds=total_seconds)
-
-        board_name = BOARD_CONFIG[board_id]['name']
-        await message.answer(f"👻 Тихо замучен пользователь {target_id} на {time_str} на доске {board_name}.")
-    except ValueError:
-        await message.answer("❌ Неверный формат времени. Примеры: 30m, 2h, 1d")
-    await message.delete()
-
-
-@dp.message(Command("unshadowmute"))
-async def cmd_unshadowmute(message: Message):
-    board_id = get_board_id(message)
-    if not is_admin(message.from_user.id, board_id):
-        return
-
-    target_id = None
-    parts = message.text.split()
-    if len(parts) >= 2 and parts[1].isdigit():
-        target_id = int(parts[1])
-    elif message.reply_to_message:
-        async with storage_lock:
-            target_id = get_author_id_by_reply(message)
-
-    if not target_id:
-        await message.answer("Использование: /unshadowmute <user_id> или ответ на сообщение.")
-        return
-    
-    b_data = board_data[board_id]
-    board_name = BOARD_CONFIG[board_id]['name']
-    if b_data['shadow_mutes'].pop(target_id, None):
-        await message.answer(f"👻 Пользователь {target_id} тихо размучен на доске {board_name}.")
-    else:
-        await message.answer(f"ℹ️ Пользователь {target_id} не в shadow-муте на этой доске.")
-    await message.delete()
-    
-# --- КОНЕЦ ИЗМЕНЕНИЙ ПОРЯДКА ---
 
 @dp.message(Command("wipe"))
 async def cmd_wipe(message: types.Message):
