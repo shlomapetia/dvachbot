@@ -2108,20 +2108,17 @@ async def process_new_post(
 ):
     """
     Унифицированная функция для обработки, сохранения и постановки в очередь нового поста.
-    Корректно обрабатывает постинг как на доску, так и в треды.
+    (ИСПРАВЛЕННАЯ ВЕРСИЯ БЕЗ DEADLOCK)
     """
     b_data = board_data[board_id]
     current_post_num = None
     
-    # --- ИСПРАВЛЕНИЕ: Блок try теперь охватывает всю функцию ---
     try:
+        # --- Блок 1: Определение контекста и генерация заголовка (без блокировки) ---
         user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
         thread_id = None
         recipients = set()
-        reply_info = post_to_messages.get(reply_to_post, {}) if reply_to_post else {}
         
-        # --- ВОССТАНОВЛЕННЫЙ БЛОК ---
-        # Блок 1: Определение контекста (тред или доска) и генерация заголовка
         if board_id in THREAD_BOARDS and user_location != 'main':
             thread_id = user_location
             thread_info = b_data.get('threads_data', {}).get(thread_id)
@@ -2146,83 +2143,65 @@ async def process_new_post(
                 thread_info['last_activity_at'] = time.time()
             
             recipients = thread_info.get('subscribers', set()) - {user_id}
-
         else:
             header_text, current_post_num = await format_header(board_id)
             recipients = b_data['users']['active'] - {user_id}
 
         numeral_level = check_post_numerals(current_post_num)
         if numeral_level:
-            asyncio.create_task(
-                post_special_num_to_channel(
-                    bots=GLOBAL_BOTS,
-                    board_id=board_id,
-                    post_num=current_post_num,
-                    level=numeral_level,
-                    content=content,
-                    author_id=user_id
-                )
-            )
+            asyncio.create_task(post_special_num_to_channel(
+                bots=GLOBAL_BOTS, board_id=board_id, post_num=current_post_num,
+                level=numeral_level, content=content, author_id=user_id
+            ))
 
         content['header'] = header_text
         content['reply_to_post'] = reply_to_post
-        # --- КОНЕЦ ВОССТАНОВЛЕННОГО БЛОКА ---
         
-        # Блок 2: Сохранение состояния и отправка автору под глобальной блокировкой
+        # --- Блок 2: Сохранение поста и подготовка к отправке (под блокировкой) ---
+        reply_info = {}
         async with storage_lock:
             messages_storage[current_post_num] = {
                 'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
                 'author_message_id': None, 'board_id': board_id, 'thread_id': thread_id
             }
+            if reply_to_post:
+                reply_info = post_to_messages.get(reply_to_post, {})
 
-            content_for_author = await _apply_mode_transformations(content, board_id)
-            author_results = await send_message_to_users(
-                bot_instance=bot_instance, recipients={user_id},
-                content=content_for_author, reply_info=reply_info
-            )
-            
-            if author_results and author_results[0] and author_results[0][1]:
-                sent_to_author = author_results[0][1]
-                messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
+        # --- Блок 3: Отправка автору (без блокировки) ---
+        content_for_author = await _apply_mode_transformations(content, board_id)
+        author_results = await send_message_to_users(
+            bot_instance=bot_instance, recipients={user_id},
+            content=content_for_author, reply_info=reply_info
+        )
+        
+        # --- Блок 4: Обновление ID сообщения (под блокировкой) ---
+        if author_results and author_results[0] and author_results[0][1]:
+            sent_to_author = author_results[0][1]
+            messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
+            async with storage_lock:
                 for m in messages_to_save:
                     if current_post_num in messages_storage:
-                         messages_storage[current_post_num]['author_message_id'] = m.message_id
+                        messages_storage[current_post_num]['author_message_id'] = m.message_id
                     post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
                     message_to_post[(user_id, m.message_id)] = current_post_num
 
-        # Блок 3: Постановка в очередь для рассылки остальным
+        # --- Блок 5: Постановка в очередь для остальных (без блокировки) ---
         if not is_shadow_muted and recipients:
             await message_queues[board_id].put({
                 'recipients': recipients, 'content': content, 'post_num': current_post_num,
-                'reply_info': reply_info, 'board_id': board_id,
-                'thread_id': thread_id
+                'reply_info': reply_info, 'board_id': board_id, 'thread_id': thread_id
             })
 
     except TelegramForbiddenError:
         b_data['users']['active'].discard(user_id)
         print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из process_new_post).")
-        if current_post_num in messages_storage:
+        if current_post_num:
             async with storage_lock:
                 messages_storage.pop(current_post_num, None)
-
     except Exception as e:
         import traceback
         print(f"❌ Критическая ошибка в process_new_post для user {user_id}: {e}\n{traceback.format_exc()}")
-        if current_post_num and current_post_num in messages_storage:
-            async with storage_lock:
-                messages_storage.pop(current_post_num, None)
-
-    except TelegramForbiddenError:
-        b_data['users']['active'].discard(user_id)
-        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из process_new_post).")
-        if current_post_num in messages_storage:
-            async with storage_lock:
-                messages_storage.pop(current_post_num, None)
-
-    except Exception as e:
-        import traceback
-        print(f"❌ Критическая ошибка в process_new_post для user {user_id}: {e}\n{traceback.format_exc()}")
-        if current_post_num and current_post_num in messages_storage:
+        if current_post_num:
             async with storage_lock:
                 messages_storage.pop(current_post_num, None)
 
@@ -2302,24 +2281,29 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     
     return modified_content
 
-async def _format_message_body(content: dict, user_id_for_context: int, post_num: int) -> str:
+async def _format_message_body(
+    content: dict, 
+    user_id_for_context: int, 
+    post_data: dict, # <-- ИЗМЕНЕНИЕ: Принимаем готовые данные поста
+    reply_to_post_author_id: int | None # <-- ИЗМЕНЕНИЕ: Принимаем ID автора ответа
+) -> str:
     """
     Формирует и форматирует тело сообщения (реакции, reply, greentext, (You)).
-    Эта функция ДОЛЖНА вызываться внутри `async with storage_lock:`.
+    Эта функция больше НЕ обращается к глобальным хранилищам и НЕ использует блокировки.
     """
     parts = []
     
     # Блок ответа
     reply_to_post = content.get('reply_to_post')
     if reply_to_post:
-        original_author = messages_storage.get(reply_to_post, {}).get('author_id')
-        you_marker = " (You)" if user_id_for_context == original_author else ""
+        # Используем переданный ID автора, а не лезем в messages_storage
+        you_marker = " (You)" if user_id_for_context == reply_to_post_author_id else ""
         reply_line = f">>{reply_to_post}{you_marker}"
         formatted_reply_line = f"<code>{escape_html(reply_line)}</code>"
         parts.append(formatted_reply_line)
         
     # Блок реакций
-    post_data = messages_storage.get(post_num, {})
+    # Используем переданные данные поста
     reactions_data = post_data.get('reactions')
     
     if reactions_data:
@@ -2347,8 +2331,9 @@ async def _format_message_body(content: dict, user_id_for_context: int, post_num
     # Основной текст
     main_text_raw = content.get('text') or content.get('caption') or ''
     if main_text_raw:
-        text_with_you = add_you_to_my_posts(main_text_raw, user_id_for_context)
-        formatted_main_text = apply_greentext_formatting(text_with_you)
+        # Важно: add_you_to_my_posts теперь должна вызываться ИЗНУТРИ блокировки в вызывающей функции
+        # Здесь мы просто форматируем greentext
+        formatted_main_text = apply_greentext_formatting(main_text_raw)
         parts.append(formatted_main_text)
         
     return '\n\n'.join(filter(None, parts))
@@ -2386,17 +2371,37 @@ async def send_message_to_users(
             header_text = modified_content['header']
             head = f"<i>{escape_html(header_text)}</i>"
             
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для консистентного чтения ---
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка перенесена сюда ---
             async with storage_lock:
+                post_num = modified_content.get('post_num')
+                post_data = messages_storage.get(post_num, {})
+                
                 reply_to_post = modified_content.get('reply_to_post')
-                original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
-                if uid == original_author:
+                reply_author_id = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
+
+                if uid == reply_author_id:
                     if "Пост" in head: head = head.replace("Пост", "🔴 Пост")
                     if "Post" in head: head = head.replace("Post", "🔴 Post")
-                
-                post_num = modified_content.get('post_num')
-                formatted_body = await _format_message_body(modified_content, uid, post_num)
+
+                # Модифицируем текст для конкретного пользователя (добавляем (You))
+                content_for_user = modified_content.copy()
+                text_or_caption = content_for_user.get('text') or content_for_user.get('caption')
+                if text_or_caption:
+                    text_with_you = add_you_to_my_posts(text_or_caption, uid)
+                    if 'text' in content_for_user:
+                        content_for_user['text'] = text_with_you
+                    elif 'caption' in content_for_user:
+                        content_for_user['caption'] = text_with_you
+
+                # Вызываем "чистую" функцию форматирования
+                formatted_body = await _format_message_body(
+                    content=content_for_user,
+                    user_id_for_context=uid,
+                    post_data=post_data,
+                    reply_to_post_author_id=reply_author_id
+                )
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
             full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
 
             if ct == "media_group":
@@ -2499,7 +2504,6 @@ async def send_message_to_users(
     async def send_with_semaphore(uid):
         async with semaphore:
             reply_to = None
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для консистентного чтения ---
             async with storage_lock:
                 if reply_info and isinstance(reply_info, dict):
                     reply_to = reply_info.get(uid)
@@ -2508,7 +2512,6 @@ async def send_message_to_users(
                     if original_post in post_to_messages and isinstance(post_to_messages[original_post], dict):
                         author_mid = post_to_messages[original_post].get(uid)
                         if author_mid: reply_to = author_mid
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             result = await really_send(uid, reply_to)
             return (uid, result)
@@ -2516,7 +2519,6 @@ async def send_message_to_users(
     tasks = [send_with_semaphore(uid) for uid in active_recipients]
     results = await asyncio.gather(*tasks)
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для безопасной записи ---
     async with storage_lock:
         if content.get('post_num'):
             post_num = content['post_num']
@@ -2526,7 +2528,6 @@ async def send_message_to_users(
                 for m in messages_to_save:
                     post_to_messages.setdefault(post_num, {})[uid] = m.message_id
                     message_to_post[(uid, m.message_id)] = post_num
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if blocked_users:
         for uid in blocked_users:
@@ -2539,9 +2540,9 @@ async def send_message_to_users(
 async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
     """
     Находит все отправленные копии поста и редактирует их, добавляя обновленный
-    список реакций.
+    список реакций. (ИСПРАВЛЕННАЯ ВЕРСИЯ БЕЗ DEADLOCK)
     """
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Чтение данных под блокировкой ---
+    # --- Чтение данных под блокировкой ---
     async with storage_lock:
         post_data = messages_storage.get(post_num)
         message_copies = post_to_messages.get(post_num)
@@ -2553,10 +2554,7 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
         content = post_data.get('content', {}).copy()
         message_copies_copy = message_copies.copy()
         board_id = post_data.get('board_id')
-        reply_to_post = content.get('reply_to_post')
-        original_author = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+    
     content_type = content.get('type')
     can_be_edited = content_type in ['text', 'photo', 'video', 'animation', 'document', 'audio']
     if not can_be_edited or not board_id:
@@ -2568,16 +2566,34 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
             header_text = content.get('header', '')
             head = f"<i>{escape_html(header_text)}</i>"
             
-            if user_id == original_author:
-                if board_id == 'int':
-                    head = head.replace("Post", "🔴 Post")
-                else:
-                    head = head.replace("Пост", "🔴 Пост")
-
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Чтение под блокировкой ---
+            # --- НАЧАЛО ИСПРАВЛЕНИЙ: Логика аналогична `really_send` ---
             async with storage_lock:
-                 formatted_body = await _format_message_body(content, user_id, post_num)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                post_data_for_format = messages_storage.get(post_num, {})
+                reply_to_post = content.get('reply_to_post')
+                reply_author_id = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
+
+                if user_id == reply_author_id:
+                    if board_id == 'int':
+                        head = head.replace("Post", "🔴 Post")
+                    else:
+                        head = head.replace("Пост", "🔴 Пост")
+                
+                content_for_user = content.copy()
+                text_or_caption = content_for_user.get('text') or content_for_user.get('caption')
+                if text_or_caption:
+                    text_with_you = add_you_to_my_posts(text_or_caption, user_id)
+                    if 'text' in content_for_user:
+                        content_for_user['text'] = text_with_you
+                    elif 'caption' in content_for_user:
+                        content_for_user['caption'] = text_with_you
+                
+                formatted_body = await _format_message_body(
+                    content=content_for_user,
+                    user_id_for_context=user_id,
+                    post_data=post_data_for_format,
+                    reply_to_post_author_id=reply_author_id
+                )
+            # --- КОНЕЦ ИСПРАВЛЕНИЙ ---
             
             full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
             if len(full_text) > 4096:
