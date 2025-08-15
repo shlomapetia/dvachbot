@@ -3099,6 +3099,29 @@ async def cmd_start(message: types.Message):
     start_text = b_data.get('start_message_text', "Добро пожаловать в ТГАЧ!")
     
     await message.answer(start_text, parse_mode="HTML", disable_web_page_preview=True)
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Дополнительное сообщение на досках с тредами ---
+    if board_id in THREAD_BOARDS:
+        lang = 'en' if board_id == 'int' else 'ru'
+        if lang == 'en':
+            thread_commands_text = (
+                "<b>Thread Commands:</b>\n"
+                "<code>/create &lt;title&gt;</code> - Create a new thread\n"
+                "<code>/threads</code> - View active threads\n"
+                "<code>/leave</code> - Return to the main board from a thread"
+            )
+        else:
+            thread_commands_text = (
+                "<b>Команды для тредов:</b>\n"
+                "<code>/create &lt;заголовок&gt;</code> - Создать новый тред\n"
+                "<code>/threads</code> - Посмотреть активные треды\n"
+                "<code>/leave</code> - Вернуться на доску из треда"
+            )
+        # Добавляем небольшую задержку для визуального разделения сообщений
+        await asyncio.sleep(0.5)
+        await message.answer(thread_commands_text, parse_mode="HTML")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
     await message.delete()
 
     
@@ -3354,6 +3377,29 @@ async def cmd_help(message: types.Message):
     # Отправляем текст помощи с ссылками на все доски
     start_text = board_data[board_id].get('start_message_text', "Нет информации о помощи.")
     await message.answer(start_text, parse_mode="HTML", disable_web_page_preview=True)
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Дополнительное сообщение на досках с тредами ---
+    if board_id in THREAD_BOARDS:
+        lang = 'en' if board_id == 'int' else 'ru'
+        if lang == 'en':
+            thread_commands_text = (
+                "<b>Thread Commands:</b>\n"
+                "<code>/create &lt;title&gt;</code> - Create a new thread\n"
+                "<code>/threads</code> - View active threads\n"
+                "<code>/leave</code> - Return to the main board from a thread"
+            )
+        else:
+            thread_commands_text = (
+                "<b>Команды для тредов:</b>\n"
+                "<code>/create &lt;заголовок&gt;</code> - Создать новый тред\n"
+                "<code>/threads</code> - Посмотреть активные треды\n"
+                "<code>/leave</code> - Вернуться на доску из треда"
+            )
+        # Добавляем небольшую задержку для визуального разделения сообщений
+        await asyncio.sleep(0.5)
+        await message.answer(thread_commands_text, parse_mode="HTML")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     await message.delete()
 
 
@@ -3629,7 +3675,7 @@ async def cmd_active(message: types.Message):
 
 @dp.message(Command("create"))
 async def cmd_create(message: types.Message):
-    """Создает новый тред на доске."""
+    """Создает новый тред на доске и автоматически перемещает в него создателя."""
     board_id = get_board_id(message)
     if not board_id or board_id not in THREAD_BOARDS:
         return
@@ -3706,6 +3752,19 @@ async def cmd_create(message: types.Message):
     })
     
     await message.delete()
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Автоматический вход в тред ---
+    # Обновляем состояние пользователя, чтобы он "вошел" в тред
+    user_s['location'] = thread_id
+    user_s['last_location_switch'] = now_ts
+    
+    # Отправляем пользователю уведомление о входе
+    enter_message = random.choice(thread_messages[lang]['enter_thread_prompt']).format(title=title)
+    try:
+        await message.answer(enter_message, parse_mode="HTML")
+    except Exception as e:
+        print(f"Не удалось отправить сообщение о входе в тред пользователю {user_id}: {e}")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 
 
@@ -5067,19 +5126,23 @@ async def admin_banned_board(callback: types.CallbackQuery):
     await callback.message.edit_text(text, parse_mode="HTML")
     await callback.answer()
 
-# ===== Вспомогательная функция =====================================
 def get_author_id_by_reply(msg: types.Message) -> int | None:
     """
     Получает ID автора поста по ответу на его копию.
+    (ИСПРАВЛЕННАЯ ВЕРСИЯ)
     Эта функция НЕБЕЗОПАСНА для вызова без блокировки.
     Предполагается, что она вызывается в контексте, где `storage_lock` уже захвачен.
     """
     if not msg.reply_to_message:
         return None
 
-    admin_id = msg.from_user.id
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем ID чата и сообщения из reply_to_message ---
+    # Это ID чата, в котором находится ОРИГИНАЛЬНОЕ сообщение (копия поста).
+    # Для админа это его личный чат с ботом.
+    target_chat_id = msg.reply_to_message.chat.id
     reply_mid = msg.reply_to_message.message_id
-    lookup_key = (admin_id, reply_mid)
+    lookup_key = (target_chat_id, reply_mid)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     post_num = message_to_post.get(lookup_key)
 
@@ -5103,10 +5166,8 @@ async def cmd_get_id(message: types.Message):
     
     if message.reply_to_message:
         replied_author_id = None
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         async with storage_lock:
             replied_author_id = get_author_id_by_reply(message)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         if replied_author_id == 0:
             await message.answer("ℹ️ Вы ответили на системное сообщение (автор: бот).")
@@ -5151,11 +5212,9 @@ async def cmd_ban(message: types.Message):
         return
 
     target_id: int | None = None
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     async with storage_lock:
         if message.reply_to_message:
             target_id = get_author_id_by_reply(message)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     parts = message.text.split()
     if len(parts) == 2 and parts[1].isdigit():
@@ -5214,13 +5273,16 @@ async def cmd_ban(message: types.Message):
         pass
     await message.delete()
 
+# --- НАЧАЛО ИЗМЕНЕНИЙ: ИЗМЕНЕН ПОРЯДОК ОБРАБОТЧИКОВ ---
+
 @dp.message(Command("mute"))
 async def cmd_mute(message: Message):
     board_id = get_board_id(message)
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Админская команда теперь отделена от OP-команды ---
     if not is_admin(message.from_user.id, board_id):
-        return # Если не админ, передаем управление следующему обработчику (OP-команде)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        # Если не админ, передаем управление следующему обработчику (OP-команде)
+        # Для этого нужно, чтобы aiogram продолжил поиск
+        # В данном случае, мы ничего не делаем, и aiogram пойдет дальше по списку
+        return
 
     command_args = message.text.split()[1:]
     if not command_args and not message.reply_to_message:
@@ -5301,40 +5363,11 @@ async def cmd_mute(message: Message):
         pass
     await message.delete()
 
-@dp.message(Command("wipe"))
-async def cmd_wipe(message: types.Message):
-    board_id = get_board_id(message)
-    if not is_admin(message.from_user.id, board_id):
-        return
-
-    target_id = None
-    if message.reply_to_message:
-        async with storage_lock:
-            target_id = get_author_id_by_reply(message)
-    else:
-        parts = message.text.split()
-        if len(parts) == 2 and parts[1].isdigit():
-            target_id = int(parts[1])
-
-    if not target_id:
-        await message.answer("reply + /wipe или /wipe <id>")
-        return
-
-    deleted_messages = await delete_user_posts(message.bot, target_id, 999999, board_id)
-
-    board_name = BOARD_CONFIG[board_id]['name']
-    await message.answer(
-        f"🗑 Удалено {deleted_messages} сообщений пользователя {target_id} с доски {board_name}."
-    )
-    await message.delete()
-
 @dp.message(Command("unmute"))
 async def cmd_unmute(message: types.Message):
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Админская команда теперь отделена от OP-команды ---
     board_id = get_board_id(message)
     if not is_admin(message.from_user.id, board_id):
         return
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     target_id = None
     if message.reply_to_message:
@@ -5373,59 +5406,6 @@ async def cmd_unmute(message: types.Message):
             pass
     else:
         await message.answer(f"Пользователь {target_id} не был в муте на этой доске.")
-    await message.delete()
-
-@dp.message(Command("unban"))
-async def cmd_unban(message: types.Message):
-    board_id = get_board_id(message)
-    if not is_admin(message.from_user.id, board_id):
-        return
-
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer("Использование: /unban <user_id>")
-        return
-
-    try:
-        user_id = int(args[1])
-        b_data = board_data[board_id]
-        board_name = BOARD_CONFIG[board_id]['name']
-        if user_id in b_data['users']['banned']:
-             b_data['users']['banned'].discard(user_id)
-             # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-             await message.answer(f"Пользователь {user_id} разбанен на доске {board_name}.")
-             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-        else:
-             # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-            await message.answer(f"Пользователь {user_id} не был забанен на этой доске.")
-             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-    except ValueError:
-        await message.answer("Неверный ID пользователя")
-    await message.delete()
-
-@dp.message(Command("del"))
-async def cmd_del(message: types.Message):
-    board_id = get_board_id(message)
-    if not is_admin(message.from_user.id, board_id):
-        return
-
-    if not message.reply_to_message:
-        await message.answer("Ответь на сообщение, которое нужно удалить")
-        return
-
-    post_num = None
-    async with storage_lock:
-        target_mid = message.reply_to_message.message_id
-        lookup_key = (message.from_user.id, target_mid)
-        post_num = message_to_post.get(lookup_key)
-
-    if post_num is None:
-        await message.answer("Не нашёл этот пост в базе (возможно, вы ответили на чужую копию).")
-        return
-
-    deleted_count = await delete_single_post(post_num, message.bot)
-
-    await message.answer(f"Пост №{post_num} и все его копии ({deleted_count} сообщений) удалены.")
     await message.delete()
 
 @dp.message(Command("shadowmute"))
@@ -5475,11 +5455,9 @@ async def cmd_shadowmute(message: Message):
 
 @dp.message(Command("unshadowmute"))
 async def cmd_unshadowmute(message: Message):
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Админская команда теперь отделена от OP-команды ---
     board_id = get_board_id(message)
     if not is_admin(message.from_user.id, board_id):
         return
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     target_id = None
     parts = message.text.split()
@@ -5499,6 +5477,87 @@ async def cmd_unshadowmute(message: Message):
         await message.answer(f"👻 Пользователь {target_id} тихо размучен на доске {board_name}.")
     else:
         await message.answer(f"ℹ️ Пользователь {target_id} не в shadow-муте на этой доске.")
+    await message.delete()
+    
+# --- КОНЕЦ ИЗМЕНЕНИЙ ПОРЯДКА ---
+
+@dp.message(Command("wipe"))
+async def cmd_wipe(message: types.Message):
+    board_id = get_board_id(message)
+    if not is_admin(message.from_user.id, board_id):
+        return
+
+    target_id = None
+    if message.reply_to_message:
+        async with storage_lock:
+            target_id = get_author_id_by_reply(message)
+    else:
+        parts = message.text.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            target_id = int(parts[1])
+
+    if not target_id:
+        await message.answer("reply + /wipe или /wipe <id>")
+        return
+
+    deleted_messages = await delete_user_posts(message.bot, target_id, 999999, board_id)
+
+    board_name = BOARD_CONFIG[board_id]['name']
+    await message.answer(
+        f"🗑 Удалено {deleted_messages} сообщений пользователя {target_id} с доски {board_name}."
+    )
+    await message.delete()
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: types.Message):
+    board_id = get_board_id(message)
+    if not is_admin(message.from_user.id, board_id):
+        return
+
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Использование: /unban <user_id>")
+        return
+
+    try:
+        user_id = int(args[1])
+        b_data = board_data[board_id]
+        board_name = BOARD_CONFIG[board_id]['name']
+        if user_id in b_data['users']['banned']:
+             b_data['users']['banned'].discard(user_id)
+             await message.answer(f"Пользователь {user_id} разбанен на доске {board_name}.")
+        else:
+            await message.answer(f"Пользователь {user_id} не был забанен на этой доске.")
+    except ValueError:
+        await message.answer("Неверный ID пользователя")
+    await message.delete()
+
+@dp.message(Command("del"))
+async def cmd_del(message: types.Message):
+    board_id = get_board_id(message)
+    if not is_admin(message.from_user.id, board_id):
+        return
+
+    if not message.reply_to_message:
+        await message.answer("Ответь на сообщение, которое нужно удалить")
+        return
+
+    post_num = None
+    async with storage_lock:
+        # --- ИЗМЕНЕНИЕ: Используем ID чата, где было отправлено reply-сообщение ---
+        target_chat_id = message.chat.id
+        target_mid = message.reply_to_message.message_id
+        lookup_key = (target_chat_id, target_mid)
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+        post_num = message_to_post.get(lookup_key)
+
+    if post_num is None:
+        await message.answer("Не нашёл этот пост в базе.")
+        return
+
+    deleted_count = await delete_single_post(post_num, message.bot)
+
+    await message.answer(f"Пост №{post_num} и все его копии ({deleted_count} сообщений) удалены.")
     await message.delete()
 
 @dp.message(Command("shadowmute_threads"))
@@ -5565,11 +5624,8 @@ async def handle_audio(message: Message):
     
     b_data = board_data[board_id]
 
-    # --- Блок 1: Первичные проверки (аналогично handle_message) ---
-    if user_id in b_data['users']['banned']:
-        await message.delete()
-        return
-    if b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC):
+    if user_id in b_data['users']['banned'] or \
+       (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
         await message.delete()
         return
 
@@ -5578,6 +5634,7 @@ async def handle_audio(message: Message):
     if not await check_spam(user_id, message, board_id):
         try:
             await message.delete()
+            # Тип для спам-фильтра - text, если есть подпись, иначе - animation, чтобы ограничить частоту
             msg_type = 'text' if message.caption else 'animation'
             await apply_penalty(message.bot, user_id, msg_type, board_id)
         except TelegramBadRequest: pass
@@ -5585,21 +5642,19 @@ async def handle_audio(message: Message):
     
     await message.delete()
 
-    # --- Блок 2: Подготовка данных для process_new_post ---
     is_shadow_muted = (user_id in b_data['shadow_mutes'] and 
                        b_data['shadow_mutes'][user_id] > datetime.now(UTC))
 
     reply_to_post = None
     if message.reply_to_message:
         async with storage_lock:
-            lookup_key = (user_id, message.reply_to_message.message_id)
+            # Используем ID чата, где было отправлено сообщение
+            lookup_key = (message.chat.id, message.reply_to_message.message_id)
             reply_to_post = message_to_post.get(lookup_key)
             
-    is_transform_mode_active = (
-        b_data['anime_mode'] or b_data['slavaukraine_mode'] or
-        b_data['zaputin_mode'] or b_data['suka_blyat_mode']
-    )
-    caption_to_process = (message.caption or "") if is_transform_mode_active else (getattr(message, 'caption_html_text', message.caption or ""))
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем caption_html_text ---
+    caption_to_process = message.caption_html_text if hasattr(message, 'caption_html_text') else (message.caption or "")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     content = {
         'type': 'audio',
@@ -5611,7 +5666,6 @@ async def handle_audio(message: Message):
         async with storage_lock:
             last_messages.append(message.caption)
 
-    # --- Блок 3: Вызов унифицированного обработчика ---
     await process_new_post(
         bot_instance=message.bot,
         board_id=board_id,
@@ -5669,7 +5723,7 @@ async def handle_voice(message: Message):
         reply_to_post=reply_to_post,
         is_shadow_muted=is_shadow_muted
     )
-        
+    
 @dp.message(F.media_group_id)
 async def handle_media_group_init(message: Message):
     media_group_id = message.media_group_id
@@ -5870,8 +5924,7 @@ async def process_complete_media_group(media_group_id: str, group: dict, bot_ins
 def apply_greentext_formatting(text: str) -> str:
     """
     Применяет форматирование 'Greentext' к строкам, начинающимся с '>'.
-    Эта версия сначала экранирует HTML в строке, а затем оборачивает её в тег,
-    чтобы избежать конфликтов разметки.
+    (ИСПРАВЛЕННАЯ ВЕРСЯ для поддержки вложенного HTML)
     """
     if not text:
         return text
@@ -5879,14 +5932,14 @@ def apply_greentext_formatting(text: str) -> str:
     processed_lines = []
     lines = text.split('\n')
     for line in lines:
+        # Убираем пробелы в начале, чтобы проверить на '>'
         stripped_line = line.lstrip()
-        # Проверяем, начинается ли строка с символа '>' или его HTML-сущности '>'
-        if stripped_line.startswith('>') or stripped_line.startswith('>'):
-            # Сначала экранируем строку, чтобы символы < > & не ломали разметку,
-            # а затем оборачиваем в тег `<code>`.
+        # Проверяем, начинается ли строка с символа '>'
+        if stripped_line.startswith('>'):
+            # Оборачиваем всю строку в <code>, сохраняя внутренние теги
             processed_lines.append(f"<code>{escape_html(line)}</code>")
         else:
-            # Для обычных строк просто передаем их как есть, сохраняя HTML-разметку.
+            # Для обычных строк просто передаем их как есть
             processed_lines.append(line)
             
     return '\n'.join(processed_lines)
@@ -5995,6 +6048,7 @@ async def handle_message(message: Message):
         mute_until = b_data['mutes'].get(user_id)
         if mute_until and mute_until > datetime.now(UTC):
             await message.delete()
+            # ... (остальная логика уведомления о муте без изменений)
             left = mute_until - datetime.now(UTC)
             if board_id == 'int':
                 time_left_str = f"{int(left.total_seconds() // 60)}m {int(left.total_seconds() % 60)}s"
@@ -6046,32 +6100,37 @@ async def handle_message(message: Message):
     reply_to_post = None
     if message.reply_to_message:
         async with storage_lock:
-            lookup_key = (user_id, message.reply_to_message.message_id)
+            # Используем ID чата, где было отправлено сообщение
+            lookup_key = (message.chat.id, message.reply_to_message.message_id)
             reply_to_post = message_to_post.get(lookup_key)
     
     content = {'type': message.content_type}
     text_for_corpus = None
     
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем html_text и caption_html_text ---
     if message.content_type == 'text':
         text_for_corpus = message.text
-        content.update({'text': message.text})
+        content.update({'text': message.html_text})
     
     elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio', 'voice']:
         text_for_corpus = message.caption
         file_id_obj = getattr(message, message.content_type, [])
         if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
-        content.update({'file_id': file_id_obj.file_id, 'caption': message.caption or ""})
+        content.update({
+            'file_id': file_id_obj.file_id,
+            'caption': message.caption_html_text if hasattr(message, 'caption_html_text') else (message.caption or "")
+        })
     
     elif message.content_type in ['sticker', 'video_note']:
         file_id_obj = getattr(message, message.content_type)
         content.update({'file_id': file_id_obj.file_id})
         if message.content_type == 'sticker' and message.sticker and message.sticker.emoji:
              text_for_corpus = message.sticker.emoji
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     if text_for_corpus:
         async with storage_lock:
             last_messages.append(text_for_corpus)
-
 
     await process_new_post(
         bot_instance=message.bot,
