@@ -4686,19 +4686,20 @@ async def cmd_deanon(message: Message):
     if board_id in THREAD_BOARDS:
         user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     original_author_id = None
     target_post = None
     reply_info = {}
 
     async with storage_lock:
+        # --- ИЗМЕНЕНИЕ: Используем ID чата и сообщения из reply_to_message, а не ID самого пользователя ---
+        target_chat_id = message.reply_to_message.chat.id
         target_mid = message.reply_to_message.message_id
-        target_post = message_to_post.get((user_id, target_mid))
+        target_post = message_to_post.get((target_chat_id, target_mid))
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         
         if target_post and target_post in messages_storage:
             original_author_id = messages_storage[target_post].get('author_id')
             reply_info = post_to_messages.get(target_post, {})
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if not target_post or original_author_id is None:
         reply_text = "🚫 Could not find the post to de-anonymize..." if lang == 'en' else "🚫 Не удалось найти пост для деанона..."
@@ -4713,8 +4714,6 @@ async def cmd_deanon(message: Message):
         return
         
     name, surname, city, profession, fetish, detail = generate_deanon_info(lang=lang)
-    ip = f"{random.randint(10,250)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
-    age = random.randint(18, 45)
     
     deanon_text, header_text = "", ""
     if lang == 'en':
@@ -4730,24 +4729,32 @@ async def cmd_deanon(message: Message):
         thread_id = user_location
         thread_info = b_data.get('threads_data', {}).get(thread_id)
         if thread_info and not thread_info.get('is_archived'):
+            # Глобальный номер для системного сообщения все равно нужен
             _, pnum = await format_header(board_id)
+            content['post_num'] = pnum
+            content['header'] = await format_thread_post_header(board_id, len(thread_info.get('posts', [])) + 1, 0, thread_info)
+
             async with storage_lock:
                 messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id, 'thread_id': thread_id}
-            thread_info['posts'].append(pnum)
-            thread_info['last_activity_at'] = time.time()
+                thread_info['posts'].append(pnum)
+                thread_info['last_activity_at'] = time.time()
+            
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем thread_id в очередь ---
             await message_queues[board_id].put({
                 "recipients": thread_info.get('subscribers', set()), "content": content, "post_num": pnum,
-                "reply_info": reply_info, "board_id": board_id, "thread_id": thread_id
+                "board_id": board_id, "thread_id": thread_id
             })
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             await message.delete()
             return
             
     _, pnum = await format_header(board_id)
+    content['post_num'] = pnum
     async with storage_lock:
         messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
     await message_queues[board_id].put({
         "recipients": board_data[board_id]['users']['active'], "content": content, "post_num": pnum,
-        "reply_info": reply_info, "board_id": board_id
+        "board_id": board_id
     })
     await message.delete()
 
@@ -5681,69 +5688,75 @@ async def handle_media_group_init(message: Message):
     
     b_data['last_activity'][user_id] = datetime.now(UTC)
 
-    group = current_media_groups.get(media_group_id)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Использование asyncio.Event ---
     is_leader = False
+    if media_group_id not in current_media_groups:
+        # Если записи о группе нет, этот обработчик становится "лидером"
+        is_leader = True
+        # Создаем запись с Event'ом для синхронизации
+        current_media_groups[media_group_id] = {
+            'is_initializing': True,
+            'init_event': asyncio.Event() 
+        }
 
-    if group is None:
-        group = current_media_groups.setdefault(media_group_id, {'is_initializing': True})
-        if group.get('is_initializing'):
-            is_leader = True
+    group = current_media_groups[media_group_id]
     
     if is_leader:
-        fake_text_message = types.Message(
-            message_id=message.message_id, date=message.date, chat=message.chat,
-            from_user=message.from_user, content_type='text', text=f"media_group_{media_group_id}"
-        )
-        if not await check_spam(user_id, fake_text_message, board_id):
-            current_media_groups.pop(media_group_id, None) 
-            await apply_penalty(message.bot, user_id, 'text', board_id)
-            return
-        
-        reply_to_post = None
-        if message.reply_to_message:
-            lookup_key = (user_id, message.reply_to_message.message_id)
-            reply_to_post = message_to_post.get(lookup_key)
+        try:
+            fake_text_message = types.Message(
+                message_id=message.message_id, date=message.date, chat=message.chat,
+                from_user=message.from_user, content_type='text', text=f"media_group_{media_group_id}"
+            )
+            if not await check_spam(user_id, fake_text_message, board_id):
+                current_media_groups.pop(media_group_id, None) 
+                await apply_penalty(message.bot, user_id, 'text', board_id)
+                group['init_event'].set() # Разблокируем другие сообщения этой группы
+                return
+            
+            reply_to_post = None
+            if message.reply_to_message:
+                async with storage_lock:
+                    lookup_key = (user_id, message.reply_to_message.message_id)
+                    reply_to_post = message_to_post.get(lookup_key)
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: ОПРЕДЕЛЕНИЕ ЛОКАЦИИ И ЗАГОЛОВКА ---
-        user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
-        thread_id = None
-        
-        if board_id in THREAD_BOARDS and user_location != 'main':
-            thread_id = user_location
-            thread_info = b_data.get('threads_data', {}).get(thread_id)
-            if thread_info and not thread_info.get('is_archived'):
-                _, post_num = await format_header(board_id)
-                local_post_num = len(thread_info.get('posts', [])) + 1
-                # --- ИЗМЕНЕНИЕ ---
-                header = await format_thread_post_header(board_id, local_post_num, user_id, thread_info)
-                # --- КОНЕЦ ИЗМЕНЕНИЯ ---
-            else: # Если тред не найден или закрыт, постим в общий чат
-                thread_id = None
+            user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+            thread_id = None
+            
+            if board_id in THREAD_BOARDS and user_location != 'main':
+                thread_id = user_location
+                thread_info = b_data.get('threads_data', {}).get(thread_id)
+                if thread_info and not thread_info.get('is_archived'):
+                    _, post_num = await format_header(board_id)
+                    local_post_num = len(thread_info.get('posts', [])) + 1
+                    header = await format_thread_post_header(board_id, local_post_num, user_id, thread_info)
+                else:
+                    thread_id = None
+                    header, post_num = await format_header(board_id)
+            else:
                 header, post_num = await format_header(board_id)
-        else:
-            header, post_num = await format_header(board_id)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        caption = message.caption_html_text if hasattr(message, 'caption_html_text') and message.caption_html_text else (message.caption or "")
-        
-        group.update({
-            'board_id': board_id, 'post_num': post_num, 'header': header, 'author_id': user_id,
-            'timestamp': datetime.now(UTC), 'media': [], 'caption': caption,
-            'reply_to_post': reply_to_post, 'processed_messages': set(),
-            'source_message_ids': set(),
-            'thread_id': thread_id # Сохраняем thread_id (или None) в данных группы
-        })
-        group.pop('is_initializing', None)
+            caption_html = getattr(message, 'caption_html_text', message.caption or "")
+
+            group.update({
+                'board_id': board_id, 'post_num': post_num, 'header': header, 'author_id': user_id,
+                'timestamp': datetime.now(UTC), 'media': [], 'caption': caption_html,
+                'reply_to_post': reply_to_post, 'processed_messages': set(),
+                'source_message_ids': set(),
+                'thread_id': thread_id
+            })
+            group.pop('is_initializing', None)
+        finally:
+            # В любом случае (даже при ошибке) разблокируем остальные сообщения
+            group['init_event'].set()
     else:
-        while group is not None and group.get('is_initializing'):
-            await asyncio.sleep(0.05)
-            group = current_media_groups.get(media_group_id)
-        
-        if media_group_id not in current_media_groups:
+        # Если это не "лидер", ждем, пока лидер завершит инициализацию
+        await group['init_event'].wait()
+        # После ожидания, обновляем ссылку на группу, т.к. лидер мог ее изменить
+        group = current_media_groups.get(media_group_id)
+        if not group or group.get('is_initializing'):
+             # Если группы больше нет или она все еще инициализируется (ошибка у лидера), выходим
             return
-
-    if not group:
-        return
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
     group.get('source_message_ids', set()).add(message.message_id)
         
@@ -5882,17 +5895,17 @@ def apply_greentext_formatting(text: str) -> str:
 async def handle_message_reaction(reaction: types.MessageReactionUpdated):
     """
     Обрабатывает реакции, синхронизируя отложенное редактирование поста
-    и отправку уведомления автору для предотвращения любого спама.
+    и отправку уведомления автору для предотвращения любого спама. (ИСПРАВЛЕННАЯ ВЕРСИЯ)
     """
     try:
-        # 1. Получаем ключевые ID и данные
+        # 1. Получаем ключевые ID и данные (ИСПРАВЛЕНО)
         user_id = reaction.user.id
         chat_id = reaction.chat.id
-        message_id = reaction.message.id
+        message_id = reaction.message_id
         board_id = get_board_id(reaction)
         if not board_id: return
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для атомарного обновления ---
+        # --- Блокировка для атомарного обновления ---
         async with storage_lock:
             # 2. Находим пост и его автора
             post_num = message_to_post.get((chat_id, message_id))
@@ -5902,8 +5915,8 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
             post_data = messages_storage[post_num]
             author_id = post_data.get('author_id')
 
-            # 3. Игнорируем реакции на собственные сообщения
-            if author_id == user_id:
+            # 3. Игнорируем реакции на собственные сообщения и сообщения бота
+            if author_id == user_id or author_id == 0:
                 return
 
             # 4. Обновляем состояние реакций в памяти
@@ -5919,7 +5932,6 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
                 else: return
             else:
                 reactions_storage[user_id] = new_emojis[:2]
-        # --- КОНЕЦ ИЗМЕНЕНИЙ: Блокировка для атомарного обновления ---
         
         # --- Логика уведомлений и отложенного редактирования остается снаружи ---
         # 5. Готовим данные для уведомления (но пока не отправляем)
@@ -5953,7 +5965,6 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
             if post_num in pending_edit_tasks:
                 pending_edit_tasks[post_num].cancel()
 
-            # Передаем подготовленные данные в отложенную задачу
             new_task = asyncio.create_task(
                 execute_delayed_edit(
                     post_num=post_num,
