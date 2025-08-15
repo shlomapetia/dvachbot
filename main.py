@@ -1324,31 +1324,29 @@ async def auto_memory_cleaner():
         cleanup_counter += 1
         await asyncio.sleep(600)  # 10 минут
 
-        posts_to_delete_set = set()
-        # --- Блок 1: Очистка общих хранилищ под блокировкой ---
+        # --- Блок 1: Очистка старых постов (быстрые операции под блокировкой) ---
         async with storage_lock:
-            # 1. Очистка старых постов
             if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
                 to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
                 oldest_post_keys = sorted(messages_storage.keys())[:to_delete_count]
-                posts_to_delete_set.update(oldest_post_keys)
-
-                removed_links = 0
-                for key, post_num in list(message_to_post.items()):
-                    if post_num in posts_to_delete_set:
-                        del message_to_post[key]
-                        removed_links += 1
                 
+                posts_to_delete_set = set(oldest_post_keys)
+                
+                # Удаляем из message_to_post
+                keys_to_del_m2p = [key for key, post_num in message_to_post.items() if post_num in posts_to_delete_set]
+                for key in keys_to_del_m2p:
+                    message_to_post.pop(key, None)
+                
+                # Удаляем из messages_storage и post_to_messages
                 for post_num in oldest_post_keys:
                     messages_storage.pop(post_num, None)
                     post_to_messages.pop(post_num, None)
 
-                print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов и {removed_links} связей в message_to_post.")
+                print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов и {len(keys_to_del_m2p)} связей.")
         
-        # --- Блок 2: Неблокирующая очистка message_to_post ---
-        initial_count = len(message_to_post)
-        
+        # --- Блок 2: Неблокирующая очистка message_to_post (тяжелая операция) ---
         async with storage_lock:
+            # Копируем данные для безопасной работы в другом потоке
             actual_post_nums = set(messages_storage.keys())
             message_to_post_copy = message_to_post.copy()
         
@@ -1361,6 +1359,7 @@ async def auto_memory_cleaner():
                 if (now_utc - last_act) < timedelta(hours=24)
             ])
         
+        # Выполняем тяжелую фильтрацию в отдельном потоке
         cleaned_message_to_post = await loop.run_in_executor(
             save_executor,
             _sync_clean_message_to_post,
@@ -1369,100 +1368,65 @@ async def auto_memory_cleaner():
             all_active_users
         )
         
+        # Атомарно обновляем основной словарь
         async with storage_lock:
+            initial_count = len(message_to_post)
             message_to_post.clear()
             message_to_post.update(cleaned_message_to_post)
+            removed_count = initial_count - len(message_to_post)
         
-        removed_count = initial_count - len(message_to_post)
         print(f"🧹 Очистка message_to_post: удалено {removed_count} связей (осталось {len(message_to_post)})")
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Блок 3 под защитой ---
+        # --- Блок 3: Очистка данных досок (быстрые операции под блокировкой) ---
         async with storage_lock:
-            # 3. Очистка данных для каждой доски
             for board_id in BOARDS:
                 b_data = board_data[board_id]
+                now_utc = datetime.now(UTC) # Обновляем время
 
+                # Очистка message_counter
                 if len(b_data['message_counter']) > 100:
-                    top_users = sorted(b_data['message_counter'].items(),
-                                       key=lambda x: x[1],
-                                       reverse=True)[:100]
+                    top_users = sorted(b_data['message_counter'].items(), key=lambda x: x[1], reverse=True)[:100]
                     b_data['message_counter'] = defaultdict(int, top_users)
-                    print(f"🧹 [{board_id}] Очистка счетчика сообщений.")
 
+                # Очистка неактивных пользователей (last_activity и связанные данные)
                 inactive_threshold = now_utc - timedelta(hours=12)
-                potentially_inactive_users = {
-                    user_id for user_id, last_time in b_data.get('last_activity', {}).items()
-                    if last_time < inactive_threshold
-                }
-                users_with_active_mute = {
-                    uid for uid, expiry in b_data.get('mutes', {}).items() if expiry > now_utc
-                }
-                users_with_active_shadow_mute = {
-                    uid for uid, expiry in b_data.get('shadow_mutes', {}).items() if expiry > now_utc
-                }
-                users_to_purge = list(
-                    potentially_inactive_users - users_with_active_mute - users_with_active_shadow_mute
-                )
-                if users_to_purge:
-                    purged_count = len(users_to_purge)
-                    print(f"🧹 [{board_id}] Начинаю очистку данных для {purged_count} неактивных пользователей...")
-                    for user_id in users_to_purge:
-                        b_data['last_activity'].pop(user_id, None)
-                        b_data['last_texts'].pop(user_id, None)
-                        b_data['last_stickers'].pop(user_id, None)
-                        b_data['last_animations'].pop(user_id, None)
-                        b_data['spam_violations'].pop(user_id, None)
-                        b_data['spam_tracker'].pop(user_id, None)
-                        b_data['last_user_msgs'].pop(user_id, None)
-                    print(f"🧹 [{board_id}] Очистка завершена. Удалены временные данные {purged_count} пользователей.")
+                active_mutes = {uid for uid, expiry in b_data.get('mutes', {}).items() if expiry > now_utc}
+                active_shadow_mutes = {uid for uid, expiry in b_data.get('shadow_mutes', {}).items() if expiry > now_utc}
+                
+                users_to_purge = [
+                    uid for uid, last_time in b_data.get('last_activity', {}).items()
+                    if last_time < inactive_threshold and uid not in active_mutes and uid not in active_shadow_mutes
+                ]
+                
+                for user_id in users_to_purge:
+                    b_data['last_activity'].pop(user_id, None)
+                    b_data['last_texts'].pop(user_id, None)
+                    b_data['last_stickers'].pop(user_id, None)
+                    b_data['last_animations'].pop(user_id, None)
+                    b_data['spam_violations'].pop(user_id, None)
+                    b_data['spam_tracker'].pop(user_id, None)
+                    b_data['last_user_msgs'].pop(user_id, None)
 
-                for user_id in list(b_data['last_user_msgs']):
-                    if user_id not in b_data['users']['active']:
-                        b_data['last_user_msgs'].pop(user_id, None)
-                for user_id in list(b_data['last_texts']):
-                    if user_id not in b_data['users']['active']:
-                        b_data['last_texts'].pop(user_id, None)
-                for user_id in list(b_data['last_stickers']):
-                    if user_id not in b_data['users']['active']:
-                        b_data['last_stickers'].pop(user_id, None)
-                for user_id in list(b_data['last_animations']):
-                    if user_id not in b_data['users']['active']:
-                        b_data['last_animations'].pop(user_id, None)
-
-                active_mutes = b_data.get('mutes', {})
-                for user_id in list(active_mutes.keys()):
-                    if active_mutes[user_id] < now_utc:
-                        active_mutes.pop(user_id, None)
-
-                active_shadow_mutes = b_data.get('shadow_mutes', {})
-                for user_id in list(active_shadow_mutes.keys()):
-                    if active_shadow_mutes[user_id] < now_utc:
-                        active_shadow_mutes.pop(user_id, None)
-
+                # Очистка просроченных мутов
+                for user_id in list(b_data.get('mutes', {}).keys()):
+                    if b_data['mutes'][user_id] < now_utc:
+                        b_data['mutes'].pop(user_id, None)
+                for user_id in list(b_data.get('shadow_mutes', {}).keys()):
+                    if b_data['shadow_mutes'][user_id] < now_utc:
+                        b_data['shadow_mutes'].pop(user_id, None)
+                
+                # Очистка spam_tracker
                 spam_tracker_board = b_data['spam_tracker']
+                window_sec = SPAM_RULES.get('text', {}).get('window_sec', 15)
+                window_start = now_utc - timedelta(seconds=window_sec)
                 for user_id in list(spam_tracker_board.keys()):
-                    window_sec = SPAM_RULES.get('text', {}).get('window_sec', 15)
-                    window_start = now_utc - timedelta(seconds=window_sec)
-                    spam_tracker_board[user_id] = [
-                        t for t in spam_tracker_board[user_id]
-                        if t > window_start
-                    ]
+                    spam_tracker_board[user_id] = [t for t in spam_tracker_board[user_id] if t > window_start]
                     if not spam_tracker_board[user_id]:
                         del spam_tracker_board[user_id]
-
-                inactive_threshold_spam = now_utc - timedelta(hours=24)
-                spam_violations_board = b_data['spam_violations']
-                users_to_purge_from_spam = [
-                    user_id for user_id, data in spam_violations_board.items()
-                    if data.get('last_reset', now_utc) < inactive_threshold_spam
-                ]
-                if users_to_purge_from_spam:
-                    for user_id in users_to_purge_from_spam:
-                        spam_violations_board.pop(user_id, None)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+        
+        # --- Блок 4: Очистка трекера реакций (без блокировки, т.к. у него свой лок) ---
         now_ts = time.time()
-        tracker_inactive_threshold_sec = 24 * 3600  # 24 часа
+        tracker_inactive_threshold_sec = 24 * 3600
         keys_to_delete_from_tracker = [
             author_id for author_id, timestamps in author_reaction_notify_tracker.items()
             if not timestamps or (now_ts - timestamps[-1] > tracker_inactive_threshold_sec)
@@ -1473,14 +1437,8 @@ async def auto_memory_cleaner():
             print(f"🧹 Очистка трекера реакций: удалено {len(keys_to_delete_from_tracker)} неактивных авторов.")
 
         gc.collect()
-
-        print(f"🧹 DIAG: objects in messages_storage: {len(messages_storage)}")
-        print(f"🧹 DIAG: objects in post_to_messages: {len(post_to_messages)}")
-        print(f"🧹 DIAG: objects in message_to_post: {len(message_to_post)}")
-        print(f"🧹 DIAG: objects in current_media_groups: {len(current_media_groups)}")
-        print(f"🧹 DIAG: objects in media_group_timers: {len(media_group_timers)}")
-        print(f"🧹 DIAG: objects in sent_media_groups: {len(sent_media_groups)}")
-
+        print(f"🧹 Очистка памяти завершена. Следующая через 10 минут.")
+        
 async def board_statistics_broadcaster():
     """Раз в час собирает общую статистику и рассылает на каждую доску."""
     await asyncio.sleep(300)
@@ -1928,10 +1886,12 @@ async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes
     """Удаляет сообщения пользователя за период в пределах КОНКРЕТНОЙ доски, включая очистку из тредов."""
     try:
         time_threshold = datetime.now(UTC) - timedelta(minutes=time_period_minutes)
-        posts_to_delete = []
-
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для безопасного чтения и удаления ---
+        posts_to_delete_info = [] # (post_num, thread_id)
+        
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Блок сбора данных под защитой ---
         async with storage_lock:
+            # 1. Собрать все посты пользователя для удаления
+            posts_to_process = []
             for post_num, post_data in list(messages_storage.items()):
                 post_time = post_data.get('timestamp')
                 if not post_time: continue
@@ -1939,46 +1899,50 @@ async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes
                 if (post_data.get('author_id') == user_id and
                     post_data.get('board_id') == board_id and
                     post_time >= time_threshold):
-                    posts_to_delete.append(post_num)
+                    posts_to_process.append(post_num)
             
-            if not posts_to_delete:
+            if not posts_to_process:
                 return 0
 
-            # Очищаем посты из данных тредов
+            # 2. Собрать информацию для очистки и удалить из хранилищ
+            for post_num in posts_to_process:
+                post_data = messages_storage.get(post_num, {})
+                thread_id = post_data.get('thread_id')
+                posts_to_delete_info.append((post_num, thread_id))
+                
+                # Собираем ключи для message_to_post и сразу удаляем их
+                if post_num in post_to_messages:
+                    for uid, mid in list(post_to_messages[post_num].items()):
+                        message_to_post.pop((uid, mid), None)
+                
+                # Немедленно удаляем из основных хранилищ
+                post_to_messages.pop(post_num, None)
+                messages_storage.pop(post_num, None)
+
+            # 3. Очищаем посты из данных тредов
             if board_id in THREAD_BOARDS:
                 threads_data = board_data[board_id].get('threads_data', {})
-                for post_num in posts_to_delete:
-                    post_data = messages_storage.get(post_num, {})
-                    thread_id = post_data.get('thread_id')
+                for post_num, thread_id in posts_to_delete_info:
                     if thread_id and thread_id in threads_data:
                         try:
-                            # Убедимся, что 'posts' существует перед удалением
                             if 'posts' in threads_data[thread_id]:
                                 threads_data[thread_id]['posts'].remove(post_num)
                         except (ValueError, KeyError):
                             pass
+        # --- КОНЕЦ ИЗМЕНЕНИЙ: Блокировка освобождена ---
+        
+        # Сетевые операции по удалению копий не проводятся
+        return len(posts_to_delete_info)
 
-            # Очищаем данные из глобальных хранилищ
-            for post_num in posts_to_delete:
-                if post_num in post_to_messages:
-                    for uid, mid in list(post_to_messages[post_num].items()):
-                        key = (uid, mid)
-                        if key in message_to_post:
-                            del message_to_post[key]
-            
-            for post_num in posts_to_delete:
-                post_to_messages.pop(post_num, None)
-                messages_storage.pop(post_num, None)
-
-        return len(posts_to_delete)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     except Exception as e:
         print(f"Ошибка в delete_user_posts: {e}")
         return 0
         
 async def delete_single_post(post_num: int, bot_instance: Bot) -> int:
     """Удаляет один конкретный пост, включая очистку из треда."""
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка для безопасного чтения и удаления ---
+    messages_to_delete_info = []
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Блок сбора данных под защитой ---
     async with storage_lock:
         if post_num not in messages_storage:
             return 0
@@ -1986,7 +1950,7 @@ async def delete_single_post(post_num: int, bot_instance: Bot) -> int:
         post_data = messages_storage.get(post_num, {})
         board_id = post_data.get('board_id')
 
-        # Очищаем пост из данных треда
+        # 1. Очищаем пост из данных треда
         if board_id and board_id in THREAD_BOARDS:
             thread_id = post_data.get('thread_id')
             if thread_id:
@@ -1998,24 +1962,20 @@ async def delete_single_post(post_num: int, bot_instance: Bot) -> int:
                     except (ValueError, KeyError):
                         pass
 
-        # Собираем все сообщения для удаления, пока держим блокировку
-        messages_to_delete_info = []
+        # 2. Собираем все сообщения для удаления, пока держим блокировку
         if post_num in post_to_messages:
             for uid, mid in post_to_messages[post_num].items():
                 messages_to_delete_info.append((uid, mid))
 
-        # Очищаем данные из глобальных хранилищ
-        if post_num in post_to_messages:
-            for uid, mid in list(post_to_messages[post_num].items()):
-                key = (uid, mid)
-                if key in message_to_post:
-                    del message_to_post[key]
+        # 3. Очищаем данные из глобальных хранилищ
+        for uid, mid in messages_to_delete_info:
+            message_to_post.pop((uid, mid), None)
         
         post_to_messages.pop(post_num, None)
         messages_storage.pop(post_num, None)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    # --- КОНЕЦ ИЗМЕНЕНИЙ: Блокировка освобождена ---
 
-    # Выполняем медленные сетевые операции уже после освобождения блокировки
+    # 4. Выполняем медленные сетевые операции уже после освобождения блокировки
     deleted_count = 0
     for (uid, mid) in messages_to_delete_info:
         try:
@@ -2576,7 +2536,7 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
                     if board_id == 'int':
                         head = head.replace("Post", "🔴 Post")
                     else:
-                        head = head.replace("Пост", "🔴 Пост")
+                        head = head.replace("Пост", "🔴 Post")
                 
                 content_for_user = content.copy()
                 text_or_caption = content_for_user.get('text') or content_for_user.get('caption')
@@ -2587,6 +2547,7 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
                     elif 'caption' in content_for_user:
                         content_for_user['caption'] = text_with_you
                 
+                # Вызываем "чистую" функцию _format_message_body, которая больше не содержит блокировки
                 formatted_body = await _format_message_body(
                     content=content_for_user,
                     user_id_for_context=user_id,
@@ -2620,7 +2581,7 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
 
     tasks = [_edit_one(uid, mid) for uid, mid in message_copies_copy.items()]
     await asyncio.gather(*tasks)
-
+    
 async def execute_delayed_edit(post_num: int, bot_instance: Bot, author_id: int | None, notify_text: str | None, delay: float = 3.0):
     """
     Ждет задержку, отправляет уведомление (если оно есть), а затем редактирует пост.
@@ -6223,17 +6184,17 @@ async def start_background_tasks(bots: dict[str, Bot]):
     tasks = [
         asyncio.create_task(auto_backup()),
         asyncio.create_task(message_broadcaster(bots)),
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Передаем storage_lock в conan_roaster ---
         asyncio.create_task(conan_roaster(
             state, messages_storage, post_to_messages, message_to_post,
-            message_queues, format_header, board_data
+            message_queues, format_header, board_data, storage_lock
         )),
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         asyncio.create_task(motivation_broadcaster()),
         asyncio.create_task(auto_memory_cleaner()),
         asyncio.create_task(board_statistics_broadcaster()),
         asyncio.create_task(thread_lifecycle_manager(bots)),
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         asyncio.create_task(thread_notifier()),
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
     return tasks
