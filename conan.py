@@ -108,7 +108,7 @@ def conan_phrase(username: str = "Приятель") -> str:
         catch=secrets.choice(CATCHPHRASES),
     )
 
-async def conan_roaster(state, messages_storage, post_to_messages, message_to_post, message_queues, format_header, board_data):
+async def conan_roaster(state, messages_storage, post_to_messages, message_to_post, message_queues, format_header, board_data, storage_lock):
     """Каждые пару часов Конан отвечает рандомному посту на случайной доске."""
     while True:
         try:
@@ -125,48 +125,58 @@ async def conan_roaster(state, messages_storage, post_to_messages, message_to_po
             b_data = board_data[board_id]
             recipients = b_data['users']['active'] - b_data['users']['banned']
 
-            valid_posts = [
-                p for p in messages_storage.keys() if p in post_to_messages
-            ]
-            if not valid_posts:
-                continue
+            original_author_id = None
+            new_pnum = None
+            reply_map = {}
+            content = {}
 
-            post_num_to_reply = secrets.choice(valid_posts[-50:] if len(valid_posts) > 50 else valid_posts)
-            
-            original_post_data = messages_storage.get(post_num_to_reply, {})
-            original_author_id = original_post_data.get('author_id')
-            
-            reply_map = post_to_messages.get(post_num_to_reply, {})
-            if not reply_map:
-                continue
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Блок доступа к общим данным под защитой ---
+            async with storage_lock:
+                valid_posts = [
+                    p for p in messages_storage.keys() if p in post_to_messages
+                ]
+                if not valid_posts:
+                    continue
 
-            phrase = conan_phrase()
-            header, new_pnum = await format_header(board_id)
+                post_num_to_reply = secrets.choice(valid_posts[-50:] if len(valid_posts) > 50 else valid_posts)
+                
+                original_post_data = messages_storage.get(post_num_to_reply, {})
+                original_author_id = original_post_data.get('author_id')
+                
+                reply_map = post_to_messages.get(post_num_to_reply, {})
+                if not reply_map:
+                    continue
 
-            content = {
-                "type": "text",
-                "header": header,
-                "text": phrase,
-                "reply_to_post": post_num_to_reply
-            }
+                phrase = conan_phrase()
+                # format_header изменяет глобальный счетчик, его тоже нужно защитить
+                header, new_pnum = await format_header(board_id)
 
-            messages_storage[new_pnum] = {
-                'author_id': 0,
-                'timestamp': datetime.now(UTC),
-                'content': content,
-                'board_id': board_id
-            }
+                content = {
+                    "type": "text",
+                    "header": header,
+                    "text": phrase,
+                    "reply_to_post": post_num_to_reply
+                }
 
-            await message_queues[board_id].put({
-                "recipients": recipients,
-                "content": content,
-                "post_num": new_pnum,
-                "reply_info": reply_map,
-                "board_id": board_id,
-                "original_author": original_author_id
-            })
+                messages_storage[new_pnum] = {
+                    'author_id': 0,
+                    'timestamp': datetime.now(UTC),
+                    'content': content,
+                    'board_id': board_id
+                }
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-            print(f"✅ [{board_id}] Conan reply to #{post_num_to_reply} added to queue: {phrase[:50]}...")
+            # Постановка в очередь происходит после освобождения блокировки
+            if new_pnum and content:
+                await message_queues[board_id].put({
+                    "recipients": recipients,
+                    "content": content,
+                    "post_num": new_pnum,
+                    "reply_info": reply_map,
+                    "board_id": board_id,
+                    "original_author": original_author_id
+                })
+                print(f"✅ [{board_id}] Conan reply to #{post_num_to_reply} added to queue: {phrase[:50]}...")
 
         except Exception as e:
             print(f"❌ Conan error: {e}")
