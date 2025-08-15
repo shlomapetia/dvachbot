@@ -2111,15 +2111,17 @@ async def process_new_post(
     Корректно обрабатывает постинг как на доску, так и в треды.
     """
     b_data = board_data[board_id]
-    current_post_num = None  # Инициализируем на случай ошибки
+    current_post_num = None
     
+    # --- ИСПРАВЛЕНИЕ: Блок try теперь охватывает всю функцию ---
     try:
         user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
         thread_id = None
         recipients = set()
         reply_info = post_to_messages.get(reply_to_post, {}) if reply_to_post else {}
         
-        # --- Блок 1: Определение контекста (тред или доска) и генерация заголовка ---
+        # --- ВОССТАНОВЛЕННЫЙ БЛОК ---
+        # Блок 1: Определение контекста (тред или доска) и генерация заголовка
         if board_id in THREAD_BOARDS and user_location != 'main':
             thread_id = user_location
             thread_info = b_data.get('threads_data', {}).get(thread_id)
@@ -2149,12 +2151,11 @@ async def process_new_post(
             header_text, current_post_num = await format_header(board_id)
             recipients = b_data['users']['active'] - {user_id}
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем GLOBAL_BOTS ---
         numeral_level = check_post_numerals(current_post_num)
         if numeral_level:
             asyncio.create_task(
                 post_special_num_to_channel(
-                    bots=GLOBAL_BOTS, # <--- ИСПОЛЬЗУЕМ ГЛОБАЛЬНУЮ ПЕРЕМЕННУЮ
+                    bots=GLOBAL_BOTS,
                     board_id=board_id,
                     post_num=current_post_num,
                     level=numeral_level,
@@ -2162,12 +2163,12 @@ async def process_new_post(
                     author_id=user_id
                 )
             )
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         content['header'] = header_text
         content['reply_to_post'] = reply_to_post
+        # --- КОНЕЦ ВОССТАНОВЛЕННОГО БЛОКА ---
         
-        # ... остальной код функции без изменений ...
+        # Блок 2: Сохранение состояния и отправка автору под глобальной блокировкой
         async with storage_lock:
             messages_storage[current_post_num] = {
                 'author_id': user_id, 'timestamp': datetime.now(UTC), 'content': content,
@@ -2189,12 +2190,27 @@ async def process_new_post(
                     post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
                     message_to_post[(user_id, m.message_id)] = current_post_num
 
+        # Блок 3: Постановка в очередь для рассылки остальным
         if not is_shadow_muted and recipients:
             await message_queues[board_id].put({
                 'recipients': recipients, 'content': content, 'post_num': current_post_num,
                 'reply_info': reply_info, 'board_id': board_id,
                 'thread_id': thread_id
             })
+
+    except TelegramForbiddenError:
+        b_data['users']['active'].discard(user_id)
+        print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из process_new_post).")
+        if current_post_num in messages_storage:
+            async with storage_lock:
+                messages_storage.pop(current_post_num, None)
+
+    except Exception as e:
+        import traceback
+        print(f"❌ Критическая ошибка в process_new_post для user {user_id}: {e}\n{traceback.format_exc()}")
+        if current_post_num and current_post_num in messages_storage:
+            async with storage_lock:
+                messages_storage.pop(current_post_num, None)
 
     except TelegramForbiddenError:
         b_data['users']['active'].discard(user_id)
@@ -6006,7 +6022,6 @@ async def handle_message(message: Message):
     b_data = board_data[board_id]
 
     try:
-        # --- Блок 1: Первичные проверки пользователя ---
         if user_id in b_data['users']['banned']:
             await message.delete()
             return
@@ -6014,7 +6029,6 @@ async def handle_message(message: Message):
         mute_until = b_data['mutes'].get(user_id)
         if mute_until and mute_until > datetime.now(UTC):
             await message.delete()
-            # Уведомление о муте отправляется здесь, т.к. process_new_post не будет вызван
             left = mute_until - datetime.now(UTC)
             if board_id == 'int':
                 time_left_str = f"{int(left.total_seconds() // 60)}m {int(left.total_seconds() % 60)}s"
@@ -6059,35 +6073,28 @@ async def handle_message(message: Message):
         print(f"Ошибка на этапе первичных проверок для user {user_id}: {e}")
         return
 
-    # --- Блок 2: Подготовка данных для process_new_post ---
     await message.delete()
     
     is_shadow_muted = (user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC))
 
     reply_to_post = None
     if message.reply_to_message:
-        async with storage_lock: # Безопасно читаем message_to_post
+        async with storage_lock:
             lookup_key = (user_id, message.reply_to_message.message_id)
             reply_to_post = message_to_post.get(lookup_key)
     
     content = {'type': message.content_type}
     text_for_corpus = None
-    is_transform_mode_active = (
-        b_data['anime_mode'] or b_data['slavaukraine_mode'] or
-        b_data['zaputin_mode'] or b_data['suka_blyat_mode']
-    )
     
     if message.content_type == 'text':
         text_for_corpus = message.text
-        text_to_process = message.text if is_transform_mode_active else message.html_text
-        content.update({'text': text_to_process})
+        content.update({'text': message.text})
     
     elif message.content_type in ['photo', 'video', 'animation', 'document', 'audio', 'voice']:
         text_for_corpus = message.caption
         file_id_obj = getattr(message, message.content_type, [])
         if isinstance(file_id_obj, list): file_id_obj = file_id_obj[-1]
-        caption_to_process = (message.caption or "") if is_transform_mode_active else (getattr(message, 'caption_html_text', message.caption or ""))
-        content.update({'file_id': file_id_obj.file_id, 'caption': caption_to_process})
+        content.update({'file_id': file_id_obj.file_id, 'caption': message.caption or ""})
     
     elif message.content_type in ['sticker', 'video_note']:
         file_id_obj = getattr(message, message.content_type)
@@ -6099,7 +6106,7 @@ async def handle_message(message: Message):
         async with storage_lock:
             last_messages.append(text_for_corpus)
 
-    # --- Блок 3: Вызов унифицированного обработчика ---
+
     await process_new_post(
         bot_instance=message.bot,
         board_id=board_id,
