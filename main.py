@@ -487,7 +487,15 @@ def sync_git_operations(token: str) -> bool:
             return True
         else:
             print(f"❌ КРИТИЧЕСКАЯ ОШИБКА PUSH (код {result.returncode}):\n--- stderr ---\n{result.stderr}\n--- stdout ---\n{result.stdout}")
-            return 
+            return False
+
+    except subprocess.TimeoutExpired as e:
+        print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Таймаут операции git! Команда '{' '.join(e.cmd)}' не завершилась за {e.timeout} секунд.")
+        print(f"--- stderr ---\n{e.stderr or '(пусто)'}\n--- stdout ---\n{e.stdout or '(пусто)'}")
+        return False
+    except Exception as e:
+        print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА в sync_git_operations: {e}")
+        return False
         
 dp = Dispatcher()
 # Настройка логирования - только важные сообщения
