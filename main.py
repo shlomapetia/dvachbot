@@ -416,6 +416,7 @@ async def git_commit_and_push():
 def sync_git_operations(token: str) -> bool:
     """Синхронные Git-операции для бэкапа с жесткими таймаутами и подробным логированием."""
     GIT_TIMEOUT = 20  # Секунд на каждую сетевую git-операцию
+    GIT_LOCAL_TIMEOUT = 15 # Секунд на каждую локальную git-операцию
     try:
         work_dir = "/tmp/git_backup"
         os.makedirs(work_dir, exist_ok=True)
@@ -463,18 +464,18 @@ def sync_git_operations(token: str) -> bool:
             return True # Успешное завершение, так как нет работы
 
         # --- Локальные Git операции (быстрые, короткий таймаут) ---
-        subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True, timeout=5)
-        subprocess.run(["git", "-C", work_dir, "config", "user.email", "backup@dvachbot.com"], check=True, timeout=5)
-        subprocess.run(["git", "-C", work_dir, "add", "."], check=True, timeout=5)
+        subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True, timeout=GIT_LOCAL_TIMEOUT)
+        subprocess.run(["git", "-C", work_dir, "config", "user.email", "backup@dvachbot.com"], check=True, timeout=GIT_LOCAL_TIMEOUT)
+        subprocess.run(["git", "-C", work_dir, "add", "."], check=True, timeout=GIT_LOCAL_TIMEOUT)
         
         # Проверяем, есть ли что коммитить
-        status_result = subprocess.run(["git", "-C", work_dir, "status", "--porcelain"], capture_output=True, text=True, timeout=5)
+        status_result = subprocess.run(["git", "-C", work_dir, "status", "--porcelain"], capture_output=True, text=True, timeout=GIT_LOCAL_TIMEOUT)
         if not status_result.stdout:
             print("✅ Git: Нет изменений для коммита.")
             return True
 
         commit_msg = f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
-        subprocess.run(["git", "-C", work_dir, "commit", "-m", commit_msg], check=True, timeout=5)
+        subprocess.run(["git", "-C", work_dir, "commit", "-m", commit_msg], check=True, timeout=GIT_LOCAL_TIMEOUT)
 
         # --- Push - самая важная операция ---
         push_cmd = ["git", "-C", work_dir, "push", "origin", "main"]
@@ -486,15 +487,7 @@ def sync_git_operations(token: str) -> bool:
             return True
         else:
             print(f"❌ КРИТИЧЕСКАЯ ОШИБКА PUSH (код {result.returncode}):\n--- stderr ---\n{result.stderr}\n--- stdout ---\n{result.stdout}")
-            return False
-
-    except subprocess.TimeoutExpired as e:
-        print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Таймаут операции git! Команда '{' '.join(e.cmd)}' не завершилась за {e.timeout} секунд.")
-        print(f"--- stderr ---\n{e.stderr or '(пусто)'}\n--- stdout ---\n{e.stdout or '(пусто)'}")
-        return False
-    except Exception as e:
-        print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА в sync_git_operations: {e}")
-        return False
+            return 
         
 dp = Dispatcher()
 # Настройка логирования - только важные сообщения
@@ -939,22 +932,24 @@ def _sync_save_threads_data(board_id: str):
     
     threads_file = os.path.join(DATA_DIR, f"{board_id}_threads.json")
     try:
-        data_to_save = board_data[board_id].get('threads_data', {})
+        original_data = board_data[board_id].get('threads_data', {})
+        
+        # Создаем копию данных, пригодную для сериализации
+        data_to_save = {}
+        for thread_id, thread_info in original_data.items():
+            # Копируем всю информацию о треде
+            serializable_info = thread_info.copy()
+            # Если есть 'subscribers' и это set, конвертируем в list
+            if 'subscribers' in serializable_info and isinstance(serializable_info['subscribers'], set):
+                serializable_info['subscribers'] = list(serializable_info['subscribers'])
+            data_to_save[thread_id] = serializable_info
+
         with open(threads_file, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
         print(f"⛔ [{board_id}] Ошибка в потоке сохранения _threads.json: {e}")
         return False
-
-async def save_threads_data(board_id: str):
-    """Асинхронная обертка для сохранения данных о тредах."""
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(
-        save_executor,
-        _sync_save_threads_data,
-        board_id
-    )
 
 def _sync_save_user_states(board_id: str):
     """Синхронная функция для сохранения состояний пользователей в тредах."""
@@ -1148,8 +1143,16 @@ def load_state():
                 if os.path.exists(threads_file):
                     try:
                         with open(threads_file, 'r', encoding='utf-8') as f:
-                            b_data['threads_data'] = json.load(f)
-                            print(f"[{board_id}] Данные тредов загружены.")
+                            loaded_threads_data = json.load(f)
+                        
+                        # Обратная конвертация 'subscribers' из list в set
+                        for thread_id, thread_info in loaded_threads_data.items():
+                            if 'subscribers' in thread_info and isinstance(thread_info['subscribers'], list):
+                                thread_info['subscribers'] = set(thread_info['subscribers'])
+                        
+                        b_data['threads_data'] = loaded_threads_data
+                        print(f"[{board_id}] Данные тредов загружены и обработаны.")
+
                     except (json.JSONDecodeError, IOError) as e:
                         print(f"[{board_id}] Ошибка загрузки _threads.json: {e}")
                         b_data['threads_data'] = {}
@@ -1886,30 +1889,31 @@ async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes
     """Удаляет сообщения пользователя за период в пределах КОНКРЕТНОЙ доски, включая очистку из тредов."""
     try:
         time_threshold = datetime.now(UTC) - timedelta(minutes=time_period_minutes)
-        posts_to_delete_info = [] # (post_num, thread_id)
         
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Блок сбора данных под защитой ---
+        # --- ЭТАП 1: Быстрое чтение данных под блокировкой ---
+        # Создаем копию, чтобы итерация по ней не блокировала другие операции
         async with storage_lock:
-            # 1. Собрать все посты пользователя для удаления
-            posts_to_process = []
-            for post_num, post_data in list(messages_storage.items()):
-                post_time = post_data.get('timestamp')
-                if not post_time: continue
+            storage_copy = list(messages_storage.items())
 
-                if (post_data.get('author_id') == user_id and
-                    post_data.get('board_id') == board_id and
-                    post_time >= time_threshold):
-                    posts_to_process.append(post_num)
-            
-            if not posts_to_process:
-                return 0
+        # --- ЭТАП 2: Обработка данных вне блокировки ---
+        # Находим все посты, подлежащие удалению, не блокируя основной поток
+        posts_to_delete_info = [] # (post_num, thread_id)
+        for post_num, post_data in storage_copy:
+            post_time = post_data.get('timestamp')
+            if not post_time: continue
 
-            # 2. Собрать информацию для очистки и удалить из хранилищ
-            for post_num in posts_to_process:
-                post_data = messages_storage.get(post_num, {})
-                thread_id = post_data.get('thread_id')
-                posts_to_delete_info.append((post_num, thread_id))
-                
+            if (post_data.get('author_id') == user_id and
+                post_data.get('board_id') == board_id and
+                post_time >= time_threshold):
+                posts_to_delete_info.append((post_num, post_data.get('thread_id')))
+        
+        if not posts_to_delete_info:
+            return 0
+
+        # --- ЭТАП 3: Быстрая запись (удаление) под блокировкой ---
+        # Теперь, имея готовый список, быстро удаляем все из хранилищ
+        async with storage_lock:
+            for post_num, thread_id in posts_to_delete_info:
                 # Собираем ключи для message_to_post и сразу удаляем их
                 if post_num in post_to_messages:
                     for uid, mid in list(post_to_messages[post_num].items()):
@@ -1919,7 +1923,7 @@ async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes
                 post_to_messages.pop(post_num, None)
                 messages_storage.pop(post_num, None)
 
-            # 3. Очищаем посты из данных тредов
+            # Очищаем посты из данных тредов (если применимо)
             if board_id in THREAD_BOARDS:
                 threads_data = board_data[board_id].get('threads_data', {})
                 for post_num, thread_id in posts_to_delete_info:
@@ -1929,9 +1933,7 @@ async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes
                                 threads_data[thread_id]['posts'].remove(post_num)
                         except (ValueError, KeyError):
                             pass
-        # --- КОНЕЦ ИЗМЕНЕНИЙ: Блокировка освобождена ---
         
-        # Сетевые операции по удалению копий не проводятся
         return len(posts_to_delete_info)
 
     except Exception as e:
@@ -6247,17 +6249,34 @@ async def start_background_tasks(bots: dict[str, Bot]):
 
 async def supervisor():
     lock_file = "bot.lock"
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Улучшенная проверка lock-файла ---
     if os.path.exists(lock_file):
-        print("⛔ Bot already running! Exiting...")
-        sys.exit(1)
+        try:
+            with open(lock_file, "r") as f:
+                old_pid = int(f.read().strip())
+        except (IOError, ValueError):
+            print("⚠️ Lock-файл поврежден. Удаляю и продолжаю.")
+            os.remove(lock_file)
+        else:
+            # Проверяем, жив ли процесс с этим PID. Используем os.kill(pid, 0) для POSIX-систем.
+            # Эта команда не убивает процесс, а проверяет его существование.
+            try:
+                os.kill(old_pid, 0)
+                # Если команда выполнилась без ошибки, значит процесс жив.
+                print(f"⛔ Бот с PID {old_pid} уже запущен! Завершение работы...")
+                sys.exit(1)
+            except OSError:
+                # Если возникла ошибка, значит процесса с таким PID нет.
+                print(f"⚠️ Найден устаревший lock-файл от процесса {old_pid}. Удаляю и продолжаю.")
+                os.remove(lock_file)
     
+    # Создаем новый lock-файл с PID текущего процесса
     with open(lock_file, "w") as f:
         f.write(str(os.getpid()))
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     session = None
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем глобальную переменную ---
     global GLOBAL_BOTS
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     try:
         global is_shutting_down
         loop = asyncio.get_running_loop()
@@ -6285,10 +6304,8 @@ async def supervisor():
             else:
                 print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
         
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Присваиваем словарь глобальной переменной ---
         GLOBAL_BOTS = bots_temp
         if not GLOBAL_BOTS:
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             print("❌ Не найдено ни одного токена бота. Завершение работы.")
             if session:
                 await session.close()
