@@ -33,7 +33,7 @@ from aiogram.exceptions import (
     TelegramNetworkError,
     TelegramRetryAfter,
 )
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.media_group import MediaGroupBuilder
 
@@ -158,6 +158,7 @@ MAX_POSTS_PER_THREAD = 300 # Макс. постов в треде до архи�
 # --- Конфигурация кулдаунов ---
 THREAD_CREATE_COOLDOWN_USER = 1800  # 30 минут в секундах
 THREAD_HISTORY_COOLDOWN = 300 # 5 минут в секундах
+OP_COMMAND_COOLDOWN = 60 # 1 минута кулдауна для команд модерации ОПа в треде
 LOCATION_SWITCH_COOLDOWN = 5 # 5 секунд на смену локации (вход/выход)
 SUMMARIZE_COOLDOWN = 300 # 5 минут в секундах для команды /summarize
 
@@ -2326,6 +2327,7 @@ async def send_message_to_users(
     recipients: set[int],
     content: dict,
     reply_info: dict | None = None,
+    keyboard: InlineKeyboardMarkup | None = None, # <-- ИЗМЕНЕНИЕ: Добавлен новый аргумент
 ) -> list:
     """Оптимизированная рассылка сообщений пользователям с исправлением для video_note"""
     if not recipients or not content or 'type' not in content:
@@ -2354,7 +2356,6 @@ async def send_message_to_users(
             header_text = modified_content['header']
             head = f"<i>{escape_html(header_text)}</i>"
             
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Блокировка перенесена сюда ---
             async with storage_lock:
                 post_num = modified_content.get('post_num')
                 post_data = messages_storage.get(post_num, {})
@@ -2366,7 +2367,6 @@ async def send_message_to_users(
                     if "Пост" in head: head = head.replace("Пост", "🔴 Пост")
                     if "Post" in head: head = head.replace("Post", "🔴 Post")
 
-                # Модифицируем текст для конкретного пользователя (добавляем (You))
                 content_for_user = modified_content.copy()
                 text_or_caption = content_for_user.get('text') or content_for_user.get('caption')
                 if text_or_caption:
@@ -2376,14 +2376,12 @@ async def send_message_to_users(
                     elif 'caption' in content_for_user:
                         content_for_user['caption'] = text_with_you
 
-                # Вызываем "чистую" функцию форматирования
                 formatted_body = await _format_message_body(
                     content=content_for_user,
                     user_id_for_context=uid,
                     post_data=post_data,
                     reply_to_post_author_id=reply_author_id
                 )
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
 
@@ -2393,13 +2391,15 @@ async def send_message_to_users(
                 for idx, media in enumerate(modified_content['media']):
                     caption = full_text if idx == 0 else None
                     builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
+                # --- ИЗМЕНЕНИЕ: Клавиатура не поддерживается для медиагрупп, поэтому здесь ее не добавляем ---
                 return await bot_instance.send_media_group(chat_id=uid, media=builder.build(), reply_to_message_id=reply_to)
             
             method_name = f"send_{ct}"
             if ct == 'text': method_name = 'send_message'
             send_method = getattr(bot_instance, method_name)
             
-            kwargs = {'chat_id': uid, 'reply_to_message_id': reply_to}
+            # --- ИЗМЕНЕНИЕ: Добавляем reply_markup в основной словарь kwargs ---
+            kwargs = {'chat_id': uid, 'reply_to_message_id': reply_to, 'reply_markup': keyboard}
             
             if ct == 'text':
                 kwargs.update(text=full_text, parse_mode="HTML")
@@ -2423,7 +2423,8 @@ async def send_message_to_users(
                                 chat_id=uid, 
                                 text=fallback_content, 
                                 parse_mode="HTML",
-                                reply_to_message_id=reply_to
+                                reply_to_message_id=reply_to,
+                                reply_markup=keyboard
                             )
                         else:
                             raise
@@ -2474,7 +2475,8 @@ async def send_message_to_users(
                     chat_id=uid, 
                     text=final_text, 
                     parse_mode="HTML", 
-                    reply_to_message_id=reply_to
+                    reply_to_message_id=reply_to,
+                    reply_markup=keyboard
                 )
             else:
                 print(f"❌ Ошибка отправки (BadRequest) {uid} ботом {bot_instance.id}: {e}")
@@ -2669,8 +2671,9 @@ async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
             initial_recipients = msg_data['recipients']
             content = msg_data['content']
             post_num = msg_data['post_num']
-            # --- ИЗМЕНЕНИЕ: reply_info теперь берется из хранилища, а не из очереди ---
-            # reply_info = msg_data.get('reply_info', {}) 
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            keyboard = msg_data.get('keyboard') # Получаем клавиатуру, если она есть
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             thread_id = msg_data.get('thread_id')
             
@@ -2695,25 +2698,23 @@ async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
             content = await _apply_mode_transformations(content, board_id)
             content['post_num'] = post_num
 
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Извлечение reply_info под блокировкой ---
             reply_info_copy = {}
             async with storage_lock:
-                # Получаем самую актуальную информацию о копиях поста
-                # Это важно, так как копия для автора уже создана
                 if post_num in post_to_messages:
                     reply_info_copy = post_to_messages[post_num].copy()
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
+            # --- ИЗМЕНЕНИЕ: Передаем клавиатуру в send_message_to_users ---
             await send_message_to_users(
                 bot_instance,
                 active_recipients,
                 content,
-                reply_info_copy # <-- Передаем актуальные данные
+                reply_info_copy,
+                keyboard=keyboard 
             )
         except Exception as e:
             print(f"{worker_name} | ⛔ Критическая ошибка: {str(e)[:200]}")
             import traceback
-            traceback.print_exc() # <-- Добавлено для полного дебага
+            traceback.print_exc()
             await asyncio.sleep(1)
 
 async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_location: str):
@@ -3135,6 +3136,37 @@ async def cmd_start(message: types.Message):
     if not board_id: return
     
     b_data = board_data[board_id]
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Обработка deep link ---
+    # Извлекаем payload из команды
+    command_payload = message.text.split()[1] if len(message.text.split()) > 1 else None
+
+    # Обработка входа в тред по ссылке
+    if command_payload and command_payload.startswith("thread_"):
+        thread_id = command_payload.split('_')[-1]
+        
+        # Проверяем, существует ли тред на этой доске
+        if board_id in THREAD_BOARDS and thread_id in b_data.get('threads_data', {}):
+            b_data['users']['active'].add(user_id) # Активируем пользователя
+            user_s = b_data['user_state'].setdefault(user_id, {})
+            
+            # Перемещаем пользователя в тред
+            user_s['location'] = thread_id
+            user_s['last_location_switch'] = time.time()
+            b_data['threads_data'][thread_id].setdefault('subscribers', set()).add(user_id)
+            
+            # Отправляем приветственное сообщение и пропущенные посты
+            await message.answer(f"Вы перешли в тред «{b_data['threads_data'][thread_id].get('title', '...')}»")
+            await send_missed_messages(message.bot, board_id, user_id, thread_id)
+            await _send_op_commands_info(message.bot, user_id, board_id)
+            
+            # Удаляем команду /start, чтобы не засорять чат
+            try:
+                await message.delete()
+            except TelegramBadRequest:
+                pass
+            return # Завершаем выполнение, чтобы не отправлять стандартное приветствие
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if user_id not in b_data['users']['active']:
         b_data['users']['active'].add(user_id)
@@ -3144,30 +3176,9 @@ async def cmd_start(message: types.Message):
     
     await message.answer(start_text, parse_mode="HTML", disable_web_page_preview=True)
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Дополнительное сообщение на досках с тредами ---
-    if board_id in THREAD_BOARDS:
-        lang = 'en' if board_id == 'int' else 'ru'
-        if lang == 'en':
-            thread_commands_text = (
-                "<b>Thread Commands:</b>\n"
-                "<code>/create &lt;title&gt;</code> - Create a new thread\n"
-                "<code>/threads</code> - View active threads\n"
-                "<code>/leave</code> - Return to the main board from a thread"
-            )
-        else:
-            thread_commands_text = (
-                "<b>Команды для тредов:</b>\n"
-                "<code>/create &lt;заголовок&gt;</code> - Создать новый тред\n"
-                "<code>/threads</code> - Посмотреть активные треды\n"
-                "<code>/leave</code> - Вернуться на доску из треда"
-            )
-        # Добавляем небольшую задержку для визуального разделения сообщений
-        await asyncio.sleep(0.5)
-        await message.answer(thread_commands_text, parse_mode="HTML")
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    await _send_thread_info_if_applicable(message, board_id)
     
     await message.delete()
-
     
 
 AHE_EYES = ['😵', '🤤', '😫', '😩', '😳', '😖', '🥵']
@@ -3809,8 +3820,6 @@ async def cmd_create(message: types.Message):
     except Exception as e:
         print(f"Не удалось отправить сообщение о входе в тред пользователю {user_id}: {e}")
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Запускаем задачу для отправки уведомления в служебный канал
     asyncio.create_task(post_thread_notification_to_channel(
         bots=GLOBAL_BOTS,
         board_id=board_id,
@@ -3818,6 +3827,10 @@ async def cmd_create(message: types.Message):
         thread_info=thread_info,
         event_type='new_thread'
     ))
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Отправляем ОПу информацию о его командах
+    await _send_op_commands_info(message.bot, user_id, board_id)
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 
@@ -4024,6 +4037,46 @@ async def post_special_num_to_channel(bots: dict[str, Bot], board_id: str, post_
 
     except Exception as e:
         print(f"⛔ Не удалось отправить пост #{post_num} в канал: {e}")
+
+async def _send_op_commands_info(bot: Bot, chat_id: int, board_id: str):
+    """
+    Проверяет, является ли пользователь ОПом, и отправляет ему список команд модерации.
+    """
+    b_data = board_data[board_id]
+    user_s = b_data.get('user_state', {}).get(chat_id, {})
+    location = user_s.get('location', 'main')
+
+    # Если пользователь не в треде, ничего не делаем
+    if location == 'main':
+        return
+
+    thread_info = b_data.get('threads_data', {}).get(location)
+    # Проверяем, что тред существует и что ID пользователя совпадает с ID ОПа
+    if thread_info and thread_info.get('op_id') == chat_id:
+        lang = 'en' if board_id == 'int' else 'ru'
+        
+        if lang == 'en':
+            op_commands_text = (
+                "<b>You are the OP of this thread.</b>\n\n"
+                "You have access to moderation commands (reply to a message to use):\n"
+                "<code>/mute</code> - Mute user in this thread for 10 minutes.\n"
+                "<code>/unmute</code> - Unmute user.\n"
+                "<i>(These commands have a 1-minute cooldown)</i>"
+            )
+        else:
+            op_commands_text = (
+                "<b>Вы являетесь ОПом этого треда.</b>\n\n"
+                "Вам доступны команды модерации (используйте ответом на сообщение):\n"
+                "<code>/mute</code> - Замутить пользователя в этом треде на 10 минут.\n"
+                "<code>/unmute</code> - Размутить пользователя.\n"
+                "<i>(Кулдаун на использование команд - 1 минута)</i>"
+            )
+        
+        try:
+            await asyncio.sleep(0.5) # Небольшая задержка для визуального разделения
+            await bot.send_message(chat_id, op_commands_text, parse_mode="HTML")
+        except (TelegramForbiddenError, TelegramBadRequest) as e:
+            print(f"Не удалось отправить OP-команды пользователю {chat_id}: {e}")
 
 async def post_thread_notification_to_channel(bots: dict[str, Bot], board_id: str, thread_id: str, thread_info: dict, event_type: str, details: dict | None = None):
     """
@@ -4425,20 +4478,14 @@ async def cq_enter_thread(callback: types.CallbackQuery):
         await callback.answer()
         return
         
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Сохраняем, какой пост был последним на доске перед уходом
     if current_location == 'main':
         user_s['last_seen_main'] = state.get('post_counter', 0)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     user_s['location'] = thread_id
     user_s['last_location_switch'] = now_ts
     threads_data[thread_id].setdefault('subscribers', set()).add(user_id)
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Подгружаем пропущенные сообщения
     await send_missed_messages(callback.bot, board_id, user_id, thread_id)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     thread_title = threads_data[thread_id].get('title', '...')
     
@@ -4456,6 +4503,11 @@ async def cq_enter_thread(callback: types.CallbackQuery):
         pass
         
     await callback.answer()
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Отправляем ОПу информацию о его командах, если он входит в свой тред
+    await _send_op_commands_info(callback.bot, user_id, board_id)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 @dp.message(Command("leave"))
 async def cmd_leave(message: types.Message):
@@ -4742,6 +4794,16 @@ async def cmd_op_mute(message: types.Message):
         await message.delete()
         return
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка кулдауна ---
+    now_ts = time.time()
+    last_op_command_ts = user_s.get('last_op_command_ts', 0)
+
+    if now_ts - last_op_command_ts < OP_COMMAND_COOLDOWN:
+        # Не отвечаем сообщением, чтобы не создавать лишний флуд
+        await message.delete()
+        return
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     if not message.reply_to_message:
         await message.delete()
         return
@@ -4764,6 +4826,10 @@ async def cmd_op_mute(message: types.Message):
     
     await message.answer(response_text)
     await message.delete()
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновление времени использования команды ---
+    user_s['last_op_command_ts'] = now_ts
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 @dp.message(Command("unmute"))
 async def cmd_op_unmute(message: types.Message):
@@ -4794,6 +4860,15 @@ async def cmd_op_unmute(message: types.Message):
         await message.delete()
         return
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка кулдауна ---
+    now_ts = time.time()
+    last_op_command_ts = user_s.get('last_op_command_ts', 0)
+
+    if now_ts - last_op_command_ts < OP_COMMAND_COOLDOWN:
+        await message.delete()
+        return
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     if not message.reply_to_message:
         await message.delete()
         return
@@ -4811,6 +4886,9 @@ async def cmd_op_unmute(message: types.Message):
         del local_mutes[target_id]
         response_text = random.choice(thread_messages[lang]['op_unmute_success'])
         await message.answer(response_text)
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновление времени использования команды ---
+        user_s['last_op_command_ts'] = now_ts
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     await message.delete()
     
@@ -4819,14 +4897,15 @@ async def cmd_op_shadowmute(message: types.Message):
     """Обрабатывает локальный теневой мут пользователя ОПом в треде."""
     board_id = get_board_id(message)
     if not board_id or board_id not in THREAD_BOARDS: return
-    # Если это админ, пусть работает админская команда /shadowmute, которая идет следующей
     if is_admin(message.from_user.id, board_id): return
 
     user_id = message.from_user.id
     b_data = board_data[board_id]
     lang = 'en' if board_id == 'int' else 'ru'
 
-    location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+    user_s = b_data.get('user_state', {}).get(user_id, {})
+    location = user_s.get('location', 'main')
+    
     if location == 'main':
         await message.delete()
         return
@@ -4836,15 +4915,22 @@ async def cmd_op_shadowmute(message: types.Message):
         await message.delete()
         return
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка кулдауна ---
+    now_ts = time.time()
+    last_op_command_ts = user_s.get('last_op_command_ts', 0)
+
+    if now_ts - last_op_command_ts < OP_COMMAND_COOLDOWN:
+        await message.delete()
+        return
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     if not message.reply_to_message:
         await message.delete()
         return
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     target_id = None
     async with storage_lock:
         target_id = get_author_id_by_reply(message)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     if not target_id or target_id == user_id:
         await message.delete()
@@ -4859,6 +4945,10 @@ async def cmd_op_shadowmute(message: types.Message):
     await message.answer(f"👻 (shadow) {response_text}")
     await message.delete()
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновление времени использования команды ---
+    user_s['last_op_command_ts'] = now_ts
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
 @dp.message(Command("unshadowmute"))
 async def cmd_op_unshadowmute(message: types.Message):
     """Обрабатывает локальный теневой размут пользователя ОПом в треде."""
@@ -4870,7 +4960,9 @@ async def cmd_op_unshadowmute(message: types.Message):
     b_data = board_data[board_id]
     lang = 'en' if board_id == 'int' else 'ru'
 
-    location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+    user_s = b_data.get('user_state', {}).get(user_id, {})
+    location = user_s.get('location', 'main')
+    
     if location == 'main':
         await message.delete()
         return
@@ -4880,15 +4972,22 @@ async def cmd_op_unshadowmute(message: types.Message):
         await message.delete()
         return
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка кулдауна ---
+    now_ts = time.time()
+    last_op_command_ts = user_s.get('last_op_command_ts', 0)
+
+    if now_ts - last_op_command_ts < OP_COMMAND_COOLDOWN:
+        await message.delete()
+        return
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     if not message.reply_to_message:
         await message.delete()
         return
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     target_id = None
     async with storage_lock:
         target_id = get_author_id_by_reply(message)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if not target_id:
         await message.delete()
@@ -4899,8 +4998,12 @@ async def cmd_op_unshadowmute(message: types.Message):
         del local_shadow_mutes[target_id]
         response_text = random.choice(thread_messages[lang]['op_unmute_success'])
         await message.answer(f"👻 (shadow) {response_text}")
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновление времени использования команды ---
+        user_s['last_op_command_ts'] = now_ts
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     await message.delete()
+    
 @dp.message(Command("invite"))
 async def cmd_invite(message: types.Message):
     board_id = get_board_id(message)
@@ -6351,9 +6454,11 @@ async def thread_notifier():
         current_post_counter = state.get('post_counter', 0)
         if current_post_counter > last_checked_post_counter_for_notify:
             new_thread_posts_count = defaultdict(lambda: defaultdict(int))
-            for p_num in range(last_checked_post_counter_for_notify + 1, current_post_counter + 1):
-                post_data = messages_storage.get(p_num)
-                if not post_data: continue
+            
+            async with storage_lock: # Безопасно читаем данные
+                posts_slice = {k: v for k, v in messages_storage.items() if k > last_checked_post_counter_for_notify}
+
+            for p_num, post_data in posts_slice.items():
                 b_id = post_data.get('board_id')
                 if b_id in THREAD_BOARDS:
                     t_id = post_data.get('thread_id')
@@ -6380,12 +6485,22 @@ async def thread_notifier():
                         title = thread_info.get('title', '...')
                         notification_text = random.choice(thread_messages[lang]['thread_activity_notification']).format(title=title, count=count)
                         
+                        # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавление кнопки ---
+                        bot_username = BOARD_CONFIG[board_id]['username'].lstrip('@')
+                        deeplink_url = f"https://t.me/{bot_username}?start=thread_{thread_id}"
+                        button_text = "Зайти в тред" if lang == 'ru' else "Enter Thread"
+                        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text=button_text, url=deeplink_url)]
+                        ])
+                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
                         header, pnum = await format_header(board_id)
                         content = {'type': 'text', 'header': header, 'text': notification_text, 'is_system_message': True}
                         messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
                         
+                        # --- ИЗМЕНЕНИЕ: Передаем клавиатуру в очередь ---
                         await message_queues[board_id].put({
-                            'recipients': recipients_in_main, 'content': content, 'post_num': pnum, 'board_id': board_id
+                            'recipients': recipients_in_main, 'content': content, 'post_num': pnum, 'board_id': board_id, 'keyboard': keyboard
                         })
 
         # --- Блок 2: Уведомления о приближении к бамп-лимиту ---
@@ -6408,16 +6523,26 @@ async def thread_notifier():
                 remaining = MAX_POSTS_PER_THREAD - current_posts
 
                 if 0 < remaining <= THREAD_BUMP_LIMIT_WARNING_THRESHOLD:
-                    thread_info['bump_limit_notified'] = True # Ставим флаг, чтобы не спамить
+                    thread_info['bump_limit_notified'] = True
                     title = thread_info.get('title', '...')
                     notification_text = random.choice(thread_messages[lang]['thread_reaching_bump_limit']).format(title=title, remaining=remaining)
+                    
+                    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавление кнопки ---
+                    bot_username = BOARD_CONFIG[board_id]['username'].lstrip('@')
+                    deeplink_url = f"https://t.me/{bot_username}?start=thread_{thread_id}"
+                    button_text = "Зайти в тред" if lang == 'ru' else "Enter Thread"
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text=button_text, url=deeplink_url)]
+                    ])
+                    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
                     header, pnum = await format_header(board_id)
                     content = {'type': 'text', 'header': header, 'text': notification_text, 'is_system_message': True}
                     messages_storage[pnum] = {'author_id': 0, 'timestamp': datetime.now(UTC), 'content': content, 'board_id': board_id}
                     
+                    # --- ИЗМЕНЕНИЕ: Передаем клавиатуру в очередь ---
                     await message_queues[board_id].put({
-                        'recipients': recipients_in_main, 'content': content, 'post_num': pnum, 'board_id': board_id
+                        'recipients': recipients_in_main, 'content': content, 'post_num': pnum, 'board_id': board_id, 'keyboard': keyboard
                     })
                     
 async def start_background_tasks(bots: dict[str, Bot]):
