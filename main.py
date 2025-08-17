@@ -6198,6 +6198,35 @@ async def handle_message_reaction(reaction: types.MessageReactionUpdated):
         import traceback
         print(f"❌ Критическая ошибка в handle_message_reaction: {e}\n{traceback.format_exc()}")
 
+@dp.message(F.poll)
+async def handle_poll(message: types.Message):
+    """Отправляет заглушку при попытке отправить опрос."""
+    board_id = get_board_id(message)
+    if not board_id:
+        return
+
+    lang = 'en' if board_id == 'int' else 'ru'
+    
+    if lang == 'en':
+        text = (
+            "<b>Polls are not supported.</b>\n\n"
+            "Technically, it's impossible to send the same poll instance to all users. "
+            "Every anon would receive a unique copy, which breaks the chat's mechanics."
+        )
+    else:
+        text = (
+            "<b>Опросы не поддерживаются.</b>\n\n"
+            "Технически невозможно разослать один и тот же опрос всем пользователям. "
+            "Каждый анон получил бы свою уникальную копию, что ломает механику чата."
+        )
+        
+    try:
+        # Отправляем ответ в личный чат с пользователем
+        await message.answer(text, parse_mode="HTML")
+    except (TelegramForbiddenError, TelegramBadRequest):
+        # Игнорируем, если пользователь заблокировал бота или другая ошибка
+        pass
+
 @dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
