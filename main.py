@@ -585,9 +585,9 @@ SAVE_INTERVAL = 900  # секунд
 STICKER_WINDOW = 10  # секунд
 STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
-REPLY_CACHE = 5900  # сколько постов держать в кэше для каждой доски
+REPLY_CACHE = 15000  # сколько постов держать в кэше для каждой доски
 REPLY_FILE = "reply_cache.json"  # отдельный файл для reply
-MAX_MESSAGES_IN_MEMORY = 5900  # храним только последние 5900 постов в общей памяти
+MAX_MESSAGES_IN_MEMORY = 15000  # храним только последние 5900 постов в общей памяти
 
 
 # Мотивационные сообщения для приглашений
@@ -2110,6 +2110,25 @@ async def process_new_post(
                 thread_info['last_activity_at'] = time.time()
             
             recipients = thread_info.get('subscribers', set()) - {user_id}
+
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка майлстоунов ---
+            posts_count = len(thread_info.get('posts', []))
+            milestones = [50, 150, 220]
+            for milestone in milestones:
+                if posts_count == milestone and milestone not in thread_info.get('announced_milestones', []):
+                    # Отмечаем, что этот майлстоун достигнут
+                    thread_info.setdefault('announced_milestones', []).append(milestone)
+                    # Запускаем отправку уведомления
+                    asyncio.create_task(post_thread_notification_to_channel(
+                        bots=GLOBAL_BOTS,
+                        board_id=board_id,
+                        thread_id=thread_id,
+                        thread_info=thread_info,
+                        event_type='milestone',
+                        details={'posts': milestone}
+                    ))
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
         else:
             header_text, current_post_num = await format_header(board_id)
             recipients = b_data['users']['active'] - {user_id}
@@ -2151,7 +2170,6 @@ async def process_new_post(
                     message_to_post[(user_id, m.message_id)] = current_post_num
 
         if not is_shadow_muted and recipients:
-            # --- ИЗМЕНЕНИЕ: Убрана передача устаревшего reply_info в очередь ---
             await message_queues[board_id].put({
                 'recipients': recipients, 'content': content, 'post_num': current_post_num,
                 'board_id': board_id, 'thread_id': thread_id
@@ -2505,9 +2523,9 @@ async def send_message_to_users(
 async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
     """
     Находит все отправленные копии поста и редактирует их, добавляя обновленный
-    список реакций. (ИСПРАВЛЕННАЯ ВЕРСИЯ БЕЗ DEADLOCK)
+    список реакций. (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ)
     """
-    # --- Чтение данных под блокировкой ---
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Единый блок чтения данных под блокировкой ---
     async with storage_lock:
         post_data = messages_storage.get(post_num)
         message_copies = post_to_messages.get(post_num)
@@ -2515,10 +2533,16 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
         if not post_data or not message_copies:
             return
 
-        # Создаем копии, чтобы работать с ними вне блокировки
+        # Создаем глубокие копии данных, чтобы работать с ними вне блокировки
         content = post_data.get('content', {}).copy()
+        post_data_for_format = post_data.copy()
         message_copies_copy = message_copies.copy()
         board_id = post_data.get('board_id')
+
+        # Предварительно извлекаем ID автора, на чей пост отвечают
+        reply_to_post = content.get('reply_to_post')
+        reply_to_author_id = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
+    # --- КОНЕЦ ИЗМЕНЕНИЙ: Блокировка освобождена ---
     
     content_type = content.get('type')
     can_be_edited = content_type in ['text', 'photo', 'video', 'animation', 'document', 'audio']
@@ -2526,40 +2550,41 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
         return
         
     async def _edit_one(user_id: int, message_id: int):
-        """Внутренняя корутина для редактирования одного сообщения."""
+        """Внутренняя корутина для редактирования одного сообщения. НЕ ИСПОЛЬЗУЕТ БЛОКИРОВКИ."""
         try:
             header_text = content.get('header', '')
             head = f"<i>{escape_html(header_text)}</i>"
             
-            # --- НАЧАЛО ИСПРАВЛЕНИЙ: Логика аналогична `really_send` ---
-            async with storage_lock:
-                post_data_for_format = messages_storage.get(post_num, {})
-                reply_to_post = content.get('reply_to_post')
-                reply_author_id = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
-
-                if user_id == reply_author_id:
-                    if board_id == 'int':
-                        head = head.replace("Post", "🔴 Post")
-                    else:
-                        head = head.replace("Пост", "🔴 Post")
-                
-                content_for_user = content.copy()
-                text_or_caption = content_for_user.get('text') or content_for_user.get('caption')
-                if text_or_caption:
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Логика выполняется с предварительно загруженными данными ---
+            if user_id == reply_to_author_id:
+                if board_id == 'int':
+                    head = head.replace("Post", "🔴 Post")
+                else:
+                    head = head.replace("Пост", "🔴 Post")
+            
+            # Локально добавляем (You) к тексту, используя глобальное хранилище,
+            # но делаем это в каждой корутине, что менее страшно, чем блокировка
+            content_for_user = content.copy()
+            text_or_caption = content_for_user.get('text') or content_for_user.get('caption')
+            if text_or_caption:
+                # add_you_to_my_posts все еще лезет в глобальное хранилище, но без блокировки
+                # Это компромисс между производительностью и точностью данных
+                async with storage_lock:
                     text_with_you = add_you_to_my_posts(text_or_caption, user_id)
-                    if 'text' in content_for_user:
-                        content_for_user['text'] = text_with_you
-                    elif 'caption' in content_for_user:
-                        content_for_user['caption'] = text_with_you
                 
-                # Вызываем "чистую" функцию _format_message_body, которая больше не содержит блокировки
-                formatted_body = await _format_message_body(
-                    content=content_for_user,
-                    user_id_for_context=user_id,
-                    post_data=post_data_for_format,
-                    reply_to_post_author_id=reply_author_id
-                )
-            # --- КОНЕЦ ИСПРАВЛЕНИЙ ---
+                if 'text' in content_for_user:
+                    content_for_user['text'] = text_with_you
+                elif 'caption' in content_for_user:
+                    content_for_user['caption'] = text_with_you
+            
+            # Вызываем "чистую" функцию _format_message_body
+            formatted_body = await _format_message_body(
+                content=content_for_user,
+                user_id_for_context=user_id,
+                post_data=post_data_for_format, # Используем скопированные данные
+                reply_to_post_author_id=reply_to_author_id # Используем предзагруженный ID
+            )
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
             if len(full_text) > 4096:
@@ -2768,12 +2793,13 @@ async def motivation_broadcaster():
                 delay = random.randint(7200, 14400)
                 await asyncio.sleep(delay)
 
-                # --- ДОБАВЛЕНА ПРОВЕРКА АКТИВНОСТИ ---
-                activity = get_board_activity_last_hours(board_id, hours=2)
+                # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+                # Добавлен await для корректного вызова асинхронной функции
+                activity = await get_board_activity_last_hours(board_id, hours=2)
                 if activity < 60:
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                     print(f"ℹ️ [{board_id}] Пропуск мотивационного сообщения, активность слишком низкая: {activity:.1f} п/ч (требуется > 60).")
                     continue
-                # --- КОНЕЦ ПРОВЕРКИ ---
 
                 b_data = board_data[board_id]
                 recipients = b_data['users']['active'] - b_data['users']['banned']
@@ -2781,7 +2807,6 @@ async def motivation_broadcaster():
                 if not recipients:
                     continue
                 
-                # Код ниже остается без изменений...
                 header, post_num = await format_header(board_id)
                 
                 if board_id == 'int':
@@ -2846,6 +2871,15 @@ async def validate_message_format(msg_data: dict) -> bool:
         return False
 
     return True
+
+async def save_threads_data(board_id: str):
+    """Асинхронная обертка для сохранения данных о тредах."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        save_executor,
+        _sync_save_threads_data,
+        board_id
+    )
 
 async def process_successful_messages(post_num: int, results: list):
     """Обработка успешных отправок (вынесено в отдельную функцию)"""
@@ -3724,7 +3758,7 @@ async def cmd_create(message: types.Message):
     thread_id = secrets.token_hex(4)
     now_dt = datetime.now(UTC)
     
-    threads_data[thread_id] = {
+    thread_info = {
         'op_id': user_id,
         'title': title,
         'created_at': now_dt.isoformat(),
@@ -3733,8 +3767,11 @@ async def cmd_create(message: types.Message):
         'subscribers': {user_id},
         'local_mutes': {},
         'local_shadow_mutes': {},
-        'is_archived': False
+        'is_archived': False,
+        'announced_milestones': [],
+        'activity_notified': False
     }
+    threads_data[thread_id] = thread_info
 
     user_s['last_thread_creation'] = now_ts
 
@@ -3763,17 +3800,24 @@ async def cmd_create(message: types.Message):
     
     await message.delete()
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Автоматический вход в тред ---
-    # Обновляем состояние пользователя, чтобы он "вошел" в тред
     user_s['location'] = thread_id
     user_s['last_location_switch'] = now_ts
     
-    # Отправляем пользователю уведомление о входе
     enter_message = random.choice(thread_messages[lang]['enter_thread_prompt']).format(title=title)
     try:
         await message.answer(enter_message, parse_mode="HTML")
     except Exception as e:
         print(f"Не удалось отправить сообщение о входе в тред пользователю {user_id}: {e}")
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Запускаем задачу для отправки уведомления в служебный канал
+    asyncio.create_task(post_thread_notification_to_channel(
+        bots=GLOBAL_BOTS,
+        board_id=board_id,
+        thread_id=thread_id,
+        thread_info=thread_info,
+        event_type='new_thread'
+    ))
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 
@@ -3981,6 +4025,62 @@ async def post_special_num_to_channel(bots: dict[str, Bot], board_id: str, post_
     except Exception as e:
         print(f"⛔ Не удалось отправить пост #{post_num} в канал: {e}")
 
+async def post_thread_notification_to_channel(bots: dict[str, Bot], board_id: str, thread_id: str, thread_info: dict, event_type: str, details: dict | None = None):
+    """
+    Отправляет унифицированное уведомление о событиях треда в служебный канал.
+    
+    :param bots: Словарь с инстансами ботов.
+    :param board_id: ID доски.
+    :param thread_id: ID треда.
+    :param thread_info: Словарь с данными треда.
+    :param event_type: Тип события ('new_thread', 'milestone', 'high_activity').
+    :param details: Дополнительная информация (например, {'posts': 150} или {'activity': 25.5}).
+    """
+    bot_instance = bots.get(ARCHIVE_POSTING_BOT_ID)
+    if not bot_instance:
+        print(f"⛔ Ошибка: бот для постинга ('{ARCHIVE_POSTING_BOT_ID}') не найден.")
+        return
+
+    details = details or {}
+    title = escape_html(thread_info.get('title', 'Без названия'))
+    board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
+    
+    message_text = ""
+
+    if event_type == 'new_thread':
+        message_text = (
+            f"<b>🌱 Создан новый тред</b>\n\n"
+            f"<b>Доска:</b> {board_name}\n"
+            f"<b>Заголовок:</b> {title}"
+        )
+    elif event_type == 'milestone':
+        posts_count = details.get('posts', 0)
+        message_text = (
+            f"<b>📈 Тред набрал {posts_count} постов</b>\n\n"
+            f"<b>Доска:</b> {board_name}\n"
+            f"<b>Заголовок:</b> {title}"
+        )
+    elif event_type == 'high_activity':
+        activity = details.get('activity', 0)
+        message_text = (
+            f"<b>🔥 Высокая активность в треде ({activity:.1f} п/ч)</b>\n\n"
+            f"<b>Доска:</b> {board_name}\n"
+            f"<b>Заголовок:</b> {title}"
+        )
+    else:
+        # Неизвестный тип события, ничего не делаем
+        return
+
+    try:
+        await bot_instance.send_message(
+            chat_id=ARCHIVE_CHANNEL_ID,
+            text=message_text,
+            parse_mode="HTML"
+        )
+        print(f"✅ Уведомление о треде '{title}' (событие: {event_type}) отправлено в канал.")
+    except Exception as e:
+        print(f"⛔ Не удалось отправить уведомление о треде '{title}' в канал: {e}")
+
 def _sync_generate_thread_archive(board_id: str, thread_id: str, thread_info: dict) -> str | None:
     """
     Синхронная функция для генерации и сохранения HTML-архива треда.
@@ -4150,7 +4250,65 @@ async def thread_lifecycle_manager(bots: dict[str, Bot]):
                         threads_data.pop(thread_id, None)
                     print(f"🧹 [{board_id}] Удалено {len(threads_to_delete)} старых тредов.")
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+async def thread_activity_monitor(bots: dict[str, Bot]):
+    """
+    Фоновая задача для отслеживания активности тредов и уведомления о высокой активности.
+    """
+    await asyncio.sleep(120)  # Начальная задержка 2 минуты
+
+    while True:
+        try:
+            await asyncio.sleep(600)  # Проверка каждые 10 минут
+            
+            # --- Используем копию под блокировкой для безопасной итерации ---
+            async with storage_lock:
+                storage_copy = list(messages_storage.values())
+            
+            for board_id in THREAD_BOARDS:
+                b_data = board_data.get(board_id)
+                if not b_data:
+                    continue
+
+                threads_data = b_data.get('threads_data', {})
                 
+                for thread_id, thread_info in threads_data.items():
+                    # Пропускаем уже архивированные треды или те, о которых уже уведомили
+                    if thread_info.get('is_archived') or thread_info.get('activity_notified'):
+                        continue
+                    
+                    # Считаем посты в треде за последний час
+                    now_utc = datetime.now(UTC)
+                    one_hour_ago = now_utc - timedelta(hours=1)
+                    
+                    thread_post_nums = set(thread_info.get('posts', []))
+                    
+                    # Фильтруем общую копию хранилища, чтобы найти посты этого треда за последний час
+                    recent_posts_count = sum(
+                        1 for post in storage_copy 
+                        if post.get('post_num') in thread_post_nums and post.get('timestamp', now_utc) > one_hour_ago
+                    )
+
+                    # Порог активности - 15 постов/час
+                    ACTIVITY_THRESHOLD = 15
+                    if recent_posts_count >= ACTIVITY_THRESHOLD:
+                        # Устанавливаем флаг, чтобы больше не уведомлять
+                        thread_info['activity_notified'] = True
+                        
+                        # Запускаем отправку уведомления
+                        asyncio.create_task(post_thread_notification_to_channel(
+                            bots=bots,
+                            board_id=board_id,
+                            thread_id=thread_id,
+                            thread_info=thread_info,
+                            event_type='high_activity',
+                            details={'activity': float(recent_posts_count)}
+                        ))
+
+        except Exception as e:
+            print(f"❌ Ошибка в thread_activity_monitor: {e}")
+            await asyncio.sleep(120) # В случае ошибки ждем дольше перед повторной попыткой
+
 @dp.callback_query(F.data.startswith("threads_page_"))
 async def cq_threads_page(callback: types.CallbackQuery):
     """Обрабатывает переключение страниц в списке тредов."""
@@ -6240,17 +6398,18 @@ async def start_background_tasks(bots: dict[str, Bot]):
     tasks = [
         asyncio.create_task(auto_backup()),
         asyncio.create_task(message_broadcaster(bots)),
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Передаем storage_lock в conan_roaster ---
         asyncio.create_task(conan_roaster(
             state, messages_storage, post_to_messages, message_to_post,
             message_queues, format_header, board_data, storage_lock
         )),
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         asyncio.create_task(motivation_broadcaster()),
         asyncio.create_task(auto_memory_cleaner()),
         asyncio.create_task(board_statistics_broadcaster()),
         asyncio.create_task(thread_lifecycle_manager(bots)),
         asyncio.create_task(thread_notifier()),
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        asyncio.create_task(thread_activity_monitor(bots))
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     ]
     print(f"✓ Background tasks started: {len(tasks)}")
     return tasks
