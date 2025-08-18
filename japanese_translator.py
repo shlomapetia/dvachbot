@@ -697,32 +697,107 @@ def anime_transform(text):
 
 
 async def get_random_anime_image():
-    """Получает URL случайной аниме-картинки с API с проверкой расширения"""
+    """
+    Получает URL случайной SFW аниме-картинки с нескольких API.
+    С вероятностью 10% пытается получить GIF-анимацию.
+    Автоматически переключается на следующий источник в случае ошибки.
+    """
+    apis = []
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Вероятностный выбор типа контента ---
+    if random.random() < 0.1:  # 10% шанс на GIF
+        print("[ANIME DEBUG] Attempting to fetch a GIF...")
+        apis = [
+            # waifu.im поддерживает прямой запрос GIF
+            {"url": "https://api.waifu.im/search/?included_tags=waifu&is_nsfw=false&gif=true", "source": "waifu.im (gif)"},
+            # waifu.pics имеет отдельные SFW категории для GIF
+            {"url": f"https://api.waifu.pics/sfw/{random.choice(['dance', 'wave', 'blush'])}", "source": "waifu.pics (gif)"},
+            # nekos.best также использует SFW категории для GIF
+            {"url": f"https://nekos.best/api/v2/{random.choice(['cuddle', 'pat', 'baka', 'blush'])}", "source": "nekos.best (gif)"}
+        ]
+    else:  # 90% шанс на статичное изображение
+        print("[ANIME DEBUG] Attempting to fetch a static image...")
+        apis = [
+            {"url": "https://api.waifu.im/search/?included_tags=waifu&is_nsfw=false&gif=false", "source": "waifu.im (static)"},
+            {"url": "https://api.waifu.pics/sfw/waifu", "source": "waifu.pics (static)"},
+            {"url": "https://nekos.best/api/v2/waifu", "source": "nekos.best (static)"}
+        ]
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
+    random.shuffle(apis)
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as session:
+        for api in apis:
+            try:
+                async with session.get(api["url"]) as response:
+                    if response.status != 200:
+                        print(f"[{api['source']}] API Error: Status {response.status}")
+                        continue
+
+                    data = await response.json()
+                    image_url = None
+
+                    if "waifu.im" in api["source"]:
+                        if data and 'images' in data and data['images']:
+                            image_url = data['images'][0]['url']
+                    elif "waifu.pics" in api["source"]:
+                        if data and 'url' in data:
+                            image_url = data['url']
+                    elif "nekos.best" in api["source"]:
+                        if data and 'results' in data and data['results']:
+                            image_url = data['results'][0]['url']
+                    
+                    if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
+                        print(f"[{api['source']}] Image received: {image_url}")
+                        return image_url
+                    else:
+                        print(f"[{api['source']}] Invalid image URL or format: {image_url}")
+
+            except Exception as e:
+                print(f"[{api['source']}] Request failed: {e}")
+                continue
+    
+    print("⛔ All random image APIs failed to provide an image.")
+    return None
+async def get_monogatari_image():
+    """
+    Получает URL случайной SFW-картинки из серии Monogatari.
+    Использует waifu.im как основной источник и waifu.pics как резервный.
+    """
+    # Основной API с поддержкой тегов для Monogatari
+    # Резервные API вернут случайную "вайфу", если основной источник недоступен
     apis = [
-        "https://api.waifu.pics/sfw/waifu",
-        "https://api.waifu.im/search/?included_tags=waifu"
+        {"url": "https://api.waifu.im/search/?included_tags=monogatari-series&is_nsfw=false", "source": "waifu.im"},
+        {"url": "https://api.waifu.pics/sfw/waifu", "source": "waifu.pics (fallback)"},
     ]
     random.shuffle(apis)
 
-    for api_url in apis:
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
-                async with session.get(api_url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        image_url = None
-                        
-                        if "api.waifu.pics" in api_url and data and 'url' in data:
-                            image_url = data['url']
-                        
-                        if "api.waifu.im" in api_url and data and 'images' in data and data['images']:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as session:
+        for api in apis:
+            try:
+                async with session.get(api["url"]) as response:
+                    if response.status != 200:
+                        print(f"[{api['source']}] API Error: Status {response.status}")
+                        continue  # Пробуем следующий API
+
+                    data = await response.json()
+                    image_url = None
+
+                    if api["source"] == "waifu.im":
+                        if data and 'images' in data and data['images']:
                             image_url = data['images'][0]['url']
-                        
-                        # Проверяем расширение файла
-                        if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
-                            return image_url
-        except Exception as e:
-            print(f"Ошибка API {api_url}: {e}")
-            continue
-            
+                    elif "waifu.pics" in api["source"]:
+                        if data and 'url' in data:
+                            image_url = data['url']
+                    
+                    if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
+                        print(f"[{api['source']}] Image received: {image_url}")
+                        return image_url
+                    else:
+                        print(f"[{api['source']}] Invalid image URL or format: {image_url}")
+
+            except Exception as e:
+                print(f"[{api['source']}] Request failed: {e}")
+                continue
+    
+    print("⛔ All Monogatari-related APIs failed to provide an image.")
     return None
