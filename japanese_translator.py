@@ -699,28 +699,51 @@ def anime_transform(text):
 
 async def get_random_anime_image():
     """
-    Получает URL случайной SFW аниме-картинки с нескольких API.
+    Получает URL случайной аниме-картинки с нескольких API.
     С вероятностью 10% пытается получить GIF-анимацию.
+    С вероятностью 25% пытается получить NSFW контент.
     Автоматически переключается на следующий источник в случае ошибки.
     """
+    is_nsfw_request = random.random() < 0.25
+    is_gif_request = random.random() < 0.1
+
     apis = []
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Удален неработающий API waifu.im ---
-    if random.random() < 0.1:  # 10% шанс на GIF
-        print("[ANIME DEBUG] Attempting to fetch a GIF...")
-        apis = [
-            # waifu.pics имеет отдельные SFW категории для GIF
-            {"url": f"https://api.waifu.pics/sfw/{random.choice(['dance', 'wave', 'blush'])}", "source": "waifu.pics (gif)"},
-            # nekos.best также использует SFW категории для GIF
-            {"url": f"https://nekos.best/api/v2/{random.choice(['cuddle', 'pat', 'baka', 'blush'])}", "source": "nekos.best (gif)"}
-        ]
-    else:  # 90% шанс на статичное изображение
-        print("[ANIME DEBUG] Attempting to fetch a static image...")
-        apis = [
-            {"url": "https://api.waifu.pics/sfw/waifu", "source": "waifu.pics (static)"},
-            {"url": "https://nekos.best/api/v2/waifu", "source": "nekos.best (static)"}
-        ]
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
+    if is_gif_request:
+        print(f"[ANIME DEBUG] Attempting to fetch a GIF (NSFW: {is_nsfw_request})...")
+        if is_nsfw_request:
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Расширенный список NSFW GIF категорий ---
+            apis = [
+                # waifu.pics имеет разнообразные NSFW GIF категории
+                {"url": f"https://api.waifu.pics/nsfw/{random.choice(['blowjob'])}", "source": "waifu.pics (nsfw-gif)"},
+                # nekos.best в основном сфокусирован на определенных действиях
+                {"url": f"https://nekos.best/api/v2/{random.choice(['cum', 'bJ'])}", "source": "nekos.best (nsfw-gif)"}
+            ]
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        else:
+            # SFW GIF категории
+            apis = [
+                {"url": f"https://api.waifu.pics/sfw/{random.choice(['dance', 'wave', 'blush', 'bonk', 'smile', 'highfive'])}", "source": "waifu.pics (sfw-gif)"},
+                {"url": f"https://nekos.best/api/v2/{random.choice(['cuddle', 'pat', 'baka', 'blush', 'slap', 'wink'])}", "source": "nekos.best (sfw-gif)"}
+            ]
+    else:
+        print(f"[ANIME DEBUG] Attempting to fetch a static image (NSFW: {is_nsfw_request})...")
+        if is_nsfw_request:
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Расширенный список NSFW Static категорий ---
+            apis = [
+                # waifu.pics имеет две основные категории для NSFW изображений
+                {"url": f"https://api.waifu.pics/nsfw/{random.choice(['waifu', 'neko'])}", "source": "waifu.pics (nsfw-static)"},
+                # nekos.best предлагает более широкий выбор статических NSFW тегов
+                {"url": f"https://nekos.best/api/v2/{random.choice(['pussy', 'neko', 'feet', 'yuri', 'cum', 'erofeet', 'blowjob', 'lewd'])}", "source": "nekos.best (nsfw-static)"}
+            ]
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        else:
+            # SFW Static категории
+            apis = [
+                {"url": "https://api.waifu.pics/sfw/waifu", "source": "waifu.pics (sfw-static)"},
+                {"url": "https://nekos.best/api/v2/waifu", "source": "nekos.best (sfw-static)"}
+            ]
+
     random.shuffle(apis)
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as session:
@@ -734,7 +757,6 @@ async def get_random_anime_image():
                     data = await response.json()
                     image_url = None
 
-                    # --- ИЗМЕНЕНИЕ: Упрощена логика парсинга ---
                     if "waifu.pics" in api["source"]:
                         if data and 'url' in data:
                             image_url = data['url']
@@ -757,7 +779,8 @@ async def get_random_anime_image():
     
 async def get_monogatari_image():
     """
-    Получает URL случайной SFW-картинки из серии Monogatari.
+    Получает URL случайной картинки из серии Monogatari.
+    С вероятностью 25% ищет NSFW (questionable, explicit) контент.
     Использует Danbooru (с аутентификацией, если возможно) как основной источник
     и другие API как резервные.
     """
@@ -772,26 +795,30 @@ async def get_monogatari_image():
         'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'
     }
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Подготовка аутентифицированного запроса ---
-    # Базовые параметры для Danbooru
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Вероятностный выбор рейтинга ---
+    rating_tag = 'rating:general'
+    if random.random() < 0.25:  # 25% шанс на NSFW
+        rating_tag = 'rating:questionable,explicit'
+        print("[Danbooru API] Attempting to fetch NSFW Monogatari image.")
+    else:
+        print("[Danbooru API] Attempting to fetch SFW Monogatari image.")
+        
     params_danbooru = {
-        'tags': 'monogatari_series rating:general',
+        'tags': f'monogatari_series {rating_tag}',
         'limit': 100,
         'random': 'true'
     }
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
-    # Считываем учетные данные из переменных окружения
     danbooru_user = os.getenv("DANBOORU_USERNAME")
     danbooru_key = os.getenv("DANBOORU_API_KEY")
 
-    # Если учетные данные предоставлены, добавляем их в параметры запроса
     if danbooru_user and danbooru_key:
         params_danbooru['login'] = danbooru_user
         params_danbooru['api_key'] = danbooru_key
         print("[Danbooru API] Using authenticated request.")
     else:
         print("[Danbooru API] WARNING: Using anonymous request. May be unstable or return empty results.")
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
         for api in apis:
@@ -820,7 +847,7 @@ async def get_monogatari_image():
                         selected_post = random.choice(valid_posts)
                         image_url = selected_post['file_url']
 
-                else: # Логика для резервных API
+                else: # Логика для резервных API (они всегда SFW)
                     async with session.get(api["url"]) as response:
                         if response.status != 200:
                             print(f"[{api['source']}] API Error: Status {response.status}")
@@ -839,7 +866,7 @@ async def get_monogatari_image():
                     print(f"[{api['source']}] Image received: {image_url}")
                     return image_url
                 else:
-                    if image_url is not None: # Логируем, если URL был, но не прошел валидацию
+                    if image_url is not None:
                         print(f"[{api['source']}] Invalid image URL or format: {image_url}")
                     continue
 
