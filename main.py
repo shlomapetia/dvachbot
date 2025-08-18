@@ -6178,7 +6178,7 @@ async def cmd_get_id(message: types.Message, board_id: str | None):
     except Exception:
         await message.answer(f"ID пользователя: <code>{target_id}</code>", parse_mode="HTML")
     
-    await message.delete()```
+    await message.delete()
 
 @dp.message(Command("ban"))
 async def cmd_ban(message: types.Message, board_id: str | None):
