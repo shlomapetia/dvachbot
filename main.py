@@ -36,6 +36,8 @@ from aiogram.exceptions import (
 from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.media_group import MediaGroupBuilder
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 time.sleep(10)
@@ -161,6 +163,10 @@ THREAD_HISTORY_COOLDOWN = 300 # 5 минут в секундах
 OP_COMMAND_COOLDOWN = 60 # 1 минута кулдауна для команд модерации ОПа в треде
 LOCATION_SWITCH_COOLDOWN = 5 # 5 секунд на смену локации (вход/выход)
 SUMMARIZE_COOLDOWN = 300 # 5 минут в секундах для команды /summarize
+
+class ThreadCreateStates(StatesGroup):
+    waiting_for_op_post = State()      # Состояние ожидания текста ОП-поста
+    waiting_for_confirmation = State() # Состояние ожидания подтверждения создания
 
 
 # Извлекаем список ID досок для удобства
@@ -1313,18 +1319,18 @@ async def graceful_shutdown(bots: list[Bot]):
     
 def _sync_clean_message_to_post(
     current_message_to_post: dict, 
-    actual_post_nums: set, 
-    all_active_users: set
+    actual_post_nums: set
 ) -> dict:
     """
     Синхронная функция для выполнения ресурсоемкой фильтрации словаря.
-    Выполняется в отдельном потоке, чтобы не блокировать event loop.
+    Удаляет только те записи, которые ссылаются на уже удаленные посты.
     """
-    valid_entries = {}
-    for key, post_num in current_message_to_post.items():
-        user_id, _ = key
-        if post_num in actual_post_nums and user_id in all_active_users:
-            valid_entries[key] = post_num
+    # Создаем новый словарь только с валидными записями
+    valid_entries = {
+        key: post_num
+        for key, post_num in current_message_to_post.items()
+        if post_num in actual_post_nums
+    }
     return valid_entries
 
 async def auto_memory_cleaner():
@@ -1337,47 +1343,34 @@ async def auto_memory_cleaner():
         await asyncio.sleep(600)  # 10 минут
 
         # --- Блок 1: Очистка старых постов (быстрые операции под блокировкой) ---
+        deleted_posts_count = 0
         async with storage_lock:
             if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
                 to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
                 oldest_post_keys = sorted(messages_storage.keys())[:to_delete_count]
-                
-                posts_to_delete_set = set(oldest_post_keys)
-                
-                # Удаляем из message_to_post
-                keys_to_del_m2p = [key for key, post_num in message_to_post.items() if post_num in posts_to_delete_set]
-                for key in keys_to_del_m2p:
-                    message_to_post.pop(key, None)
+                deleted_posts_count = len(oldest_post_keys)
                 
                 # Удаляем из messages_storage и post_to_messages
                 for post_num in oldest_post_keys:
                     messages_storage.pop(post_num, None)
                     post_to_messages.pop(post_num, None)
 
-                print(f"🧹 Очистка памяти: удалено {len(oldest_post_keys)} старых постов и {len(keys_to_del_m2p)} связей.")
+        if deleted_posts_count > 0:
+            print(f"🧹 Очистка памяти: удалено {deleted_posts_count} старых постов.")
         
-        # --- Блок 2: Неблокирующая очистка message_to_post (тяжелая операция) ---
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Блок 2 заменен на новую, корректную логику ---
+        # Неблокирующая очистка message_to_post от ссылок на удаленные посты
         async with storage_lock:
             # Копируем данные для безопасной работы в другом потоке
             actual_post_nums = set(messages_storage.keys())
             message_to_post_copy = message_to_post.copy()
-        
-        now_utc = datetime.now(UTC)
-        all_active_users = set()
-        for board_id in BOARDS:
-            b_data = board_data[board_id]
-            all_active_users.update([
-                uid for uid, last_act in b_data.get('last_activity', {}).items()
-                if (now_utc - last_act) < timedelta(hours=24)
-            ])
         
         # Выполняем тяжелую фильтрацию в отдельном потоке
         cleaned_message_to_post = await loop.run_in_executor(
             save_executor,
             _sync_clean_message_to_post,
             message_to_post_copy,
-            actual_post_nums,
-            all_active_users
+            actual_post_nums
         )
         
         # Атомарно обновляем основной словарь
@@ -1387,20 +1380,20 @@ async def auto_memory_cleaner():
             message_to_post.update(cleaned_message_to_post)
             removed_count = initial_count - len(message_to_post)
         
-        print(f"🧹 Очистка message_to_post: удалено {removed_count} связей (осталось {len(message_to_post)})")
+        if removed_count > 0:
+            print(f"🧹 Очистка message_to_post: удалено {removed_count} неактуальных связей (осталось {len(message_to_post)})")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        # --- Блок 3: Очистка данных досок (быстрые операции под блокировкой) ---
+        # --- Блок 3: Очистка данных досок (без изменений) ---
         async with storage_lock:
             for board_id in BOARDS:
                 b_data = board_data[board_id]
-                now_utc = datetime.now(UTC) # Обновляем время
+                now_utc = datetime.now(UTC)
 
-                # Очистка message_counter
                 if len(b_data['message_counter']) > 100:
                     top_users = sorted(b_data['message_counter'].items(), key=lambda x: x[1], reverse=True)[:100]
                     b_data['message_counter'] = defaultdict(int, top_users)
 
-                # Очистка неактивных пользователей (last_activity и связанные данные)
                 inactive_threshold = now_utc - timedelta(hours=12)
                 active_mutes = {uid for uid, expiry in b_data.get('mutes', {}).items() if expiry > now_utc}
                 active_shadow_mutes = {uid for uid, expiry in b_data.get('shadow_mutes', {}).items() if expiry > now_utc}
@@ -1419,7 +1412,6 @@ async def auto_memory_cleaner():
                     b_data['spam_tracker'].pop(user_id, None)
                     b_data['last_user_msgs'].pop(user_id, None)
 
-                # Очистка просроченных мутов
                 for user_id in list(b_data.get('mutes', {}).keys()):
                     if b_data['mutes'][user_id] < now_utc:
                         b_data['mutes'].pop(user_id, None)
@@ -1427,7 +1419,6 @@ async def auto_memory_cleaner():
                     if b_data['shadow_mutes'][user_id] < now_utc:
                         b_data['shadow_mutes'].pop(user_id, None)
                 
-                # Очистка spam_tracker
                 spam_tracker_board = b_data['spam_tracker']
                 window_sec = SPAM_RULES.get('text', {}).get('window_sec', 15)
                 window_start = now_utc - timedelta(seconds=window_sec)
@@ -1436,7 +1427,7 @@ async def auto_memory_cleaner():
                     if not spam_tracker_board[user_id]:
                         del spam_tracker_board[user_id]
         
-        # --- Блок 4: Очистка трекера реакций (без блокировки, т.к. у него свой лок) ---
+        # --- Блок 4: Очистка трекера реакций (без изменений) ---
         now_ts = time.time()
         tracker_inactive_threshold_sec = 24 * 3600
         keys_to_delete_from_tracker = [
@@ -1446,7 +1437,6 @@ async def auto_memory_cleaner():
         if keys_to_delete_from_tracker:
             for author_id in keys_to_delete_from_tracker:
                 del author_reaction_notify_tracker[author_id]
-            print(f"🧹 Очистка трекера реакций: удалено {len(keys_to_delete_from_tracker)} неактивных авторов.")
 
         gc.collect()
         print(f"🧹 Очистка памяти завершена. Следующая через 10 минут.")
@@ -2717,8 +2707,11 @@ async def message_worker(worker_name: str, board_id: str, bot_instance: Bot):
             traceback.print_exc()
             await asyncio.sleep(1)
 
-async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_location: str):
-    """Отправляет пользователю пропущенные сообщения для указанной локации. (ИСПРАВЛЕННАЯ ВЕРСИЯ)"""
+async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_location: str) -> bool:
+    """
+    Отправляет пользователю пропущенные сообщения, а в конце - сообщение с кнопками.
+    Возвращает True, если хотя бы одно сообщение было отправлено.
+    """
     b_data = board_data[board_id]
     user_s = b_data['user_state'].setdefault(user_id, {})
     
@@ -2726,61 +2719,67 @@ async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_loc
     last_seen_post = 0
     
     async with storage_lock:
-        # 1. Определяем, какие посты были пропущены
         if target_location == 'main':
             last_seen_post = user_s.get('last_seen_main', 0)
-            for p_num, p_data in messages_storage.items():
-                if p_num > last_seen_post and p_data.get('board_id') == board_id and not p_data.get('thread_id'):
-                    missed_post_nums.append(p_num)
-        else: # Если локация - это тред
+            # Собираем все посты доски, которые новее последнего виденного
+            all_main_posts = [p_num for p_num, p_data in messages_storage.items() if p_data.get('board_id') == board_id and not p_data.get('thread_id')]
+            all_main_posts.sort()
+            missed_post_nums = [p_num for p_num in all_main_posts if p_num > last_seen_post]
+        else:
             thread_id = target_location
             last_seen_threads = user_s.setdefault('last_seen_threads', {})
             last_seen_post = last_seen_threads.get(thread_id, 0)
             
             thread_info = b_data.get('threads_data', {}).get(thread_id)
             if thread_info:
-                all_thread_posts = thread_info.get('posts', [])
+                all_thread_posts = sorted(thread_info.get('posts', []))
                 missed_post_nums = [p_num for p_num in all_thread_posts if p_num > last_seen_post]
 
-    if not missed_post_nums:
-        return
+    if missed_post_nums:
+        # Сортировка уже выполнена при выборке
+        
+        # Ограничиваем количество отправляемых сообщений, чтобы избежать спама
+        MAX_MISSED_TO_SEND = 50 
+        if len(missed_post_nums) > MAX_MISSED_TO_SEND:
+             missed_post_nums = missed_post_nums[-MAX_MISSED_TO_SEND:]
 
-    missed_post_nums.sort()
-    
-    # 2. Обрабатываем и отправляем пропущенные сообщения (одно за другим)
-    for post_num in missed_post_nums:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Сбор данных и вызов отправки для КАЖДОГО поста ---
+        for post_num in missed_post_nums:
+            try:
+                content_copy, reply_info_copy = None, {}
+                async with storage_lock:
+                    post_data = messages_storage.get(post_num)
+                    if post_data:
+                        content_copy = post_data.get('content', {}).copy()
+                        reply_info_copy = post_to_messages.get(post_num, {})
+
+                if content_copy:
+                    await send_message_to_users(bot, {user_id}, content_copy, reply_info_copy)
+                    await asyncio.sleep(0.1) # Небольшая задержка между сообщениями
+
+            except Exception as e:
+                print(f"Ошибка отправки пропущенного сообщения #{post_num} юзеру {user_id}: {e}")
+        
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Отправка финального сообщения ---
+        lang = 'en' if board_id == 'int' else 'ru'
+        final_text = "All new messages loaded." if lang == 'en' else "Все новые сообщения загружены."
+        entry_keyboard = _get_thread_entry_keyboard(board_id)
+        
         try:
-            content_copy = None
-            reply_info_copy = {}
-            
-            async with storage_lock:
-                post_data = messages_storage.get(post_num)
-                if not post_data:
-                    continue
-                # Создаем копии, чтобы работать с ними вне блокировки
-                content_copy = post_data.get('content', {}).copy()
-                # reply_info здесь - это post_to_messages[post_num]
-                reply_info_copy = post_to_messages.get(post_num, {})
-
-            if content_copy:
-                # Передаем управление основной функции отправки, которая уже умеет
-                # корректно собирать все данные и вызывать _format_message_body
-                await send_message_to_users(
-                    bot, {user_id}, content_copy, reply_info_copy
-                )
-
-        except Exception as e:
-            print(f"Ошибка отправки пропущенного сообщения #{post_num} юзеру {user_id}: {e}")
+            await bot.send_message(user_id, final_text, reply_markup=entry_keyboard, parse_mode="HTML")
+        except (TelegramForbiddenError, TelegramBadRequest):
+            pass # Игнорируем ошибку, если не можем доставить
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # 3. Обновляем состояние пользователя
-    if missed_post_nums:
+        # Обновляем состояние пользователя
         new_last_seen = missed_post_nums[-1]
         if target_location == 'main':
             user_s['last_seen_main'] = new_last_seen
         else:
             user_s.setdefault('last_seen_threads', {})[target_location] = new_last_seen
+        
+        return True # Сообщаем, что сообщения были отправлены
+
+    return False # Сообщаем, что новых сообщений не было
             
 async def motivation_broadcaster():
     """Отправляет мотивационные сообщения на каждую доску в разное время."""
@@ -3130,43 +3129,38 @@ def get_board_id(telegram_object: types.Message | types.CallbackQuery) -> str | 
 # ========== КОМАНДЫ ==========
 
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, state: FSMContext): # Добавлен state в аргументы
     user_id = message.from_user.id
     board_id = get_board_id(message)
     if not board_id: return
     
     b_data = board_data[board_id]
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Обработка deep link ---
-    # Извлекаем payload из команды
     command_payload = message.text.split()[1] if len(message.text.split()) > 1 else None
 
-    # Обработка входа в тред по ссылке
     if command_payload and command_payload.startswith("thread_"):
         thread_id = command_payload.split('_')[-1]
         
-        # Проверяем, существует ли тред на этой доске
         if board_id in THREAD_BOARDS and thread_id in b_data.get('threads_data', {}):
-            b_data['users']['active'].add(user_id) # Активируем пользователя
+            b_data['users']['active'].add(user_id)
             user_s = b_data['user_state'].setdefault(user_id, {})
             
-            # Перемещаем пользователя в тред
             user_s['location'] = thread_id
             user_s['last_location_switch'] = time.time()
             b_data['threads_data'][thread_id].setdefault('subscribers', set()).add(user_id)
             
-            # Отправляем приветственное сообщение и пропущенные посты
-            await message.answer(f"Вы перешли в тред «{b_data['threads_data'][thread_id].get('title', '...')}»")
-            await send_missed_messages(message.bot, board_id, user_id, thread_id)
-            await _send_op_commands_info(message.bot, user_id, board_id)
+            # --- ИЗМЕНЕНИЕ: Используем cb_create_thread_confirm для унификации входа ---
+            # Создаем фейковый колбэк, чтобы передать в функцию
+            fake_callback_query = types.CallbackQuery(
+                id=str(user_id), from_user=message.from_user, chat_instance="", message=message
+            )
+            await cb_enter_thread(fake_callback_query) # Вызываем хендлер входа в тред
             
-            # Удаляем команду /start, чтобы не засорять чат
             try:
                 await message.delete()
             except TelegramBadRequest:
                 pass
-            return # Завершаем выполнение, чтобы не отправлять стандартное приветствие
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            return
 
     if user_id not in b_data['users']['active']:
         b_data['users']['active'].add(user_id)
@@ -3176,9 +3170,14 @@ async def cmd_start(message: types.Message):
     
     await message.answer(start_text, parse_mode="HTML", disable_web_page_preview=True)
     
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Замена старого кода на вызов новой функции ---
     await _send_thread_info_if_applicable(message, board_id)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
-    await message.delete()
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
     
 
 AHE_EYES = ['😵', '🤤', '😫', '😩', '😳', '😖', '🥵']
@@ -3433,29 +3432,14 @@ async def cmd_help(message: types.Message):
     start_text = board_data[board_id].get('start_message_text', "Нет информации о помощи.")
     await message.answer(start_text, parse_mode="HTML", disable_web_page_preview=True)
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Дополнительное сообщение на досках с тредами ---
-    if board_id in THREAD_BOARDS:
-        lang = 'en' if board_id == 'int' else 'ru'
-        if lang == 'en':
-            thread_commands_text = (
-                "<b>Thread Commands:</b>\n"
-                "<code>/create &lt;title&gt;</code> - Create a new thread\n"
-                "<code>/threads</code> - View active threads\n"
-                "<code>/leave</code> - Return to the main board from a thread"
-            )
-        else:
-            thread_commands_text = (
-                "<b>Команды для тредов:</b>\n"
-                "<code>/create &lt;заголовок&gt;</code> - Создать новый тред\n"
-                "<code>/threads</code> - Посмотреть активные треды\n"
-                "<code>/leave</code> - Вернуться на доску из треда"
-            )
-        # Добавляем небольшую задержку для визуального разделения сообщений
-        await asyncio.sleep(0.5)
-        await message.answer(thread_commands_text, parse_mode="HTML")
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Замена старого кода на вызов новой функции ---
+    await _send_thread_info_if_applicable(message, board_id)
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    await message.delete()
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
 
 
 @dp.message(Command("roll"))
@@ -3729,45 +3713,84 @@ async def cmd_active(message: types.Message):
 # ========== КОМАНДЫ ДЛЯ СИСТЕМЫ ТРЕДОВ ==========
 
 @dp.message(Command("create"))
-async def cmd_create(message: types.Message):
-    """Создает новый тред на доске и автоматически перемещает в него создателя."""
+async def cmd_create_fsm_entry(message: types.Message, state: FSMContext):
+    """
+    Обрабатывает команду /create и служит точкой входа в FSM-сценарий создания треда.
+    """
     board_id = get_board_id(message)
     if not board_id or board_id not in THREAD_BOARDS:
+        # Если команда не поддерживается, ничего не делаем, чтобы не мешать другим ботам
         return
 
-    user_id = message.from_user.id
+    lang = 'en' if board_id == 'int' else 'ru'
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Разделение логики ---
+    # Проверяем, есть ли текст после команды /create
+    command_args = message.text.split(maxsplit=1)
+    if len(command_args) > 1 and command_args[1].strip():
+        # СЛУЧАЙ 1: /create с текстом
+        op_post_text = command_args[1].strip()
+        
+        # Сразу сохраняем текст и переходим к подтверждению
+        await state.update_data(op_post_text=op_post_text)
+        await state.set_state(ThreadCreateStates.waiting_for_confirmation)
+
+        if lang == 'en':
+            confirmation_text = f"You want to create a thread with this opening post:\n\n---\n{escape_html(op_post_text)}\n---\n\nCreate?"
+            button_create = "✅ Create Thread"
+            button_edit = "✏️ Edit Text"
+        else:
+            confirmation_text = f"Вы хотите создать тред с таким ОП-постом:\n\n---\n{escape_html(op_post_text)}\n---\n\nСоздаем?"
+            button_create = "✅ Создать тред"
+            button_edit = "✏️ Редактировать"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text=button_create, callback_data="create_thread_confirm"),
+                InlineKeyboardButton(text=button_edit, callback_data="create_thread_edit")
+            ]
+        ])
+
+        await message.answer(confirmation_text, reply_markup=keyboard, parse_mode="HTML")
+
+    else:
+        # СЛУЧАЙ 2: /create без текста
+        # Переходим в состояние ожидания текста
+        await state.set_state(ThreadCreateStates.waiting_for_op_post)
+        prompt_text = random.choice(thread_messages[lang]['create_prompt_op_post'])
+        await message.answer(prompt_text)
+
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
+@dp.callback_query(F.data == "create_thread_confirm", ThreadCreateStates.waiting_for_confirmation)
+async def cb_create_thread_confirm(callback: types.CallbackQuery, state: FSMContext):
+    """
+    Финальный шаг: ловит подтверждение, создает тред и выходит из FSM.
+    """
+    board_id = get_board_id(callback)
+    if not board_id: return
+    
+    user_id = callback.from_user.id
     b_data = board_data[board_id]
     lang = 'en' if board_id == 'int' else 'ru'
 
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        error_text = random.choice(thread_messages[lang]['create_usage'])
-        await message.answer(error_text, parse_mode="HTML")
-        await message.delete()
-        return
-    
-    title = escape_html(parts[1].strip())
-    
-    user_s = b_data['user_state'].setdefault(user_id, {})
-    now_ts = time.time()
-    last_creation_ts = user_s.get('last_thread_creation', 0)
-    
-    if now_ts - last_creation_ts < THREAD_CREATE_COOLDOWN_USER:
-        remaining = THREAD_CREATE_COOLDOWN_USER - (now_ts - last_creation_ts)
-        remaining_str = f"{int(remaining // 60)}м {int(remaining % 60)}с"
-        minutes_str = str(THREAD_CREATE_COOLDOWN_USER // 60)
-        
-        cooldown_text = random.choice(thread_messages[lang]['create_cooldown']).format(
-            minutes=minutes_str,
-            remaining=remaining_str
-        )
-        await message.answer(cooldown_text)
-        await message.delete()
-        return
+    fsm_data = await state.get_data()
+    op_post_text = fsm_data.get('op_post_text')
 
+    if not op_post_text:
+        await state.clear()
+        await callback.answer("Error: Post data not found. Please start over.", show_alert=True)
+        return
+        
     threads_data = b_data['threads_data']
     thread_id = secrets.token_hex(4)
+    now_ts = time.time()
     now_dt = datetime.now(UTC)
+    
+    title = escape_html(clean_html_tags(op_post_text).split('\n')[0][:60])
     
     thread_info = {
         'op_id': user_id,
@@ -3784,55 +3807,77 @@ async def cmd_create(message: types.Message):
     }
     threads_data[thread_id] = thread_info
 
+    user_s = b_data['user_state'].setdefault(user_id, {})
     user_s['last_thread_creation'] = now_ts
 
     success_text = random.choice(thread_messages[lang]['create_success']).format(title=title)
-        
     header, pnum = await format_header(board_id)
-    content = {
-        'type': 'text',
-        'header': header,
-        'text': success_text,
-        'is_system_message': True
-    }
-    messages_storage[pnum] = {
-        'author_id': 0, 
-        'timestamp': now_dt, 
-        'content': content, 
-        'board_id': board_id
-    }
+    content = {'type': 'text', 'header': header, 'text': success_text, 'is_system_message': True}
+    messages_storage[pnum] = {'author_id': 0, 'timestamp': now_dt, 'content': content, 'board_id': board_id}
+    await message_queues[board_id].put({'recipients': b_data['users']['active'], 'content': content, 'post_num': pnum, 'board_id': board_id})
 
-    await message_queues[board_id].put({
-        'recipients': b_data['users']['active'],
-        'content': content,
-        'post_num': pnum,
-        'board_id': board_id
-    })
-    
-    await message.delete()
+    op_post_content = {'type': 'text', 'text': op_post_text}
+    await process_new_post(
+        bot_instance=callback.bot, board_id=board_id, user_id=user_id, content=op_post_content,
+        reply_to_post=None, is_shadow_muted=False
+    )
     
     user_s['location'] = thread_id
     user_s['last_location_switch'] = now_ts
     
-    enter_message = random.choice(thread_messages[lang]['enter_thread_prompt']).format(title=title)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновленная логика приветствия ---
+    await callback.answer() # Сразу отвечаем на колбэк
     try:
-        await message.answer(enter_message, parse_mode="HTML")
-    except Exception as e:
-        print(f"Не удалось отправить сообщение о входе в тред пользователю {user_id}: {e}")
+        # Удаляем сообщение с кнопками "Создать/Редактировать"
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
 
-    asyncio.create_task(post_thread_notification_to_channel(
-        bots=GLOBAL_BOTS,
-        board_id=board_id,
-        thread_id=thread_id,
-        thread_info=thread_info,
-        event_type='new_thread'
-    ))
-
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Отправляем ОПу информацию о его командах
-    await _send_op_commands_info(message.bot, user_id, board_id)
+    # Вызываем send_missed_messages. Так как тред только что создан,
+    # она всегда вернет False, но мы сохраняем логику для консистентности.
+    was_missed = await send_missed_messages(callback.bot, board_id, user_id, thread_id)
+    
+    # Если пропущенных сообщений не было (что всегда так при создании треда),
+    # отправляем приветственное сообщение с кнопками.
+    if not was_missed:
+        enter_message = random.choice(thread_messages[lang]['enter_thread_prompt']).format(title=title)
+        entry_keyboard = _get_thread_entry_keyboard(board_id)
+        try:
+            await callback.message.answer(enter_message, reply_markup=entry_keyboard, parse_mode="HTML")
+        except (TelegramForbiddenError, TelegramBadRequest):
+            pass
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
+    asyncio.create_task(post_thread_notification_to_channel(
+        bots=GLOBAL_BOTS, board_id=board_id, thread_id=thread_id,
+        thread_info=thread_info, event_type='new_thread'
+    ))
+
+    await _send_op_commands_info(callback.bot, user_id, board_id)
+    
+    await state.clear()
+
+@dp.callback_query(F.data == "create_thread_edit", ThreadCreateStates.waiting_for_confirmation)
+async def cb_create_thread_edit(callback: types.CallbackQuery, state: FSMContext):
+    """
+    Обрабатывает нажатие кнопки 'Редактировать', возвращая пользователя 
+    на шаг ввода ОП-поста.
+    """
+    board_id = get_board_id(callback)
+    if not board_id: return
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    # Возвращаем пользователя на предыдущее состояние
+    await state.set_state(ThreadCreateStates.waiting_for_op_post)
+
+    prompt_text = random.choice(thread_messages[lang]['create_prompt_op_post_edit'])
+    
+    await callback.answer()
+    try:
+        # Редактируем сообщение с подтверждением, заменяя его на новую инструкцию
+        await callback.message.edit_text(prompt_text)
+    except TelegramBadRequest:
+        pass # Игнорируем, если сообщение не может быть изменено
 
 
 # --- Константы для пагинации ---
@@ -4037,6 +4082,28 @@ async def post_special_num_to_channel(bots: dict[str, Bot], board_id: str, post_
 
     except Exception as e:
         print(f"⛔ Не удалось отправить пост #{post_num} в канал: {e}")
+
+
+def _get_thread_entry_keyboard(board_id: str) -> InlineKeyboardMarkup:
+    """
+    Создает и возвращает инлайн-клавиатуру для сообщения о входе в тред.
+    """
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    if lang == 'en':
+        button_good_thread_text = "👍 Good Thread"
+        button_leave_text = "Leave Thread"
+    else:
+        button_good_thread_text = "👍 Годный тред"
+        button_leave_text = "Выйти из треда"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=button_good_thread_text, callback_data="thread_like_placeholder"),
+            InlineKeyboardButton(text=button_leave_text, callback_data="leave_thread")
+        ]
+    ])
+    return keyboard
 
 async def _send_op_commands_info(bot: Bot, chat_id: int, board_id: str):
     """
@@ -4362,6 +4429,69 @@ async def thread_activity_monitor(bots: dict[str, Bot]):
             print(f"❌ Ошибка в thread_activity_monitor: {e}")
             await asyncio.sleep(120) # В случае ошибки ждем дольше перед повторной попыткой
 
+@dp.message(ThreadCreateStates.waiting_for_op_post, F.text)
+async def process_op_post_text(message: types.Message, state: FSMContext):
+    """
+    Ловит текст для ОП-поста, сохраняет его в FSM-контексте 
+    и переводит на этап подтверждения.
+    """
+    board_id = get_board_id(message)
+    if not board_id: return
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    # Сохраняем текст поста в хранилище FSM. Используем html_text, чтобы сохранить форматирование.
+    op_post_text = message.html_text
+    await state.update_data(op_post_text=op_post_text)
+
+    # Переводим пользователя на следующий шаг - подтверждение
+    await state.set_state(ThreadCreateStates.waiting_for_confirmation)
+
+    if lang == 'en':
+        confirmation_text = f"You want to create a thread with this opening post:\n\n---\n{op_post_text}\n---\n\nCreate?"
+        button_create = "✅ Create Thread"
+        button_edit = "✏️ Edit Text"
+    else:
+        confirmation_text = f"Вы хотите создать тред с таким ОП-постом:\n\n---\n{op_post_text}\n---\n\nСоздаем?"
+        button_create = "✅ Создать тред"
+        button_edit = "✏️ Редактировать"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=button_create, callback_data="create_thread_confirm"),
+            InlineKeyboardButton(text=button_edit, callback_data="create_thread_edit")
+        ]
+    ])
+
+    await message.answer(confirmation_text, reply_markup=keyboard, parse_mode="HTML")
+
+@dp.callback_query(F.data == "create_thread_start")
+async def cb_create_thread_start(callback: types.CallbackQuery, state: FSMContext):
+    """
+    Обрабатывает нажатие кнопки 'Создать тред', запускает FSM.
+    """
+    board_id = get_board_id(callback)
+    if not board_id or board_id not in THREAD_BOARDS:
+        await callback.answer("This feature is not available here.", show_alert=True)
+        return
+
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    # Устанавливаем состояние ожидания ОП-поста
+    await state.set_state(ThreadCreateStates.waiting_for_op_post)
+
+    # Отправляем пользователю инструкцию
+    prompt_text = random.choice(thread_messages[lang]['create_prompt_op_post'])
+    
+    # Сначала отвечаем на колбэк, чтобы убрать "часики"
+    await callback.answer()
+    
+    # Отправляем новое сообщение и удаляем старое
+    try:
+        await callback.message.answer(prompt_text)
+        await callback.message.delete()
+    except (TelegramForbiddenError, TelegramBadRequest):
+        pass # Игнорируем, если не удалось (например, сообщение уже удалено)
+
 @dp.callback_query(F.data.startswith("threads_page_"))
 async def cq_threads_page(callback: types.CallbackQuery):
     """Обрабатывает переключение страниц в списке тредов."""
@@ -4485,29 +4615,80 @@ async def cq_enter_thread(callback: types.CallbackQuery):
     user_s['last_location_switch'] = now_ts
     threads_data[thread_id].setdefault('subscribers', set()).add(user_id)
     
-    await send_missed_messages(callback.bot, board_id, user_id, thread_id)
-
-    thread_title = threads_data[thread_id].get('title', '...')
-    
-    seen_threads = user_s.setdefault('last_seen_threads', {})
-    if thread_id not in seen_threads:
-        response_text = random.choice(thread_messages[lang]['enter_thread_prompt']).format(title=thread_title)
-    else:
-        response_text = random.choice(thread_messages[lang]['enter_thread_success']).format(title=thread_title)
-
-    await callback.message.answer(response_text, parse_mode="HTML")
-    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновленная логика приветствия ---
+    await callback.answer()
     try:
         await callback.message.delete()
     except TelegramBadRequest:
         pass
-        
-    await callback.answer()
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Отправляем ОПу информацию о его командах, если он входит в свой тред
-    await _send_op_commands_info(callback.bot, user_id, board_id)
+    was_missed = await send_missed_messages(callback.bot, board_id, user_id, thread_id)
+    
+    if not was_missed:
+        thread_title = threads_data[thread_id].get('title', '...')
+        seen_threads = user_s.setdefault('last_seen_threads', {})
+        if thread_id not in seen_threads:
+            response_text = random.choice(thread_messages[lang]['enter_thread_prompt']).format(title=thread_title)
+        else:
+            response_text = random.choice(thread_messages[lang]['enter_thread_success']).format(title=thread_title)
+        
+        entry_keyboard = _get_thread_entry_keyboard(board_id)
+        try:
+            await callback.message.answer(response_text, reply_markup=entry_keyboard, parse_mode="HTML")
+        except (TelegramForbiddenError, TelegramBadRequest):
+            pass
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        
+    await _send_op_commands_info(callback.bot, user_id, board_id)
+
+@dp.callback_query(F.data == "leave_thread")
+async def cb_leave_thread(callback: types.CallbackQuery):
+    """
+    Обрабатывает нажатие кнопки 'Выйти из треда', эмулируя команду /leave.
+    """
+    board_id = get_board_id(callback)
+    if not board_id or board_id not in THREAD_BOARDS:
+        await callback.answer("This action is not available here.", show_alert=True)
+        return
+
+    user_id = callback.from_user.id
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    user_s = b_data['user_state'].setdefault(user_id, {})
+    current_location = user_s.get('location', 'main')
+
+    if current_location == 'main':
+        # Пользователь уже на главной доске, просто убираем сообщение с кнопкой
+        await callback.answer()
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
+        return
+
+    # Сохраняем, какой пост был последним в треде перед уходом
+    thread_id = current_location
+    thread_info = b_data.get('threads_data', {}).get(thread_id)
+    if thread_info:
+        last_thread_post = thread_info.get('posts', [0])[-1] if thread_info.get('posts') else 0
+        user_s.setdefault('last_seen_threads', {})[thread_id] = last_thread_post
+    
+    # Перемещаем пользователя на главную доску
+    user_s['location'] = 'main'
+    user_s['last_location_switch'] = time.time()
+    
+    # Отправляем сообщение о выходе и удаляем старое
+    response_text = random.choice(thread_messages[lang]['leave_thread_success'])
+    await callback.answer()
+    try:
+        await callback.message.answer(response_text)
+        await callback.message.delete()
+    except (TelegramForbiddenError, TelegramBadRequest):
+        pass
+
+    # Подгружаем пропущенные сообщения с доски
+    await send_missed_messages(callback.bot, board_id, user_id, 'main')
 
 @dp.message(Command("leave"))
 async def cmd_leave(message: types.Message):
@@ -6682,11 +6863,6 @@ async def supervisor():
                 # Если файл поврежден, тоже можно удалить
                 os.remove(lock_file)
                 # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-            
-if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(supervisor())
             
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
