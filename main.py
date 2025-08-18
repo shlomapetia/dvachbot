@@ -6139,11 +6139,13 @@ async def cmd_admin(message: types.Message, board_id: str | None):
         await message.delete()
         return
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновление callback_data ---
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика доски", callback_data=f"stats_{board_id}")],
-        [InlineKeyboardButton(text="🚫 Забаненные на доске", callback_data=f"banned_{board_id}")],
+        [InlineKeyboardButton(text="🚫 Список ограничений", callback_data=f"restrictions_{board_id}")],
         [InlineKeyboardButton(text="💾 Сохранить ВСЕ", callback_data="save_all")],
     ])
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     await message.answer(f"Админка доски {BOARD_CONFIG[board_id]['name']}:", reply_markup=keyboard)
     await message.delete()
 
@@ -6177,25 +6179,67 @@ async def admin_stats_board(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("banned_"))
-async def admin_banned_board(callback: types.CallbackQuery):
+@dp.callback_query(F.data.startswith("restrictions_"))
+async def admin_restrictions_board(callback: types.CallbackQuery):
+    """Выводит единый список банов, мутов и теневых мутов."""
     board_id = callback.data.split("_")[1]
     if not is_admin(callback.from_user.id, board_id):
         await callback.answer("Отказано в доступе", show_alert=True)
         return
 
-    banned_users = board_data[board_id]['users']['banned']
-    if not banned_users:
-        await callback.message.edit_text(f"На доске {BOARD_CONFIG[board_id]['name']} нет забаненных.")
-        await callback.answer()
-        return
+    b_data = board_data[board_id]
+    now = datetime.now(UTC)
+    text_parts = [f"<b>Список ограничений на доске {BOARD_CONFIG[board_id]['name']}:</b>"]
 
-    text = f"Забаненные на доске {BOARD_CONFIG[board_id]['name']}:\n\n"
-    text += "\n".join([f"ID <code>{uid}</code>" for uid in banned_users])
+    # --- 1. Сбор забаненных ---
+    banned_users = b_data['users']['banned']
+    if banned_users:
+        banned_list = "\n".join([f"  • ID <code>{uid}</code>" for uid in sorted(list(banned_users))])
+        text_parts.append(f"\n<u>🚫 Забанены навсегда:</u>\n{banned_list}")
     
-    await callback.message.edit_text(text, parse_mode="HTML")
-    await callback.answer()
+    # --- 2. Сбор замученных ---
+    active_mutes = {uid: expiry for uid, expiry in b_data['mutes'].items() if expiry > now}
+    if active_mutes:
+        mute_lines = []
+        # Сортируем по времени окончания мута
+        for uid, expiry in sorted(active_mutes.items(), key=lambda item: item[1]):
+            remaining = expiry - now
+            # Форматируем оставшееся время
+            hours, remainder = divmod(remaining.total_seconds(), 3600)
+            minutes, _ = divmod(remainder, 60)
+            time_left_str = f"{int(hours)}ч {int(minutes)}м"
+            mute_lines.append(f"  • ID <code>{uid}</code> (осталось: {time_left_str})")
+        
+        mutes_list = "\n".join(mute_lines)
+        text_parts.append(f"\n<u>🔇 В муте:</u>\n{mutes_list}")
 
+    # --- 3. Сбор в теневом муте ---
+    active_shadow_mutes = {uid: expiry for uid, expiry in b_data['shadow_mutes'].items() if expiry > now}
+    if active_shadow_mutes:
+        shadow_mute_lines = []
+        for uid, expiry in sorted(active_shadow_mutes.items(), key=lambda item: item[1]):
+            remaining = expiry - now
+            hours, remainder = divmod(remaining.total_seconds(), 3600)
+            minutes, _ = divmod(remainder, 60)
+            time_left_str = f"{int(hours)}ч {int(minutes)}м"
+            shadow_mute_lines.append(f"  • ID <code>{uid}</code> (осталось: {time_left_str})")
+
+        shadow_mutes_list = "\n".join(shadow_mute_lines)
+        text_parts.append(f"\n<u>👻 В теневом муте:</u>\n{shadow_mutes_list}")
+        
+    # --- Финальная сборка ---
+    if len(text_parts) == 1:
+        final_text = f"На доске {BOARD_CONFIG[board_id]['name']} нет активных ограничений."
+    else:
+        final_text = "\n".join(text_parts)
+
+    try:
+        await callback.message.edit_text(final_text, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            print(f"Ошибка обновления списка ограничений: {e}")
+            
+    await callback.answer()
 def get_author_id_by_reply(msg: types.Message) -> int | None:
     """
     Получает ID автора поста по ответу на его копию.
