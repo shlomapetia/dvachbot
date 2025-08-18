@@ -703,12 +703,10 @@ async def get_random_anime_image():
     Автоматически переключается на следующий источник в случае ошибки.
     """
     apis = []
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Вероятностный выбор типа контента ---
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Удален неработающий API waifu.im ---
     if random.random() < 0.1:  # 10% шанс на GIF
         print("[ANIME DEBUG] Attempting to fetch a GIF...")
         apis = [
-            # waifu.im поддерживает прямой запрос GIF
-            {"url": "https://api.waifu.im/search/?included_tags=waifu&is_nsfw=false&gif=true", "source": "waifu.im (gif)"},
             # waifu.pics имеет отдельные SFW категории для GIF
             {"url": f"https://api.waifu.pics/sfw/{random.choice(['dance', 'wave', 'blush'])}", "source": "waifu.pics (gif)"},
             # nekos.best также использует SFW категории для GIF
@@ -717,7 +715,6 @@ async def get_random_anime_image():
     else:  # 90% шанс на статичное изображение
         print("[ANIME DEBUG] Attempting to fetch a static image...")
         apis = [
-            {"url": "https://api.waifu.im/search/?included_tags=waifu&is_nsfw=false&gif=false", "source": "waifu.im (static)"},
             {"url": "https://api.waifu.pics/sfw/waifu", "source": "waifu.pics (static)"},
             {"url": "https://nekos.best/api/v2/waifu", "source": "nekos.best (static)"}
         ]
@@ -736,10 +733,8 @@ async def get_random_anime_image():
                     data = await response.json()
                     image_url = None
 
-                    if "waifu.im" in api["source"]:
-                        if data and 'images' in data and data['images']:
-                            image_url = data['images'][0]['url']
-                    elif "waifu.pics" in api["source"]:
+                    # --- ИЗМЕНЕНИЕ: Упрощена логика парсинга ---
+                    if "waifu.pics" in api["source"]:
                         if data and 'url' in data:
                             image_url = data['url']
                     elif "nekos.best" in api["source"]:
@@ -762,7 +757,8 @@ async def get_random_anime_image():
 async def get_monogatari_image():
     """
     Получает URL случайной SFW-картинки из серии Monogatari.
-    Использует Danbooru как основной источник и другие API как резервные.
+    Использует Danbooru (с аутентификацией, если возможно) как основной источник
+    и другие API как резервные.
     """
     apis = [
         {"type": "danbooru", "source": "Danbooru"},
@@ -774,15 +770,32 @@ async def get_monogatari_image():
     headers = {
         'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'
     }
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Подготовка аутентифицированного запроса ---
+    # Базовые параметры для Danbooru
     params_danbooru = {
         'tags': 'monogatari_series rating:general',
         'limit': 100,
         'random': 'true'
     }
+    
+    # Считываем учетные данные из переменных окружения
+    danbooru_user = os.getenv("DANBOORU_USERNAME")
+    danbooru_key = os.getenv("DANBOORU_API_KEY")
+
+    # Если учетные данные предоставлены, добавляем их в параметры запроса
+    if danbooru_user and danbooru_key:
+        params_danbooru['login'] = danbooru_user
+        params_danbooru['api_key'] = danbooru_key
+        print("[Danbooru API] Using authenticated request.")
+    else:
+        print("[Danbooru API] WARNING: Using anonymous request. May be unstable or return empty results.")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
         for api in apis:
             try:
+                image_url = None
                 if api["type"] == "danbooru":
                     async with session.get("https://danbooru.donmai.us/posts.json", params=params_danbooru, headers=headers) as response:
                         if response.status != 200:
@@ -813,7 +826,6 @@ async def get_monogatari_image():
                             continue
 
                         data = await response.json()
-                        image_url = None
                         
                         if "waifu.pics" in api["source"]:
                             if data and 'url' in data:
@@ -822,12 +834,12 @@ async def get_monogatari_image():
                             if data and 'results' in data and data['results']:
                                 image_url = data['results'][0]['url']
 
-                # --- Общая проверка для всех API ---
                 if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
                     print(f"[{api['source']}] Image received: {image_url}")
                     return image_url
                 else:
-                    print(f"[{api['source']}] Invalid image URL or format: {image_url}")
+                    if image_url is not None: # Логируем, если URL был, но не прошел валидацию
+                        print(f"[{api['source']}] Invalid image URL or format: {image_url}")
                     continue
 
             except Exception as e:
