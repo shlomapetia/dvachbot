@@ -52,7 +52,7 @@ from deanonymizer import (
     generate_deanon_info,
 )
 from help_text import HELP_TEXT, HELP_TEXT_EN
-from japanese_translator import anime_transform, get_random_anime_image
+from japanese_translator import anime_transform, get_random_anime_image, get_monogatari_image
 from summarize import summarize_text_with_hf
 from thread_texts import thread_messages
 from ukrainian_mode import UKRAINIAN_PHRASES, ukrainian_transform
@@ -2315,27 +2315,29 @@ async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     )
 
     if not is_transform_mode_active:
-        return modified_content  # Если режимов нет, ничего не делаем
+        return modified_content
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Принудительная очистка HTML ---
-    # Если режим активен, принудительно очищаем HTML перед трансформацией,
-    # чтобы предотвратить инъекции через функции-трансформеры.
     if 'text' in modified_content and modified_content['text']:
         modified_content['text'] = clean_html_tags(modified_content['text'])
     if 'caption' in modified_content and modified_content['caption']:
         modified_content['caption'] = clean_html_tags(modified_content['caption'])
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # Теперь применяем трансформации к чистому тексту
     if b_data['anime_mode']:
         if 'text' in modified_content and modified_content['text']:
             modified_content['text'] = anime_transform(modified_content['text'])
         if 'caption' in modified_content and modified_content['caption']:
             modified_content['caption'] = anime_transform(modified_content['caption'])
         
-        # Картинка аниме без HEAD-запроса!
-        if modified_content.get('type') == 'text' and random.random() < 0.41:
-            anime_img_url = await get_random_anime_image()
+        if modified_content.get('type') == 'text' and random.random() < 0.49:
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Вероятностный выбор функции для получения картинки ---
+            if random.random() < 0.31: # 25% шанс получить картинку из Monogatari
+                anime_img_url = await get_monogatari_image()
+                print(f"[ANIME DEBUG] Attempting Monogatari image...")
+            else: # 75% шанс на случайную картинку
+                anime_img_url = await get_random_anime_image()
+                print(f"[ANIME DEBUG] Attempting random waifu image...")
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
             print(f"[ANIME DEBUG] Got anime_img_url: {anime_img_url}")
 
             if anime_img_url:
@@ -5692,7 +5694,68 @@ async def disable_anime_mode(delay: int, board_id: str):
         "content": content,
         "post_num": pnum,
     })
+
+
+@dp.message(Command("gatari", "monogatari"))
+async def cmd_monogatari(message: types.Message, board_id: str | None):
+    """Отправляет в чат SFW-изображение из серии Monogatari."""
+    if not board_id:
+        return
+
+    user_id = message.from_user.id
+    b_data = board_data[board_id]
+
+    # --- Базовые проверки пользователя ---
+    if user_id in b_data['users']['banned'] or \
+       (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
+        return
+
+    # Получаем изображение
+    image_url = await get_monogatari_image()
     
+    # Удаляем команду пользователя в любом случае
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
+    # Если изображение не найдено, выходим
+    if not image_url:
+        lang = 'en' if board_id == 'int' else 'ru'
+        fail_text = "Sorry, couldn't fetch a Monogatari image right now. Please try again later." \
+            if lang == 'en' else "Не удалось получить изображение. Попробуйте позже."
+        try:
+            # Отправляем временное сообщение об ошибке
+            error_msg = await message.answer(fail_text)
+            # Запускаем задачу на его удаление через 10 секунд
+            asyncio.create_task(delete_message_after_delay(error_msg, 10))
+        except (TelegramForbiddenError, TelegramBadRequest):
+            pass
+        return
+
+    # --- Подготовка и отправка поста ---
+    is_shadow_muted = (user_id in b_data['shadow_mutes'] and
+                       b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+
+    content = {
+        'type': 'photo',
+        'image_url': image_url,
+        'caption': '' # Подпись не нужна, так как это просто картинка по команде
+    }
+
+    # Используем существующий обработчик для консистентной отправки
+    await process_new_post(
+        bot_instance=message.bot,
+        board_id=board_id,
+        user_id=user_id,
+        content=content,
+        reply_to_post=None,
+        is_shadow_muted=is_shadow_muted
+    )
 
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: Message, board_id: str | None):
