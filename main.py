@@ -6570,6 +6570,8 @@ async def start_background_tasks(bots: dict[str, Bot]):
 
 async def supervisor():
     lock_file = "bot.lock"
+    current_pid = os.getpid() # <-- ИЗМЕНЕНИЕ: Получаем PID текущего процесса заранее
+
     # --- НАЧАЛО ИЗМЕНЕНИЙ: Улучшенная проверка lock-файла ---
     if os.path.exists(lock_file):
         try:
@@ -6579,21 +6581,21 @@ async def supervisor():
             print("⚠️ Lock-файл поврежден. Удаляю и продолжаю.")
             os.remove(lock_file)
         else:
-            # Проверяем, жив ли процесс с этим PID. Используем os.kill(pid, 0) для POSIX-систем.
-            # Эта команда не убивает процесс, а проверяет его существование.
-            try:
-                os.kill(old_pid, 0)
-                # Если команда выполнилась без ошибки, значит процесс жив.
-                print(f"⛔ Бот с PID {old_pid} уже запущен! Завершение работы...")
-                sys.exit(1)
-            except OSError:
-                # Если возникла ошибка, значит процесса с таким PID нет.
-                print(f"⚠️ Найден устаревший lock-файл от процесса {old_pid}. Удаляю и продолжаю.")
-                os.remove(lock_file)
+            # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Сравниваем PID ---
+            if old_pid != current_pid:
+                try:
+                    os.kill(old_pid, 0)
+                    print(f"⛔ Бот с PID {old_pid} уже запущен! Завершение работы...")
+                    sys.exit(1)
+                except OSError:
+                    print(f"⚠️ Найден устаревший lock-файл от процесса {old_pid}. Удаляю и продолжаю.")
+                    os.remove(lock_file)
+            # Если old_pid == current_pid, это просто наш собственный lock-файл,
+            # оставшийся от предыдущего неудачного запуска. Мы его просто перезапишем.
     
-    # Создаем новый lock-файл с PID текущего процесса
+    # Создаем/перезаписываем lock-файл с PID текущего процесса
     with open(lock_file, "w") as f:
-        f.write(str(os.getpid()))
+        f.write(str(current_pid))
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     session = None
@@ -6668,7 +6670,15 @@ async def supervisor():
             await session.close()
         
         if os.path.exists(lock_file):
-            os.remove(lock_file)
+            # --- ИЗМЕНЕНИЕ: Безопасное удаление lock-файла ---
+            # Удаляем lock-файл только если он принадлежит нам
+            try:
+                with open(lock_file, "r") as f:
+                    pid_in_file = int(f.read().strip())
+                if pid_in_file == current_pid:
+                    os.remove(lock_file)
+            except (IOError, ValueError):
+                # Если файл поврежден, тоже можно удалить
             
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
