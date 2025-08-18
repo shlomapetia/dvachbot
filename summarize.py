@@ -9,8 +9,8 @@ async def summarize_text_with_hf(prompt: str, text: str, hf_token: str) -> str:
     # Адаптивные параметры длины. Модели T5 хорошо работают с соотношениями.
     # Устанавливаем минимальную длину в 10% от оригинала, но не менее 40 слов.
     # Максимальную - в 30%, но не более 400 слов.
-    min_len = max(40, len(text.split()) // 10)
-    max_len = min(400, len(text.split()) // 3)
+    min_len = max(100, len(text.split()) // 10)
+    max_len = min(600, len(text.split()) // 3)
 
     # Модели T5 часто используют немного другие параметры в payload
     payload = {
