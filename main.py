@@ -361,29 +361,29 @@ def restore_backup_on_start():
     backup_dir = "/app/backup"
     max_attempts = 3  # Количество попыток
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка на наличие локальных файлов ---
+    # --- Логика без изменений: быстрая проверка для перезапусков ---
     # Если файлы state уже существуют локально, считаем это успешным запуском,
     # чтобы не зависеть от GitHub при каждом перезапуске.
     if glob.glob("*_state.json"):
         print("✅ Локальные файлы состояния найдены, восстановление из git не требуется.")
         return True
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
+    # --- Основной цикл клонирования (без изменений) ---
     for attempt in range(max_attempts):
         try:
             if os.path.exists(backup_dir):
                 shutil.rmtree(backup_dir)
             
             print(f"Попытка клонирования бэкапа #{attempt+1}...")
+            # --- ИЗМЕНЕНИЕ: Увеличен таймаут до 180 секунд ---
             subprocess.run([
                 "git", "clone", "--depth", "1", repo_url, backup_dir
-            ], check=True, timeout=120)
+            ], check=True, timeout=180)
             
             backup_files = glob.glob(os.path.join(backup_dir, "*_state.json"))
             if not backup_files:
-                # Это не ошибка, а случай, когда бэкап еще не создан.
                 print("⚠️ Файлы для восстановления в репозитории не найдены, запуск с чистого состояния.")
-                return True # Считаем успешным, чтобы бот мог создать первое состояние.
+                return True
             
             backup_files += glob.glob(os.path.join(backup_dir, "*_reply_cache.json"))
             
@@ -391,13 +391,23 @@ def restore_backup_on_start():
                 shutil.copy2(src_path, os.getcwd())
             
             print(f"✅ Восстановлено {len(backup_files)} файлов из backup")
-            return True # Успешное восстановление
+            return True
         
         except Exception as e:
             print(f"❌ Ошибка при восстановлении (попытка {attempt+1}): {e}")
-            time.sleep(5)  # Пауза перед повторной попыткой
+            time.sleep(5)
     
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Резервная проверка после сбоя клонирования ---
     print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Все попытки восстановления из git провалились.")
+    
+    # В качестве последнего шанса проверяем, существуют ли локальные файлы.
+    # Это может спасти бота, если git-операции не работают, но состояние в файловой системе сохранилось.
+    if glob.glob("*_state.json"):
+        print("⚠️ Не удалось обновить бэкап из Git, но найдены локальные файлы состояния. Запускаемся с ними.")
+        return True
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
+    print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Локальные файлы состояния также отсутствуют. Невозможно запустить бота.")
     return False # Полная неудача
 
 async def healthcheck(request):
@@ -453,7 +463,9 @@ async def git_commit_and_push():
 
 def sync_git_operations(token: str) -> bool:
     """Синхронные Git-операции для бэкапа с жесткими таймаутами и подробным логированием."""
-    GIT_TIMEOUT = 20  # Секунд на каждую сетевую git-операцию
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Таймаут увеличен ---
+    GIT_TIMEOUT = 90  # Секунд на каждую сетевую git-операцию
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     GIT_LOCAL_TIMEOUT = 15 # Секунд на каждую локальную git-операцию
     try:
         work_dir = "/tmp/git_backup"
@@ -1543,14 +1555,20 @@ async def board_statistics_broadcaster():
             hour_ago = now - timedelta(hours=1)
             
             posts_per_hour = defaultdict(int)
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизированный подсчет ---
             async with storage_lock:
-                # Итерация по данным теперь происходит внутри блокировки,
-                # что предотвращает ошибки изменения словаря (RuntimeError)
-                # и является более эффективным по памяти, чем создание полной копии.
-                for post_data in messages_storage.values():
+                # Итерируем по отсортированным ключам в обратном порядке
+                sorted_post_keys = sorted(messages_storage.keys(), reverse=True)
+                for post_num in sorted_post_keys:
+                    post_data = messages_storage[post_num]
+                    post_time = post_data.get('timestamp')
+
+                    # Если пост слишком старый, прекращаем итерацию
+                    if not post_time or post_time < hour_ago:
+                        break
+                    
                     b_id = post_data.get('board_id')
-                    if b_id and post_data.get('timestamp', now) > hour_ago:
+                    if b_id:
                         posts_per_hour[b_id] += 1
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
@@ -3925,14 +3943,20 @@ async def cmd_active(message: types.Message, board_id: str | None):
 
     now = datetime.now(UTC)
     day_ago = now - timedelta(hours=24)
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    posts_last_24h = 0
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизированный подсчет ---
     async with storage_lock:
-        # Подсчет постов теперь полностью выполняется внутри блокировки,
-        # что гарантирует целостность данных и предотвращает RuntimeError.
-        posts_last_24h = sum(
-            1 for post in messages_storage.values()
-            if post.get("timestamp", now) > day_ago
-        )
+        # Итерируем по отсортированным ключам в обратном порядке
+        sorted_post_keys = sorted(messages_storage.keys(), reverse=True)
+        for post_num in sorted_post_keys:
+            post_data = messages_storage[post_num]
+            post_time = post_data.get("timestamp")
+            
+            # Если пост слишком старый, прекращаем итерацию
+            if not post_time or post_time < day_ago:
+                break
+            
+            posts_last_24h += 1
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     lang = 'en' if board_id == 'int' else 'ru'
@@ -3980,7 +4004,6 @@ async def cmd_active(message: types.Message, board_id: str | None):
         'board_id': board_id
     })
     await message.delete()
-
 
 # ========== КОМАНДЫ ДЛЯ СИСТЕМЫ ТРЕДОВ ==========
 
