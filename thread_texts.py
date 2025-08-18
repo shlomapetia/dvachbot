@@ -15,6 +15,20 @@ thread_messages = {
             "🚫 Ты забыл суть. <code>/create &lt;СУТЬ&gt;</code>.", "🚫 Мозги включи. <code>/create &lt;название треда&gt;</code>.",
             "🚫 Я не понимаю, чего ты хочешь. Попробуй <code>/create &lt;четкое название&gt;</code>.", "🚫 Сначала /create, потом название. Неужели так трудно?",
         ],
+
+        'create_invalid_input': [
+            "🚫 Эй, я жду текст, а не вот это вот всё. Давай ОП-пост.",
+            "🚫 Ты прикалываешься? Мне нужен текст для треда, а не стикеры.",
+            "🚫 Не, так дело не пойдет. Отправь мне текст, который станет первым постом.",
+            "🚫 Ожидается текст. Только текст. Буквы, слова, предложения. Понял?",
+            "🚫 Это, конечно, очень смешно, но я жду текст для ОП-поста.",
+            "🚫 Тред из картинки? Оригинально, но нет. Давай текст.",
+            "🚫 Алло, нужен текст! Что ты мне шлешь?",
+            "🚫 Отправь мне нормальный текстовый пост, а не это.",
+            "🚫 Текст где? Я не умею читать мысли и стикеры.",
+            "🚫 ОП-пост должен быть текстом. Попробуй еще раз.",
+        ],
+                
         'create_success': [
             "✅ Оп-па, тред «<b>{title}</b>» вкатился в чат. Залетайте, обсуждайте.", "✅ Создал твой высер «<b>{title}</b>». Не обосрись там.",
             "✅ Тред «<b>{title}</b>» успешно создан. Ждем экспертов.", "✅ Есть пробитие! Тред «<b>{title}</b>» появился на доске.",
@@ -253,6 +267,20 @@ thread_messages = {
             "✅ '<b>{title}</b>' bursts onto the board, pushing out the most static thread '<b>{old_title}</b>' with its arrival.",
             "✅ Had to do a little cleaning. Thread '<b>{old_title}</b>' was deleted so your '<b>{title}</b>' could live. Enjoy.",
         ],
+
+        'create_invalid_input': [
+            "🚫 Hey, I'm waiting for text, not... whatever this is. Give me the OP.",
+            "🚫 Are you kidding me? I need text for the thread, not stickers.",
+            "🚫 Nope, that won't work. Send me the text that will be the first post.",
+            "🚫 Text is expected. Only text. Letters, words, sentences. Got it?",
+            "🚫 Very funny, but I'm waiting for the text for the opening post.",
+            "🚫 A thread from a picture? Original, but no. Let's have some text.",
+            "🚫 Hello? I need text! What are you sending me?",
+            "🚫 Send me a proper text post, not this.",
+            "🚫 Where's the text? I can't read minds or stickers.",
+            "🚫 The opening post must be text. Try again.",
+        ],
+        
         'create_cooldown': [
             "⏳ Hold your horses, cowboy. New threads once every {minutes} minutes. Wait {remaining}.", "⏳ Cool it, writer. Cooldown is {minutes} minutes. Remaining: {remaining}.",
             "⏳ Stop spamming threads, you fuck. Wait {remaining} before trying again.", "⏳ Slow down there. You can create threads once every {minutes} minutes. Left: {remaining}.",
