@@ -6678,7 +6678,15 @@ async def supervisor():
                 if pid_in_file == current_pid:
                     os.remove(lock_file)
             except (IOError, ValueError):
+                # --- НАЧАЛО ИЗМЕНЕНИЙ: Исправление IndentationError ---
                 # Если файл поврежден, тоже можно удалить
+                os.remove(lock_file)
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
+if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(supervisor())
             
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
