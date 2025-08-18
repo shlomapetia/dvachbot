@@ -6016,6 +6016,17 @@ async def cmd_suka_blyat(message: types.Message, board_id: str | None):
         return
     
     b_data = board_data[board_id]
+    user_id = message.from_user.id
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка на shadow_mute с уведомлением ---
+    if user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC):
+        try:
+            await message.answer("❌ Ошибка: этот режим временно не поддерживается.")
+            await message.delete()
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
+        return  # Выходим, не давая активировать режим
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if not await check_cooldown(message, board_id):
         return
@@ -6029,7 +6040,6 @@ async def cmd_suka_blyat(message: types.Message, board_id: str | None):
     header = "### Админ ###"
     _, pnum = await format_header(board_id)
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     activation_phrases = [
         "💢💢💢 Активирован режим СУКА БЛЯТЬ! 💢💢💢\n\nВсех нахуй разъебало!",
         "БЛЯЯЯЯЯТЬ! 💥 РЕЖИМ АГРЕССИИ ВКЛЮЧЕН! ПИЗДА ВСЕМУ!",
@@ -6050,7 +6060,6 @@ async def cmd_suka_blyat(message: types.Message, board_id: str | None):
         "ПОШЛИ НАХУЙ! 💥 ВСЕ ПОШЛИ НАХУЙ! Режим ярости включен, суки!"
     ]
     activation_text = random.choice(activation_phrases)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     content = {
         "type": "text",
