@@ -548,7 +548,6 @@ def sync_git_operations(token: str) -> bool:
         return False
         
 dp = Dispatcher()
-dp.update.middleware(BoardMiddleware()) # <-- ДОБАВЛЕНО
 # Настройка логирования - только важные сообщения
 logging.basicConfig(
     level=logging.WARNING,  # Только предупреждения и ошибки
@@ -7253,6 +7252,11 @@ async def supervisor():
 
         load_state()
 
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Перенос регистрации middleware ---
+        # Middleware регистрируется здесь, ПОСЛЕ всех блокирующих операций
+        dp.update.middleware(BoardMiddleware())
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
         from aiogram.client.session.aiohttp import AiohttpSession
 
         session = AiohttpSession(
@@ -7328,7 +7332,7 @@ async def supervisor():
                 # Если файл поврежден, тоже можно удалить
                 os.remove(lock_file)
                 # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-            
+
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
