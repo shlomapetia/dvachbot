@@ -40,7 +40,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-time.sleep(10)
+time.sleep(3)
 
 import deanonymizer
 from deanonymizer import (
