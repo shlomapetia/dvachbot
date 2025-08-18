@@ -1,6 +1,7 @@
 # japanese_translator.py
 import random
 import re
+import os
 import aiohttp
 from aiohttp import ClientTimeout
 try:
