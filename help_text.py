@@ -2,6 +2,36 @@
 
 # --- Тексты только для команд ---
 
+HELP_TEXT = (
+    "Это анонимный чат ТГАЧ. Просто пиши сообщения, они будут отправлены всем анонимно. Всем от всех.\n\n"
+    "<b>Команды:</b>\n"
+    "/start - начать\n"
+    "/help - помощь\n"
+    "/stats - статистика\n"
+    "/face - случайное лицо\n"
+    "/roll - ролл 0-100\n"
+    "/invite - пригласить анонов\n"
+    "/deanon - деанон постера\n"
+    "/active - активность досок\n"
+    "/anime - режим 🌸 Аниме\n"
+    "/zaputin - режим 🇷🇺 За Путина\n"
+    "/slavaukraine - режим 💙💛 Слава Украине\n"
+    "/suka_blyat - режим 💢 Сука Блять"
+)
+
+HELP_TEXT_EN = (
+    "This is TGACH, an anonymous chat. Just send messages, and they will be sent to everyone anonymously. From everyone, to everyone.\n\n"
+    "<b>Commands:</b>\n"
+    "/start - start the bot\n"
+    "/help - show this help message\n"
+    "/stats - show statistics\n"
+    "/face - get a random face\n"
+    "/roll - roll a number from 0-100\n"
+    "/invite - get text to invite new anons\n"
+    "/deanon - de-anonymize a poster\n"
+    "/active - boards activity\n"
+    "/anime - activate 🌸 Anime mode"
+)
 HELP_TEXT_COMMANDS = (
     "Это анонимный чат ТГАЧ. Просто пиши сообщения, они будут отправлены всем анонимно. Всем от всех.\n\n"
     "<b>Команды:</b>\n"
