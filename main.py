@@ -51,7 +51,7 @@ from deanonymizer import (
     DEANON_SURNAMES,
     generate_deanon_info,
 )
-from help_text import HELP_TEXT_COMMANDS, HELP_TEXT_EN_COMMANDS, generate_boards_list
+from help_text import HELP_TEXT, HELP_TEXT_EN, HELP_TEXT_COMMANDS, HELP_TEXT_EN_COMMANDS, generate_boards_list
 from japanese_translator import anime_transform, get_random_anime_image, get_monogatari_image
 from summarize import summarize_text_with_hf
 from thread_texts import thread_messages
@@ -1412,6 +1412,75 @@ async def graceful_shutdown(bots: list[Bot]):
         print(f"Error during final shutdown procedures: {e}")
 
     # Отменяем оставшиеся задачи
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    
+    await asyncio.gather(*tasks, return_exceptions=True)
+    print("✅ Все задачи остановлены, завершаем работу.")
+```на этот:
+```python
+async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | None = None):
+    """Обработчик корректного сохранения данных ВСЕХ досок перед остановкой."""
+    global is_shutting_down
+    if is_shutting_down:
+        return
+
+    is_shutting_down = True
+    print("🛑 Получен сигнал shutdown, начинаем процедуру завершения...")
+
+    try:
+        await dp.stop_polling()
+        print("⏸ Polling для всех ботов остановлен.")
+    except Exception as e:
+        print(f"⚠️ Не удалось остановить polling: {e}")
+
+    print("Ожидание опустошения очередей...")
+    all_queues_empty = False
+    for _ in range(10):
+        if all(q.empty() for q in message_queues.values()):
+            all_queues_empty = True
+            break
+        await asyncio.sleep(1)
+    
+    if all_queues_empty:
+        print("✅ Все очереди сообщений обработаны.")
+    else:
+        print("⚠️ Таймаут ожидания очередей. Некоторые сообщения могли не отправиться.")
+
+    print("💾 Попытка финального сохранения и бэкапа в GitHub (таймаут 50 секунд)...")
+    backup_task = asyncio.create_task(save_all_boards_and_backup())
+    
+    try:
+        await asyncio.wait_for(backup_task, timeout=50.0)
+        print("✅ Финальный бэкап успешно завершен в рамках таймаута.")
+    except asyncio.TimeoutError:
+        print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Финальный бэкап не успел выполниться за 50 секунд и был прерван!")
+        backup_task.cancel()
+        try:
+            await backup_task
+        except asyncio.CancelledError:
+            print("ℹ️ Задача бэкапа успешно отменена.")
+    except Exception as e:
+        print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Не удалось выполнить финальный бэкап: {e}")
+
+    print("Завершение остальных компонентов...")
+    try:
+        if healthcheck_site:
+            await healthcheck_site.stop()
+            print("🛑 Healthcheck server stopped")
+
+        git_executor.shutdown(wait=False, cancel_futures=True)
+        save_executor.shutdown(wait=False, cancel_futures=True)
+        print("🛑 Executors shutdown initiated.")
+
+        if hasattr(dp, 'storage') and dp.storage:
+            await dp.storage.close()
+        
+        print("✅ Сессии ботов будут закрыты централизованно.")
+    except Exception as e:
+        print(f"Error during final shutdown procedures: {e}")
+
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     for task in tasks:
         task.cancel()
@@ -7312,9 +7381,8 @@ async def start_background_tasks(bots: dict[str, Bot]):
 
 async def supervisor():
     lock_file = "bot.lock"
-    current_pid = os.getpid() # <-- ИЗМЕНЕНИЕ: Получаем PID текущего процесса заранее
+    current_pid = os.getpid()
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Улучшенная проверка lock-файла ---
     if os.path.exists(lock_file):
         try:
             with open(lock_file, "r") as f:
@@ -7323,7 +7391,6 @@ async def supervisor():
             print("⚠️ Lock-файл поврежден. Удаляю и продолжаю.")
             os.remove(lock_file)
         else:
-            # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Сравниваем PID ---
             if old_pid != current_pid:
                 try:
                     os.kill(old_pid, 0)
@@ -7332,51 +7399,32 @@ async def supervisor():
                 except OSError:
                     print(f"⚠️ Найден устаревший lock-файл от процесса {old_pid}. Удаляю и продолжаю.")
                     os.remove(lock_file)
-            # Если old_pid == current_pid, это просто наш собственный lock-файл,
-            # оставшийся от предыдущего неудачного запуска. Мы его просто перезапишем.
     
-    # Создаем/перезаписываем lock-файл с PID текущего процесса
     with open(lock_file, "w") as f:
         f.write(str(current_pid))
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     session = None
+    healthcheck_site = None # <-- ДОБАВЛЕНО
     global GLOBAL_BOTS
     try:
         global is_shutting_down
         loop = asyncio.get_running_loop()
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка статуса восстановления ---
         if not restore_backup_on_start():
             print("⛔ Не удалось восстановить состояние из бэкапа или локально. Аварийное завершение для предотвращения потери данных.")
-            # Используем os._exit для немедленного выхода без вызова finally,
-            # чтобы не удалить lock-файл и не позволить системе перезапустить бота.
             os._exit(1)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         load_state()
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Удаление регистрации middleware отсюда ---
-        # dp.update.middleware(BoardMiddleware()) # <-- ЭТА СТРОКА УДАЛЕНА
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
         from aiogram.client.session.aiohttp import AiohttpSession
-
-        session = AiohttpSession(
-            timeout=60
-        )
-        
+        session = AiohttpSession(timeout=60)
         default_properties = DefaultBotProperties(parse_mode="HTML")
         
         bots_temp = {}
         for board_id, config in BOARD_CONFIG.items():
             token = config.get("token")
             if token:
-                bots_temp[board_id] = Bot(
-                    token=token, 
-                    default=default_properties, 
-                    session=session
-                )
+                bots_temp[board_id] = Bot(token=token, default=default_properties, session=session)
             else:
                 print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
         
@@ -7390,14 +7438,16 @@ async def supervisor():
         print(f"✅ Инициализировано {len(GLOBAL_BOTS)} ботов: {list(GLOBAL_BOTS.keys())}")
         
         bots_list = list(GLOBAL_BOTS.values())
+        graceful_shutdown_handler = lambda: asyncio.create_task(graceful_shutdown(bots_list, healthcheck_site)) # <-- ИЗМЕНЕНО
+        
         if hasattr(signal, 'SIGTERM'):
-            loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(graceful_shutdown(bots_list)))
+            loop.add_signal_handler(signal.SIGTERM, graceful_shutdown_handler)
         if hasattr(signal, 'SIGINT'):
-            loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown(bots_list)))
+            loop.add_signal_handler(signal.SIGINT, graceful_shutdown_handler)
         
         await setup_pinned_messages(GLOBAL_BOTS)
-        healthcheck_site = await start_healthcheck()
-        background_tasks = await start_background_tasks(GLOBAL_BOTS)
+        healthcheck_site = await start_healthcheck() # <-- ПРИСВАИВАНИЕ
+        await start_background_tasks(GLOBAL_BOTS)
 
         print("⏳ Даем 7 секунд на инициализацию перед обработкой сообщений...")
         await asyncio.sleep(7)
@@ -7416,15 +7466,13 @@ async def supervisor():
         print(f"🔥 Critical error in supervisor: {e}\n{traceback.format_exc()}")
     finally:
         if not is_shutting_down:
-             await graceful_shutdown(list(GLOBAL_BOTS.values()))
+             await graceful_shutdown(list(GLOBAL_BOTS.values()), healthcheck_site) # <-- ИЗМЕНЕНО
         
         if session:
             print("Закрытие общей HTTP сессии...")
             await session.close()
         
         if os.path.exists(lock_file):
-            # --- ИЗМЕНЕНИЕ: Безопасное удаление lock-файла ---
-            # Удаляем lock-файл только если он принадлежит нам
             try:
                 with open(lock_file, "r") as f:
                     pid_in_file = int(f.read().strip())
@@ -7433,7 +7481,7 @@ async def supervisor():
             except (IOError, ValueError):
                 # --- НАЧАЛО ИЗМЕНЕНИЙ: Исправление IndentationError ---
                 # Если файл поврежден, тоже можно удалить
-                os.remove(lock_file)
+                 os.remove(lock_file)
                 # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 if __name__ == "__main__":
