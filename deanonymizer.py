@@ -184,63 +184,172 @@ DEANON_DETAILS_EN = [
     "visited 4chan for the first time in 2023"
 ]
 
-def generate_deanon_info(lang: str = 'ru') -> Tuple[str, str, str, str, str, str]:
-    """Генерирует фейковые данные для деанона на указанном языке."""
+def generate_deanon_info(lang: str = 'ru') -> str:
+    """
+    Генерирует фейковые данные для деанона на указанном языке
+    и возвращает единую, отформатированную строку в случайном стиле с вариативной структурой.
+    """
     
-    # --- БЛОК ВЫБОРА ЯЗЫКА ---
+    # --- БЛОК ВЫБОРА ЯЗЫКА И ГЕНЕРАЦИЯ ДАННЫХ ---
     if lang == 'en':
-        names = DEANON_NAMES_EN
-        surnames = DEANON_SURNAMES_EN
-        cities = DEANON_CITIES_EN
-        streets = DEANON_STREETS_EN
-        professions = DEANON_PROFESSIONS_EN
-        fetishes = DEANON_FETISHES_EN
-        details_list = DEANON_DETAILS_EN
-        address_template = "{city}, {street}, {house}"
-        apartment_template = ", apt. {flat}"
-    else: # По умолчанию используется русский
-        names = DEANON_NAMES
-        surnames = DEANON_SURNAMES
-        cities = DEANON_CITIES
-        streets = DEANON_STREETS
-        professions = DEANON_PROFESSIONS
-        fetishes = DEANON_FETISHES
-        details_list = DEANON_DETAILS
-        address_template = "{city}, ул. {street}, д. {house}"
-        apartment_template = ", кв. {flat}"
+        names, surnames, cities, streets, professions, fetishes, details_list = (
+            DEANON_NAMES_EN, DEANON_SURNAMES_EN, DEANON_CITIES_EN, DEANON_STREETS_EN,
+            DEANON_PROFESSIONS_EN, DEANON_FETISHES_EN, DEANON_DETAILS_EN
+        )
+        address_template = "{city}, {street}, {house}, apt. {flat}"
+    else:
+        names, surnames, cities, streets, professions, fetishes, details_list = (
+            DEANON_NAMES, DEANON_SURNAMES, DEANON_CITIES, DEANON_STREETS,
+            DEANON_PROFESSIONS, DEANON_FETISHES, DEANON_DETAILS
+        )
+        address_template = "{city}, ул. {street}, д. {house}, кв. {flat}"
 
-    # --- ОСТАЛЬНАЯ ЛОГИКА ОСТАЕТСЯ ПРЕЖНЕЙ, НО ИСПОЛЬЗУЕТ ВЫБРАННЫЕ СПИСКИ ---
-    
-    # Генерация адреса
+    name = random.choice(names)
+    surname = random.choice(surnames)
     city = random.choice(cities)
     street = random.choice(streets)
     house = random.randint(1, 200)
-    address = address_template.format(city=city, street=street, house=house)
-    
-    # --- ИЗМЕНЕННЫЙ БЛОК ГЕНЕРАЦИИ ДЕТАЛЕЙ ---
-    if random.random() < 0.21:
-        # С вероятностью 21% возвращаем заглушку
-        details_str = "Nothing to say about this anon" if lang == 'en' else "Про анона нечего сказать"
-    else:
-        # В остальных случаях генерируем факты как раньше
-        details = [random.choice(details_list)]
-        
-        # 40% шанс на второй факт
-        if random.random() < 0.25:
-            details.append(random.choice(details_list))
-        
-        # 10% шанс на третий факт
-        if random.random() < 0.1:
-            details.append(random.choice(details_list))
-        
-        details_str = ", ".join(details)
-    # --- КОНЕЦ ИЗМЕНЕННОГО БЛОКА ---
+    flat = random.randint(1, 500)
+    address = address_template.format(city=city, street=street, house=house, flat=flat)
+    profession = random.choice(professions)
+    fetish = random.choice(fetishes)
 
-    return (
-        random.choice(names),
-        random.choice(surnames),
-        address,
-        random.choice(professions),
-        random.choice(fetishes),
-        details_str
-    )
+    details = [random.choice(details_list)]
+    if random.random() < 0.4: details.append(random.choice(details_list))
+    if random.random() < 0.15: details.append(random.choice(details_list))
+    details_str = ", ".join(details)
+
+    # --- СТРУКТУРЫ С ВАРИАНТАМИ ДЛЯ КАЖДОГО СТИЛЯ ---
+
+    if lang == 'en':
+        # Для английского пока один шаблон
+        return (
+            f"<b>[DEANONYMIZATION REPORT]</b>\n\n"
+            f"<b>Name:</b> {name} {surname}\n"
+            f"<b>Last Known Address:</b> {address}\n"
+            f"<b>Occupation:</b> {profession}\n"
+            f"<b>Known Fetishes:</b> {fetish}\n\n"
+            f"<b>Additional info:</b> {details_str}"
+        )
+
+    # --- НОВЫЙ, РАСШИРЕННЫЙ СПИСОК СТИЛЕЙ ---
+    styles = [
+        'standard', 'fsb', 'ukrainian', 'chechen', 'official',
+        'schizo', 'news', 'old_school_hacker'
+    ]
+    chosen_style = random.choice(styles)
+    
+    # --- ФСБ ---
+    if chosen_style == 'fsb':
+        report_parts = [f"<b>[ДОСЬЕ ОБЪЕКТА №{random.randint(1000, 9999)}]</b>"]
+        if random.random() < 0.6:
+            report_parts.append(f"<b>ФИО:</b> {surname} {name}")
+            report_parts.append(f"<b>Место регистрации:</b> {address}")
+            report_parts.append(f"<b>Род деятельности:</b> {profession}")
+            report_parts.append(f"<b>Особые приметы:</b> {details_str}")
+            report_parts.append(f"<b>Сексуальные девиации:</b> {fetish}")
+        else:
+            report_parts.append(f"<b>Объект:</b> {surname} {name}")
+            report_parts.append(f"<b>Известная информация:</b> {details_str}")
+            if random.random() < 0.7:
+                 report_parts.append(f"<b>Возможное местонахождение:</b> г. {city}")
+        report_parts.append(f"\n<i>Заключение: {random.choice(['Объект нестабилен.', 'Рекомендовано наблюдение.', 'Представляет оперативный интерес.'])}</i>")
+        return "\n".join(report_parts)
+
+    # --- Украинский ---
+    elif chosen_style == 'ukrainian':
+        report_parts = [f"<b>[ДАНІ ПРО СЕПАРАТИСТА]</b> 🫡"]
+        report_parts.append(f"<b>Ім'я:</b> {name} {surname}, клятий москаль.")
+        if random.random() < 0.8:
+            report_parts.append(f"<b>Місцезнаходження:</b> {address}, тимчасово окупована територія.")
+        report_parts.append(f"<b>Діяльність:</b> {profession}, пособник окупантів.")
+        report_parts.append(f"<b>Що відомо:</b> {details_str}.")
+        if random.random() < 0.7:
+            report_parts.append(f"<b>Збочення:</b> {fetish}.")
+        report_parts.append(f"\n<i>{random.choice(['Слава Україні!', 'Смерть ворогам!', 'Азов - Сила!'])}</i>")
+        return "\n".join(report_parts)
+
+    # --- Чеченский ---
+    elif chosen_style == 'chechen':
+        text = f"Ассаламу алейкум. Этот шайтан, которого вы ищете, его имя {name} {surname}.\n"
+        if random.random() < 0.6:
+            text += f"Живет он тут: {address}. Если надо, найдем, иншааллах.\n"
+            text += f"Работает как {profession}, но мы то знаем, чем он на самом деле дышит.\n"
+            text += f"Говорят, он {details_str}, ваЛлахи, позор.\n"
+        else:
+            text += f"Мы знаем, что он из города {city}. Он {details_str}.\n"
+        
+        text += f"Еще говорят, ему нравится {fetish}. Аллах ему судья.\n\n"
+        text += f"<b>{random.choice(['Ахмат - Сила!', 'Аллаху Акбар!'])}</b>"
+        return text
+
+    # --- Официальный ---
+    elif chosen_style == 'official':
+        report_parts = [f"<b>АНКЕТА №{random.randint(100, 999)}-П</b>\n"]
+        report_parts.append(f"<b>Фамилия, Имя:</b> {surname}, {name}")
+        report_parts.append(f"<b>Адрес проживания:</b> {address}")
+        choice = random.random()
+        if choice < 0.5:
+             report_parts.append(f"<b>Занятость:</b> {profession}")
+             report_parts.append(f"<b>Характеристика:</b> {details_str}")
+        elif choice < 0.8:
+             report_parts.append(f"<b>Характеристика:</b> {details_str}")
+        else:
+             report_parts.append(f"<b>Занятость:</b> {profession}")
+        if random.random() < 0.6:
+            report_parts.append(f"<b>Личные увлечения:</b> {fetish}")
+        return "\n".join(report_parts)
+    
+    # --- Шизофреник ---
+    elif chosen_style == 'schizo':
+        lines = [
+            "ПСИОПЫ СЛЕДЯТ ЗА НИМ",
+            f"ЕГО ЗОВУТ {name.upper()} {surname.upper()}, ЭТО ШИФР",
+            f"ГОРОД {city.upper()} ЭТО КОДОВАЯ БАЗА",
+            "ОН РАБОТАЕТ НА НИХ",
+            f"Я ВИДЕЛ КАК ОН {details_str.upper()}",
+            "СООБЩИТЕ В ZOG, ПОКА НЕ ПОЗДНО",
+            "ЧИСЛА, Я НЕ ЗНАЮ, ЧТО ОНИ ЗНАЧАТ?"
+        ]
+        random.shuffle(lines)
+        num_lines = random.randint(3, 5)
+        return "<code>" + "\n".join(lines[:num_lines]) + "</code>"
+
+    # --- Новостная сводка ---
+    elif chosen_style == 'news':
+        intro = random.choice([
+            f"В городе {city} разыскивается гражданин",
+            f"Стали известны подробности о жителе города {city}, гражданине",
+            f"Шокирующие факты в нашем репортаже. Гражданин"
+        ])
+        text = f"⚡️ <b>СРОЧНЫЕ НОВОСТИ</b> ⚡️\n\n{intro} {surname} {name}.\n"
+        text += f"По данным нашего источника, он известен тем, что {details_str}. "
+        if random.random() < 0.7:
+            text += f"В свободное от работы ({profession}) время, он предпочитает {fetish}. "
+        text += f"\nМы следим за развитием событий."
+        return text
+
+    # --- Хакер из 90-х ---
+    elif chosen_style == 'old_school_hacker':
+        text = (
+            f"//-- Deanon protocol initialized --//\n"
+            f"//-- Target locked --//\n\n"
+            f">>> User data decrypted:\n"
+            f'  Name: "{name} {surname}"\n'
+            f'  Location string: "{address}"\n'
+            f'  Social status: "{profession}"\n'
+            f'  Known exploit: "{fetish}"\n\n'
+            f"//-- User profile dump --//\n"
+            f">>> {details_str}\n\n"
+            f"//-- Connection terminated --//"
+        )
+        return f"<code>{text}</code>"
+
+    # --- Стандартный (по умолчанию) ---
+    else:
+        report_parts = [f"👤 <b>Имя:</b> {name} {surname}"]
+        if random.random() < 0.9: report_parts.append(f"🏠 <b>Адрес:</b> {address}")
+        if random.random() < 0.8: report_parts.append(f"💼 <b>Профессия:</b> {profession}")
+        if random.random() < 0.7: report_parts.append(f"❤️‍🔥 <b>Фетиш:</b> {fetish}")
+        report_parts.append(f"📝 <b>Дополнительно:</b> {details_str}")
+        return "\n".join(report_parts)
