@@ -13,6 +13,7 @@ HELP_TEXT = (
     "/invite - пригласить анонов\n"
     "/deanon - деанон постера\n"
     "/active - активность досок\n"
+    "/hent /fap /gatari /monogatari - аниме пикча\n"
     "/anime - режим 🌸 Аниме\n"
     "/zaputin - режим 🇷🇺 За Путина\n"
     "/slavaukraine - режим 💙💛 Слава Украине\n"
@@ -30,6 +31,7 @@ HELP_TEXT_EN = (
     "/invite - get text to invite new anons\n"
     "/deanon - de-anonymize a poster\n"
     "/active - boards activity\n"
+    "/hent /fap /gatari /monogatari - anime pic\n"
     "/anime - activate 🌸 Anime mode"
 )
 HELP_TEXT_COMMANDS = (
@@ -43,6 +45,7 @@ HELP_TEXT_COMMANDS = (
     "/invite - пригласить анонов\n"
     "/deanon - деанон постера\n"
     "/active - активность досок\n"
+    "/hent /fap /gatari /monogatari - аниме пикча\n"
     "/anime - режим 🌸 Аниме\n"
     "/zaputin - режим 🇷🇺 За Путина\n"
     "/slavaukraine - режим 💙💛 Слава Украине\n"
@@ -60,6 +63,7 @@ HELP_TEXT_EN_COMMANDS = (
     "/invite - get text to invite new anons\n"
     "/deanon - de-anonymize a poster\n"
     "/active - boards activity\n"
+    "/hent /fap /gatari /monogatari - anime pic\n"
     "/anime - activate 🌸 Anime mode"
 )
 
