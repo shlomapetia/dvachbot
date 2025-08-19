@@ -2469,7 +2469,6 @@ async def send_message_to_users(
     if not active_recipients:
         return []
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Единый блок сбора данных под блокировкой ---
     user_specific_data = {}
     async with storage_lock:
         post_num = modified_content.get('post_num')
@@ -2478,7 +2477,6 @@ async def send_message_to_users(
         reply_author_id = messages_storage.get(reply_to_post_num, {}).get('author_id') if reply_to_post_num else None
 
         for uid in active_recipients:
-            # 1. Определяем, на какое сообщение отвечать для этого юзера
             reply_to_mid = None
             if reply_info and isinstance(reply_info, dict):
                 reply_to_mid = reply_info.get(uid)
@@ -2486,18 +2484,15 @@ async def send_message_to_users(
                 if reply_to_post_num in post_to_messages and isinstance(post_to_messages[reply_to_post_num], dict):
                     reply_to_mid = post_to_messages[reply_to_post_num].get(uid)
 
-            # 2. Формируем заголовок с пометкой об ответе
             header_text = modified_content.get('header', '')
             head = f"<i>{escape_html(header_text)}</i>"
             if uid == reply_author_id:
                 if "Пост" in head: head = head.replace("Пост", "🔴 Пост")
                 if "Post" in head: head = head.replace("Post", "🔴 Post")
 
-            # 3. Формируем тело сообщения с пометкой (You)
             content_for_user = modified_content.copy()
             text_or_caption = content_for_user.get('text') or content_for_user.get('caption')
             if text_or_caption:
-                # add_you_to_my_posts требует доступа к storage, поэтому вызывается здесь
                 text_with_you = add_you_to_my_posts(text_or_caption, uid)
                 if 'text' in content_for_user:
                     content_for_user['text'] = text_with_you
@@ -2509,25 +2504,27 @@ async def send_message_to_users(
                 post_data=post_data, reply_to_post_author_id=reply_author_id
             )
             
-            # 4. Сохраняем все подготовленные данные для этого юзера
             user_specific_data[uid] = {
                 'reply_to_mid': reply_to_mid,
                 'head': head,
                 'body': formatted_body,
             }
-    # --- Блокировка освобождена ---
     
     async def really_send(uid: int):
-        # Эта функция теперь не использует storage_lock
         data = user_specific_data.get(uid)
-        if not data: return None, None
+        if not data: return None
         
         reply_to = data['reply_to_mid']
         head = data['head']
         formatted_body = data['body']
         
         try:
-            ct = modified_content["type"]
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Надежное получение строкового типа контента ---
+            ct_raw = modified_content["type"]
+            # Эта строка надежно извлекает 'video' из 'ContentType.VIDEO' или 'video' из 'video'
+            ct = str(ct_raw).split('.')[-1].lower()
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
             full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
 
             if ct == "media_group":
