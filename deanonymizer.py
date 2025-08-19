@@ -313,7 +313,8 @@ def generate_deanon_info(lang: str = 'ru') -> str:
         name_intros = [
             f"<b>Об'єкт:</b> {name} {surname}, позивний '{random.choice(['Пиня', 'Чмоня', 'Дырка','Лахтобот', 'Ванька', 'Хуiло', 'Пiдоран'])}'.",
             f"<b>ПІБ:</b> {surname} {name}, клятий москаль.",
-            f"<b>Чоловiк:</b> {surname} {name}, ёбанiй ватник.",
+            f"<b>ПІБ:</b> {surname} {name}, клятий москаль.",
+            f"<b>Ім'я:</b> {surname} {name}, рашicт.",
             f"<b>Ідентифіковано особу:</b> {name} {surname}, зрадник України."
         ]
         
