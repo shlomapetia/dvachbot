@@ -51,7 +51,7 @@ from deanonymizer import (
     DEANON_SURNAMES,
     generate_deanon_info,
 )
-from help_text import HELP_TEXT, HELP_TEXT_EN
+from help_text import HELP_TEXT_COMMANDS, HELP_TEXT_EN_COMMANDS, generate_boards_list
 from japanese_translator import anime_transform, get_random_anime_image, get_monogatari_image
 from summarize import summarize_text_with_hf
 from thread_texts import thread_messages
@@ -462,63 +462,62 @@ async def git_commit_and_push():
 
 
 def sync_git_operations(token: str) -> bool:
-    """Синхронные Git-операции для бэкапа с жесткими таймаутами и подробным логированием."""
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Таймаут увеличен ---
-    GIT_TIMEOUT = 90  # Секунд на каждую сетевую git-операцию
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-    GIT_LOCAL_TIMEOUT = 15 # Секунд на каждую локальную git-операцию
+    """
+    Синхронные Git-операции для бэкапа. Оптимизировано для сред с медленным диском.
+    Клонирует репозиторий только один раз.
+    """
+    GIT_TIMEOUT = 90
+    GIT_LOCAL_TIMEOUT = 30  # Таймаут для локальных операций увеличен
+    
     try:
         work_dir = "/tmp/git_backup"
-        os.makedirs(work_dir, exist_ok=True)
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot-backup.git"
 
-        # --- Клонирование или Обновление ---
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизированная логика инициализации репозитория ---
         if not os.path.exists(os.path.join(work_dir, ".git")):
-            clone_cmd = ["git", "clone", "--depth=1", repo_url, work_dir]
-            print(f"Git: Выполняю: {' '.join(clone_cmd)}")
-            result = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
-            if result.returncode != 0:
-                print(f"❌ Ошибка клонирования (код {result.returncode}):\n--- stderr ---\n{result.stderr}\n--- stdout ---\n{result.stdout}")
-                return False
-            print("✅ Git: Репозиторий успешно клонирован.")
-        else:
-            pull_cmd = ["git", "-C", work_dir, "pull"]
-            print(f"Git: Выполняю: {' '.join(pull_cmd)}")
+            print("Git: Локальный репозиторий не найден, создаю...")
+            if os.path.exists(work_dir):
+                shutil.rmtree(work_dir)
+            os.makedirs(work_dir)
+            
+            # Инициализируем пустой репозиторий
+            subprocess.run(["git", "-C", work_dir, "init"], check=True, timeout=GIT_LOCAL_TIMEOUT)
+            subprocess.run(["git", "-C", work_dir, "remote", "add", "origin", repo_url], check=True, timeout=GIT_LOCAL_TIMEOUT)
+            
+            # Пытаемся получить последнюю версию, но без истории (--depth=1)
+            # --allow-unrelated-histories нужен для последующих push
+            pull_cmd = ["git", "-C", work_dir, "pull", "origin", "main", "--depth=1", "--allow-unrelated-histories"]
+            print(f"Git: Выполняю начальную загрузку: {' '.join(pull_cmd)}")
             result = subprocess.run(pull_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+            
+            # Ошибка на этом этапе не критична, если репозиторий пуст. Продолжаем.
             if result.returncode != 0:
-                print(f"⚠️ Ошибка обновления (код {result.returncode}):\n--- stderr ---\n{result.stderr}\n--- stdout ---\n{result.stdout}")
-                # Не критично, продолжаем, но это плохой знак
+                print(f"⚠️ Git: Не удалось выполнить начальную загрузку (возможно, репозиторий пуст). Код {result.returncode}:\n{result.stderr}")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        # --- Копирование файлов состояний ---
+        # --- Копирование файлов ---
         files_to_copy_state = glob.glob(os.path.join(os.getcwd(), "*_state.json"))
         files_to_copy_state += glob.glob(os.path.join(os.getcwd(), "*_reply_cache.json"))
         
         for src_path in files_to_copy_state:
             shutil.copy2(src_path, work_dir)
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Копирование архивов тредов ---
         archives_dir_in_repo = os.path.join(work_dir, "archives")
-        os.makedirs(archives_dir_in_repo, exist_ok=True) # Создаем папку archives в репозитории
-
-        # Ищем все HTML архивы в локальной папке DATA_DIR (по умолчанию "data")
+        os.makedirs(archives_dir_in_repo, exist_ok=True)
         files_to_copy_archives = glob.glob(os.path.join(DATA_DIR, "archive_*.html"))
         
-        if files_to_copy_archives:
-            print(f"Git: Найдено {len(files_to_copy_archives)} файлов архивов для бэкапа.")
-            for src_path in files_to_copy_archives:
-                shutil.copy2(src_path, archives_dir_in_repo)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        for src_path in files_to_copy_archives:
+            shutil.copy2(src_path, archives_dir_in_repo)
 
         if not files_to_copy_state and not files_to_copy_archives:
             print("⚠️ Нет файлов для бэкапа, пропуск.")
-            return True # Успешное завершение, так как нет работы
+            return True
 
-        # --- Локальные Git операции (быстрые, короткий таймаут) ---
+        # --- Локальные операции ---
         subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True, timeout=GIT_LOCAL_TIMEOUT)
         subprocess.run(["git", "-C", work_dir, "config", "user.email", "backup@dvachbot.com"], check=True, timeout=GIT_LOCAL_TIMEOUT)
         subprocess.run(["git", "-C", work_dir, "add", "."], check=True, timeout=GIT_LOCAL_TIMEOUT)
         
-        # Проверяем, есть ли что коммитить
         status_result = subprocess.run(["git", "-C", work_dir, "status", "--porcelain"], capture_output=True, text=True, timeout=GIT_LOCAL_TIMEOUT)
         if not status_result.stdout:
             print("✅ Git: Нет изменений для коммита.")
@@ -527,13 +526,13 @@ def sync_git_operations(token: str) -> bool:
         commit_msg = f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
         subprocess.run(["git", "-C", work_dir, "commit", "-m", commit_msg], check=True, timeout=GIT_LOCAL_TIMEOUT)
 
-        # --- Push - самая важная операция ---
-        push_cmd = ["git", "-C", work_dir, "push", "origin", "main"]
+        # --- Отправка ---
+        push_cmd = ["git", "-C", work_dir, "push", "--force", "origin", "main"]
         print(f"Git: Выполняю: {' '.join(push_cmd)}")
         result = subprocess.run(push_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
 
         if result.returncode == 0:
-            print(f"✅ Бекап успешно отправлен в GitHub.\n--- stdout ---\n{result.stdout}")
+            print(f"✅ Бекап успешно отправлен в GitHub.")
             return True
         else:
             print(f"❌ КРИТИЧЕСКАЯ ОШИБКА PUSH (код {result.returncode}):\n--- stderr ---\n{result.stderr}\n--- stdout ---\n{result.stdout}")
@@ -548,6 +547,8 @@ def sync_git_operations(token: str) -> bool:
         return False
         
 dp = Dispatcher()
+dp.message.middleware(BoardMiddleware())
+dp.callback_query.middleware(BoardMiddleware())
 # Настройка логирования - только важные сообщения
 logging.basicConfig(
     level=logging.WARNING,  # Только предупреждения и ошибки
@@ -2989,7 +2990,63 @@ async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_loc
         user_s.setdefault('last_seen_threads', {})[target_location] = new_last_seen
     
     return True
-            
+
+async def help_broadcaster():
+    """
+    Раз в ~12 часов отправляет на каждую доску либо список команд (30%),
+    либо список всех досок (70%).
+    """
+    await asyncio.sleep(600)  # Начальная задержка 10 минут
+
+    while True:
+        # Случайная задержка от 11 до 13 часов
+        delay = random.randint(39600, 46800)
+        await asyncio.sleep(delay)
+        
+        try:
+            for board_id in BOARDS:
+                if board_id == 'test':
+                    continue
+
+                b_data = board_data[board_id]
+                recipients = b_data['users']['active'] - b_data['users']['banned']
+
+                if not recipients:
+                    continue
+                
+                lang = 'en' if board_id == 'int' else 'ru'
+                message_text = ""
+
+                # --- Вероятностный выбор контента ---
+                if random.random() < 0.7:  # 70% шанс на список досок
+                    message_text = generate_boards_list(BOARD_CONFIG, lang)
+                else:  # 30% шанс на список команд
+                    message_text = HELP_TEXT_EN_COMMANDS if lang == 'en' else HELP_TEXT_COMMANDS
+                
+                header, post_num = await format_header(board_id)
+                content = {
+                    'type': 'text', 'header': header, 'text': message_text,
+                    'is_system_message': True
+                }
+
+                async with storage_lock:
+                    messages_storage[post_num] = {
+                        'author_id': 0, 'timestamp': datetime.now(UTC),
+                        'content': content, 'board_id': board_id
+                    }
+
+                await message_queues[board_id].put({
+                    'recipients': recipients, 'content': content,
+                    'post_num': post_num, 'board_id': board_id
+                })
+
+                print(f"✅ [{board_id}] Сообщение помощи #{post_num} добавлено в очередь.")
+
+        except Exception as e:
+            print(f"❌ [{board_id}] Ошибка в help_broadcaster: {e}")
+            await asyncio.sleep(120)
+
+
 async def motivation_broadcaster():
     """Отправляет мотивационные сообщения на каждую доску в разное время."""
     await asyncio.sleep(15)  # Начальная задержка
@@ -5814,11 +5871,9 @@ async def cmd_deanon(message: Message, board_id: str | None):
     reply_info = {}
 
     async with storage_lock:
-        # --- ИЗМЕНЕНИЕ: Используем ID чата и сообщения из reply_to_message, а не ID самого пользователя ---
         target_chat_id = message.reply_to_message.chat.id
         target_mid = message.reply_to_message.message_id
         target_post = message_to_post.get((target_chat_id, target_mid))
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         if target_post and target_post in messages_storage:
             original_author_id = messages_storage[target_post].get('author_id')
@@ -5836,15 +5891,13 @@ async def cmd_deanon(message: Message, board_id: str | None):
         await message.delete()
         return
         
-    name, surname, city, profession, fetish, detail = generate_deanon_info(lang=lang)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # 1. Вызываем обновленную функцию, которая возвращает одну готовую строку
+    deanon_text = generate_deanon_info(lang=lang)
     
-    deanon_text, header_text = "", ""
-    if lang == 'en':
-        deanon_text = (f"\nThis anon's name is: {name} {surname}...")
-        header_text = "### DEANON ###"
-    else:
-        deanon_text = (f"\nЭтого анона зовут: {name} {surname}...")
-        header_text = "### ДЕАНОН ###"
+    # 2. Устанавливаем заголовок в зависимости от языка
+    header_text = "### DEANON ###" if lang == 'en' else "### ДЕАНОН ###"
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     content = {"type": "text", "header": header_text, "text": deanon_text, "reply_to_post": target_post}
 
@@ -5852,7 +5905,6 @@ async def cmd_deanon(message: Message, board_id: str | None):
         thread_id = user_location
         thread_info = b_data.get('threads_data', {}).get(thread_id)
         if thread_info and not thread_info.get('is_archived'):
-            # Глобальный номер для системного сообщения все равно нужен
             _, pnum = await format_header(board_id)
             content['post_num'] = pnum
             content['header'] = await format_thread_post_header(board_id, len(thread_info.get('posts', [])) + 1, 0, thread_info)
@@ -5862,12 +5914,10 @@ async def cmd_deanon(message: Message, board_id: str | None):
                 thread_info['posts'].append(pnum)
                 thread_info['last_activity_at'] = time.time()
             
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем thread_id в очередь ---
             await message_queues[board_id].put({
                 "recipients": thread_info.get('subscribers', set()), "content": content, "post_num": pnum,
                 "board_id": board_id, "thread_id": thread_id
             })
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             await message.delete()
             return
             
@@ -7234,7 +7284,7 @@ async def start_background_tasks(bots: dict[str, Bot]):
     """Поднимаем все фоновые корутины ОДИН раз за весь runtime через надежную обертку."""
     from conan import conan_roaster
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Запуск всех задач через обертку ---
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавлена новая задача ---
     tasks_to_run = {
         "auto_backup": auto_backup(),
         "message_broadcaster": message_broadcaster(bots),
@@ -7243,18 +7293,19 @@ async def start_background_tasks(bots: dict[str, Bot]):
             message_queues, format_header, board_data, storage_lock
         ),
         "motivation_broadcaster": motivation_broadcaster(),
+        "help_broadcaster": help_broadcaster(),  # <-- НОВАЯ ЗАДАЧА
         "auto_memory_cleaner": auto_memory_cleaner(),
         "board_statistics_broadcaster": board_statistics_broadcaster(),
         "thread_lifecycle_manager": thread_lifecycle_manager(bots),
         "thread_notifier": thread_notifier(),
         "thread_activity_monitor": thread_activity_monitor(bots)
     }
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     tasks = [
         asyncio.create_task(_run_background_task(coro, name))
         for name, coro in tasks_to_run.items()
     ]
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     print(f"✓ Background tasks started: {len(tasks)}")
     return tasks
@@ -7305,9 +7356,8 @@ async def supervisor():
 
         load_state()
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Перенос регистрации middleware ---
-        # Middleware регистрируется здесь, ПОСЛЕ всех блокирующих операций
-        dp.update.middleware(BoardMiddleware())
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Удаление регистрации middleware отсюда ---
+        # dp.update.middleware(BoardMiddleware()) # <-- ЭТА СТРОКА УДАЛЕНА
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         from aiogram.client.session.aiohttp import AiohttpSession
