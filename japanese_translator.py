@@ -795,20 +795,18 @@ async def get_monogatari_image():
         'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'
     }
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Корректное формирование тегов рейтинга ---
-    if random.random() < 0.25:  # 25% шанс на NSFW
-        # Случайно выбираем один из двух валидных NSFW-рейтингов
+    if random.random() < 0.25:
         rating_tag = random.choice(['rating:questionable', 'rating:explicit'])
         print(f"[Danbooru API] Attempting to fetch NSFW Monogatari image with tag: {rating_tag}.")
     else:
-        # Используем правильный тег для SFW-контента
         rating_tag = 'rating:safe'
         print("[Danbooru API] Attempting to fetch SFW Monogatari image.")
         
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Переход на мета-тег order:random ---
     params_danbooru = {
-        'tags': f'monogatari_series {rating_tag}',
-        'limit': 100,
-        'random': 'true'
+        # Добавляем order:random для получения случайного поста
+        'tags': f'monogatari_series {rating_tag} order:random',
+        'limit': 1 # Для order:random рекомендуется limit=1
     }
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
@@ -837,19 +835,17 @@ async def get_monogatari_image():
                             print(f"[{api['source']}] Error: Empty or invalid response.")
                             continue
                         
-                        valid_posts = [
-                            post for post in data
-                            if 'file_url' in post and post['file_url'].lower().endswith(('.png', '.jpg', '.jpeg'))
-                        ]
-
-                        if not valid_posts:
-                            print(f"[{api['source']}] No valid images found in the response.")
+                        # --- НАЧАЛО ИЗМЕНЕНИЙ: Упрощенная обработка ответа ---
+                        # Так как limit=1, мы просто берем первый (и единственный) пост
+                        selected_post = data[0]
+                        if 'file_url' in selected_post and selected_post['file_url'].lower().endswith(('.png', '.jpg', '.jpeg')):
+                            image_url = selected_post['file_url']
+                        else:
+                            print(f"[{api['source']}] No valid image found in the response post.")
                             continue
+                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-                        selected_post = random.choice(valid_posts)
-                        image_url = selected_post['file_url']
-
-                else: # Логика для резервных API (они всегда SFW)
+                else: # Логика для резервных API (она всегда SFW)
                     async with session.get(api["url"]) as response:
                         if response.status != 200:
                             print(f"[{api['source']}] API Error: Status {response.status}")
