@@ -192,22 +192,22 @@ def generate_deanon_info(lang: str = 'ru') -> str:
     
     # --- БЛОК ГЕНЕРАЦИИ ДАННЫХ (без изменений) ---
     if lang == 'en':
-        name = random.choice(deanonymizer.DEANON_NAMES_EN)
-        surname = random.choice(deanonymizer.DEANON_SURNAMES_EN)
-        city = random.choice(deanonymizer.DEANON_CITIES_EN)
-        street = random.choice(deanonymizer.DEANON_STREETS_EN)
-        prof = random.choice(deanonymizer.DEANON_PROFESSIONS_EN)
-        fetish = random.choice(deanonymizer.DEANON_FETISHES_EN)
-        details_list = deanonymizer.DEANON_DETAILS_EN
+        name = random.choice(DEANON_NAMES_EN)
+        surname = random.choice(DEANON_SURNAMES_EN)
+        city = random.choice(DEANON_CITIES_EN)
+        street = random.choice(DEANON_STREETS_EN)
+        prof = random.choice(DEANON_PROFESSIONS_EN)
+        fetish = random.choice(DEANON_FETISHES_EN)
+        details_list = DEANON_DETAILS_EN
         address = f"{city}, {street}, {random.randint(1, 200)}, apt. {random.randint(1, 500)}"
     else:
-        name = random.choice(deanonymizer.DEANON_NAMES)
-        surname = random.choice(deanonymizer.DEANON_SURNAMES)
-        city = random.choice(deanonymizer.DEANON_CITIES)
-        street = random.choice(deanonymizer.DEANON_STREETS)
-        prof = random.choice(deanonymizer.DEANON_PROFESSIONS)
-        fetish = random.choice(deanonymizer.DEANON_FETISHES)
-        details_list = deanonymizer.DEANON_DETAILS
+        name = random.choice(DEANON_NAMES)
+        surname = random.choice(DEANON_SURNAMES)
+        city = random.choice(DEANON_CITIES)
+        street = random.choice(DEANON_STREETS)
+        prof = random.choice(DEANON_PROFESSIONS)
+        fetish = random.choice(DEANON_FETISHES)
+        details_list = DEANON_DETAILS
         address = f"{city}, ул. {street}, д. {random.randint(1, 200)}, кв. {random.randint(1, 500)}"
 
     details = random.sample(details_list, k=min(len(details_list), random.randint(1, 3)))
