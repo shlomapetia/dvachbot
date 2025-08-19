@@ -795,12 +795,14 @@ async def get_monogatari_image():
         'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'
     }
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Вероятностный выбор рейтинга ---
-    rating_tag = 'rating:general'
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Корректное формирование тегов рейтинга ---
     if random.random() < 0.25:  # 25% шанс на NSFW
-        rating_tag = 'rating:questionable,explicit'
-        print("[Danbooru API] Attempting to fetch NSFW Monogatari image.")
+        # Случайно выбираем один из двух валидных NSFW-рейтингов
+        rating_tag = random.choice(['rating:questionable', 'rating:explicit'])
+        print(f"[Danbooru API] Attempting to fetch NSFW Monogatari image with tag: {rating_tag}.")
     else:
+        # Используем правильный тег для SFW-контента
+        rating_tag = 'rating:safe'
         print("[Danbooru API] Attempting to fetch SFW Monogatari image.")
         
     params_danbooru = {
