@@ -219,6 +219,7 @@ storage_lock = asyncio.Lock()  # Блокировка для доступа к m
 
 
 # ВВОДИМ НОВУЮ СТРУКТУРУ ДЛЯ ДАННЫХ КАЖДОЙ ДОСКИ
+# ВВОДИМ НОВУЮ СТРУКТУРУ ДЛЯ ДАННЫХ КАЖДОЙ ДОСКИ
 board_data = defaultdict(lambda: {
     # --- Режимы ---
     'anime_mode': False,
@@ -229,6 +230,7 @@ board_data = defaultdict(lambda: {
     'suka_blyat_counter': 0,
     'last_mode_activation': None,
     # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    'last_deanon_time': 0, # Время последнего успешного вызова /deanon
     'last_summarize_time': 0, # Время последнего успешного вызова /summarize
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     # --- Данные пользователей для спам-фильтров ---
@@ -1006,7 +1008,7 @@ async def save_board_state(board_id: str):
             },
             'message_counter': dict(b_data['message_counter']),
             'board_post_count': b_data.get('board_post_count', 0),
-            'shadow_mutes': shadow_mutes_to_save, # <-- ДОБАВЛЕНО
+            'shadow_mutes': shadow_mutes_to_save, # <-- ИЗМЕНЕНО
         }
         if post_counter_to_save is not None:
             data_for_sync_func['post_counter'] = post_counter_to_save
@@ -1018,25 +1020,11 @@ async def save_board_state(board_id: str):
         board_id,
         data_for_sync_func
     )
-def _sync_save_threads_data(board_id: str):
-    """Синхронная функция для сохранения данных о тредах."""
-    if board_id not in THREAD_BOARDS:
-        return True
     
+def _sync_save_threads_data(board_id: str, data_to_save: dict):
+    """Синхронная, потокобезопасная функция для сохранения данных о тредах. Работает только с переданными данными."""
     threads_file = os.path.join(DATA_DIR, f"{board_id}_threads.json")
     try:
-        original_data = board_data[board_id].get('threads_data', {})
-        
-        # Создаем копию данных, пригодную для сериализации
-        data_to_save = {}
-        for thread_id, thread_info in original_data.items():
-            # Копируем всю информацию о треде
-            serializable_info = thread_info.copy()
-            # Если есть 'subscribers' и это set, конвертируем в list
-            if 'subscribers' in serializable_info and isinstance(serializable_info['subscribers'], set):
-                serializable_info['subscribers'] = list(serializable_info['subscribers'])
-            data_to_save[thread_id] = serializable_info
-
         with open(threads_file, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
         return True
@@ -1044,14 +1032,10 @@ def _sync_save_threads_data(board_id: str):
         print(f"⛔ [{board_id}] Ошибка в потоке сохранения _threads.json: {e}")
         return False
 
-def _sync_save_user_states(board_id: str):
-    """Синхронная функция для сохранения состояний пользователей в тредах."""
-    if board_id not in THREAD_BOARDS:
-        return True
-        
+def _sync_save_user_states(board_id: str, data_to_save: dict):
+    """Синхронная, потокобезопасная функция для сохранения состояний пользователей. Работает только с переданными данными."""
     user_states_file = os.path.join(DATA_DIR, f"{board_id}_user_states.json")
     try:
-        data_to_save = board_data[board_id].get('user_state', {})
         with open(user_states_file, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
         return True
@@ -1060,12 +1044,22 @@ def _sync_save_user_states(board_id: str):
         return False
 
 async def save_user_states(board_id: str):
-    """Асинхронная обертка для сохранения состояний пользователей в тредах."""
+    """Асинхронная обертка для сохранения состояний пользователей с защитой от гонки состояний."""
+    if board_id not in THREAD_BOARDS:
+        return
+
+    # 1. Захватываем блокировку и создаем копию данных
+    async with storage_lock:
+        # .copy() достаточно, так как user_state содержит только JSON-совместимые типы
+        data_to_save = board_data[board_id].get('user_state', {}).copy()
+
+    # 2. Передаем копию в другой поток для записи
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(
         save_executor,
         _sync_save_user_states,
-        board_id
+        board_id,
+        data_to_save
     )
 
 async def save_all_boards_and_backup():
@@ -2826,9 +2820,8 @@ async def _send_single_missed_post(bot: Bot, user_id: int, post_num: int):
 
 async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_location: str) -> bool:
     """
-    Отправляет пользователю пропущенные сообщения. Если их > 30, старые группируются
-    в текстовые чанки, а 30 последних отправляются отдельно.
-    Возвращает True, если хотя бы одно сообщение было отправлено.
+    Отправляет пользователю пропущенные сообщения. Гарантирует, что ОП-пост
+    треда будет показан первым, даже если пропущено много сообщений.
     """
     b_data = board_data[board_id]
     user_s = b_data['user_state'].setdefault(user_id, {})
@@ -2836,22 +2829,35 @@ async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_loc
     missed_post_nums = []
     last_seen_post = 0
     
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Новая логика сбора пропущенных постов ---
+    op_post_num = None
+    
     async with storage_lock:
         if target_location == 'main':
             last_seen_post = user_s.get('last_seen_main', 0)
-            all_main_posts = [p_num for p_num, p_data in messages_storage.items() if p_data.get('board_id') == board_id and not p_data.get('thread_id')]
+            all_main_posts = [
+                p_num for p_num, p_data in messages_storage.items() 
+                if p_data.get('board_id') == board_id and not p_data.get('thread_id')
+            ]
             all_main_posts.sort()
             missed_post_nums = [p_num for p_num in all_main_posts if p_num > last_seen_post]
-        else:
+        
+        else: # Пользователь входит в тред
             thread_id = target_location
+            thread_info = b_data.get('threads_data', {}).get(thread_id)
+            if not thread_info: return False
+
+            # Находим ОП-пост треда
+            all_thread_posts = sorted(thread_info.get('posts', []))
+            if all_thread_posts:
+                op_post_num = all_thread_posts[0]
+
             last_seen_threads = user_s.setdefault('last_seen_threads', {})
             last_seen_post = last_seen_threads.get(thread_id, 0)
             
-            thread_info = b_data.get('threads_data', {}).get(thread_id)
-            if thread_info:
-                all_thread_posts = sorted(thread_info.get('posts', []))
-                missed_post_nums = [p_num for p_num in all_thread_posts if p_num > last_seen_post]
+            missed_post_nums = [p_num for p_num in all_thread_posts if p_num > last_seen_post]
 
+    # Если ничего не пропущено, выходим
     if not missed_post_nums:
         return False
 
@@ -2859,65 +2865,43 @@ async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_loc
     if len(missed_post_nums) > MAX_MISSED_TO_SEND:
         missed_post_nums = missed_post_nums[-MAX_MISSED_TO_SEND:]
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Новая условная логика ---
+    lang = 'en' if board_id == 'int' else 'ru'
+
+    # --- Новая логика отправки с приоритетом ОП-поста ---
+    
+    # Сценарий 1: Пользователь в треде, и ОП-пост был пропущен
+    if op_post_num and op_post_num in missed_post_nums:
+        await _send_single_missed_post(bot, user_id, op_post_num)
+        # Удаляем ОП-пост из списка, чтобы не отправлять его дважды
+        missed_post_nums.remove(op_post_num)
+
     THRESHOLD = 30
     
-    # СЦЕНАРИЙ 1: Пропущено много сообщений, применяем гибридную отправку
+    # Сценарий 2: Осталось много пропущенных сообщений -> гибридная отправка
     if len(missed_post_nums) > THRESHOLD:
-        posts_to_chunk = missed_post_nums[:-THRESHOLD]
+        posts_to_skip_count = len(missed_post_nums) - THRESHOLD
         latest_posts = missed_post_nums[-THRESHOLD:]
-
-        # --- Этап 1.1: Отправка старых сообщений чанками ---
-        text_chunk = []
-        async def send_chunk():
-            if text_chunk:
-                full_text = "\n\n".join(text_chunk)
-                if len(full_text) > 4096: full_text = full_text[:4093] + "..."
-                try:
-                    await bot.send_message(user_id, full_text, parse_mode="HTML")
-                except (TelegramForbiddenError, TelegramBadRequest) as e:
-                    print(f"Ошибка отправки чанка юзеру {user_id}: {e}")
-                finally:
-                    text_chunk.clear()
-                    await asyncio.sleep(0.1)
-
-        for post_num in posts_to_chunk:
-            post_data = messages_storage.get(post_num)
-            if not post_data: continue
-            
-            content = post_data.get('content', {})
-            if content.get('type') == 'text' and content.get('text'):
-                # --- Логика формирования текста для чанка (как в предыдущей версии) ---
-                header_text = f"<i>{escape_html(content['header'])}</i>"
-                reply_to_post = content.get('reply_to_post')
-                reply_author_id = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
-                text_with_you = add_you_to_my_posts(content['text'], user_id)
-                content['text'] = text_with_you
-                formatted_body = await _format_message_body(content=content, user_id_for_context=user_id, post_data=post_data, reply_to_post_author_id=reply_author_id)
-                full_post_text = f"{header_text}\n\n{formatted_body}" if formatted_body else header_text
-                
-                if len("\n\n".join(text_chunk)) + len(full_post_text) > 4096:
-                    await send_chunk()
-                text_chunk.append(full_post_text)
-            else:
-                await send_chunk() # Отправляем накопленный текст
-                await _send_single_missed_post(bot, user_id, post_num) # Отправляем медиа
         
-        await send_chunk() # Отправляем последний чанк старых сообщений
+        # Уведомляем о пропуске
+        skip_notice_text = random.choice(thread_messages[lang]['missed_posts_notification']).format(count=posts_to_skip_count)
+        try:
+            await bot.send_message(user_id, f"<i>{skip_notice_text}</i>", parse_mode="HTML")
+            await asyncio.sleep(0.1)
+        except (TelegramForbiddenError, TelegramBadRequest):
+            pass
 
-        # --- Этап 1.2: Отправка последних сообщений по отдельности ---
+        # Отправляем только последние посты
         for post_num in latest_posts:
             await _send_single_missed_post(bot, user_id, post_num)
-
-    # СЦЕНАРИЙ 2: Пропущено мало сообщений, отправляем всё по отдельности
+            
+    # Сценарий 3: Осталось мало пропущенных сообщений -> отправляем все
     else:
         for post_num in missed_post_nums:
             await _send_single_missed_post(bot, user_id, post_num)
     
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # Финальное сообщение с кнопками (без изменений)
-    lang = 'en' if board_id == 'int' else 'ru'
+    # Финальное сообщение с кнопками
     final_text = "All new messages loaded." if lang == 'en' else "Все новые сообщения загружены."
     entry_keyboard = _get_thread_entry_keyboard(board_id)
     
@@ -2926,12 +2910,16 @@ async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_loc
     except (TelegramForbiddenError, TelegramBadRequest):
         pass
 
-    # Обновляем состояние пользователя
-    new_last_seen = missed_post_nums[-1]
-    if target_location == 'main':
-        user_s['last_seen_main'] = new_last_seen
-    else:
-        user_s.setdefault('last_seen_threads', {})[target_location] = new_last_seen
+    # Обновляем состояние пользователя (берем последний пост из исходного списка missed_post_nums)
+    if missed_post_nums:
+        new_last_seen = missed_post_nums[-1]
+        if op_post_num and new_last_seen < op_post_num:
+             new_last_seen = op_post_num
+
+        if target_location == 'main':
+            user_s['last_seen_main'] = new_last_seen
+        else:
+            user_s.setdefault('last_seen_threads', {})[target_location] = new_last_seen
     
     return True
 
@@ -3083,12 +3071,29 @@ async def validate_message_format(msg_data: dict) -> bool:
     return True
 
 async def save_threads_data(board_id: str):
-    """Асинхронная обертка для сохранения данных о тредах."""
+    """Асинхронная обертка для сохранения данных о тредах с защитой от гонки состояний."""
+    if board_id not in THREAD_BOARDS:
+        return
+
+    # 1. Захватываем блокировку и создаем безопасную копию данных
+    async with storage_lock:
+        original_data = board_data[board_id].get('threads_data', {})
+        
+        # Создаем копию данных, пригодную для сериализации (конвертируем set в list)
+        data_to_save = {}
+        for thread_id, thread_info in original_data.items():
+            serializable_info = thread_info.copy()
+            if 'subscribers' in serializable_info and isinstance(serializable_info['subscribers'], set):
+                serializable_info['subscribers'] = list(serializable_info['subscribers'])
+            data_to_save[thread_id] = serializable_info
+
+    # 2. Передаем безопасную копию в другой поток для записи
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(
         save_executor,
         _sync_save_threads_data,
-        board_id
+        board_id,
+        data_to_save
     )
 
 async def process_successful_messages(post_num: int, results: list):
@@ -4097,18 +4102,20 @@ async def cb_create_thread_confirm(callback: types.CallbackQuery, state: FSMCont
     user_s = b_data['user_state'].setdefault(user_id, {})
     user_s['last_thread_creation'] = now_ts
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасное получение текста ---
     success_phrases = thread_messages.get(lang, {}).get('create_success', [])
     default_success_text = f"Thread '{title}' created!" if lang == 'en' else f"Тред «{title}» создан!"
     success_text = random.choice(success_phrases).format(title=title) if success_phrases else default_success_text
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     header, pnum = await format_header(board_id)
     content = {'type': 'text', 'header': header, 'text': success_text, 'is_system_message': True}
     messages_storage[pnum] = {'author_id': 0, 'timestamp': now_dt, 'content': content, 'board_id': board_id}
     await message_queues[board_id].put({'recipients': b_data['users']['active'], 'content': content, 'post_num': pnum, 'board_id': board_id})
 
-    op_post_content = {'type': 'text', 'text': op_post_text}
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Форматирование ОП-поста ---
+    formatted_op_text = f"<b>ОП-ПОСТ</b>\n_______________________________\n{op_post_text}"
+    op_post_content = {'type': 'text', 'text': formatted_op_text}
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
     await process_new_post(
         bot_instance=callback.bot, board_id=board_id, user_id=user_id, content=op_post_content,
         reply_to_post=None, is_shadow_muted=False
@@ -4123,11 +4130,9 @@ async def cb_create_thread_confirm(callback: types.CallbackQuery, state: FSMCont
     except TelegramBadRequest:
         pass
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасное получение текста ---
     enter_phrases = thread_messages.get(lang, {}).get('enter_thread_prompt', [])
     default_enter_text = f"You have entered the thread: {title}" if lang == 'en' else f"Вы вошли в тред: {title}"
     enter_message = random.choice(enter_phrases).format(title=title) if enter_phrases else default_enter_text
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     entry_keyboard = _get_thread_entry_keyboard(board_id)
     try:
@@ -4427,6 +4432,19 @@ async def _send_op_commands_info(bot: Bot, chat_id: int, board_id: str):
         except (TelegramForbiddenError, TelegramBadRequest) as e:
             print(f"Не удалось отправить OP-команды пользователю {chat_id}: {e}")
 
+def _get_leave_thread_keyboard(board_id: str) -> InlineKeyboardMarkup:
+    """
+    Создает и возвращает инлайн-клавиатуру для сообщения о выходе из треда.
+    """
+    lang = 'en' if board_id == 'int' else 'ru'
+    
+    button_text = "View Threads" if lang == 'en' else "Список тредов"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=button_text, callback_data="show_active_threads")]
+    ])
+    return keyboard
+
 async def post_thread_notification_to_channel(bots: dict[str, Bot], board_id: str, thread_id: str, thread_info: dict, event_type: str, details: dict | None = None):
     """
     Отправляет унифицированное уведомление о событиях треда в служебный канал.
@@ -4483,16 +4501,15 @@ async def post_thread_notification_to_channel(bots: dict[str, Bot], board_id: st
     except Exception as e:
         print(f"⛔ Не удалось отправить уведомление о треде '{title}' в канал: {e}")
 
-def _sync_generate_thread_archive(board_id: str, thread_id: str, thread_info: dict) -> str | None:
+def _sync_generate_thread_archive(board_id: str, thread_id: str, thread_info: dict, posts_data: list[dict]) -> str | None:
     """
-    Синхронная функция для генерации и сохранения HTML-архива треда.
-    Возвращает путь к файлу в случае успеха или None в случае ошибки.
+    Синхронная, потокобезопасная функция для генерации HTML-архива.
+    Работает только с переданными ей данными постов.
     """
     try:
         title = escape_html(thread_info.get('title', 'Без названия'))
         filepath = os.path.join(DATA_DIR, f"archive_{board_id}_{thread_id}.html")
 
-        # ... (содержимое функции по генерации HTML остается без изменений) ...
         html_style = """
         <style>
             body { font-family: sans-serif; background-color: #f0f0f0; color: #333; line-height: 1.6; margin: 20px; }
@@ -4511,12 +4528,19 @@ def _sync_generate_thread_archive(board_id: str, thread_id: str, thread_info: di
             f'    <title>Архив треда: {title}</title>\n', f'    {html_style}\n', '</head>\n',
             '<body>\n', '    <div class="container">\n', f'        <h1>{title}</h1>\n'
         ]
-        post_nums = thread_info.get('posts', [])
-        for post_num in post_nums:
-            post_data = messages_storage.get(post_num)
-            if not post_data: continue
+        
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Итерация по переданному списку, а не по глобальному хранилищу ---
+        for post_data in posts_data:
             content = post_data.get('content', {})
-            timestamp = post_data.get('timestamp', datetime.now(UTC)).strftime('%Y-%m-%d %H:%M:%S UTC')
+            post_num = content.get('post_num', 'N/A')
+            # Преобразуем timestamp из строки ISO обратно в datetime для форматирования
+            timestamp_str = post_data.get('timestamp', '')
+            try:
+                timestamp_dt = datetime.fromisoformat(timestamp_str)
+                timestamp_formatted = timestamp_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+            except (ValueError, TypeError):
+                timestamp_formatted = "N/A"
+            
             post_body = ""
             if content.get('type') == 'text':
                 text = clean_html_tags(content.get('text', ''))
@@ -4536,18 +4560,21 @@ def _sync_generate_thread_archive(board_id: str, thread_id: str, thread_info: di
                 post_body = f"<b>[{media_type}]</b><br>{caption}"
             else:
                  post_body = f"<i>[{content.get('type', 'Системное сообщение')}]</i>"
+
             reply_to = content.get('reply_to_post')
             reply_html = f'<a href="#{reply_to}" class="reply-link">&gt;&gt;{reply_to}</a><br>' if reply_to else ""
             html_parts.append(
                 f'        <div class="post" id="{post_num}">\n'
                 '            <div class="post-header">\n'
-                f'                <b>Пост №{post_num}</b> - {timestamp}\n'
+                f'                <b>Пост №{post_num}</b> - {timestamp_formatted}\n'
                 '            </div>\n'
                 '            <div class="post-content">\n'
                 f'                {reply_html}{post_body}\n'
                 '            </div>\n'
                 '        </div>\n'
             )
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
         html_parts.extend(['    </div>\n', '</body>\n', '</html>\n'])
         final_html_content = "".join(html_parts)
         with open(filepath, 'w', encoding='utf-8') as f:
@@ -4557,18 +4584,36 @@ def _sync_generate_thread_archive(board_id: str, thread_id: str, thread_info: di
         return filepath
 
     except Exception as e:
-        print(f"⛔ [{board_id}] Ошибка генерации архива для треда {thread_id}: {e}")
+        import traceback
+        print(f"⛔ [{board_id}] Ошибка генерации архива для треда {thread_id}: {e}\n{traceback.format_exc()}")
         return None
         
 async def archive_thread(bots: dict[str, Bot], board_id: str, thread_id: str, thread_info: dict):
-    """Асинхронная обертка для генерации архива треда и отправки его в канал."""
+    """Асинхронная обертка для генерации архива треда с защитой от гонки состояний."""
+    
+    # 1. Захватываем блокировку и создаем безопасную копию данных постов
+    posts_data_copy = []
+    async with storage_lock:
+        post_nums = thread_info.get('posts', [])
+        for post_num in post_nums:
+            post_data = messages_storage.get(post_num)
+            if post_data:
+                # Создаем копию, пригодную для передачи в другой поток
+                data_copy = {
+                    'content': post_data.get('content', {}).copy(),
+                    'timestamp': post_data.get('timestamp', datetime.now(UTC)).isoformat()
+                }
+                posts_data_copy.append(data_copy)
+    
+    # 2. Передаем безопасную копию в другой поток для генерации HTML и записи
     loop = asyncio.get_running_loop()
     filepath = await loop.run_in_executor(
         save_executor,
         _sync_generate_thread_archive,
-        board_id, thread_id, thread_info
+        board_id, thread_id, thread_info, posts_data_copy
     )
-    # Если файл успешно создан (путь получен), отправляем его в канал
+    
+    # 3. Если файл успешно создан, отправляем его в канал
     if filepath:
         await post_archive_to_channel(bots, filepath, board_id, thread_info)
 
@@ -4992,6 +5037,7 @@ async def cq_enter_thread(callback: types.CallbackQuery, board_id: str | None):
             pass
         
     await _send_op_commands_info(callback.bot, user_id, board_id)
+    
 @dp.callback_query(F.data == "leave_thread")
 async def cb_leave_thread(callback: types.CallbackQuery, board_id: str | None):
     """
@@ -5009,7 +5055,6 @@ async def cb_leave_thread(callback: types.CallbackQuery, board_id: str | None):
     current_location = user_s.get('location', 'main')
 
     if current_location == 'main':
-        # Пользователь уже на главной доске, просто убираем сообщение с кнопкой
         await callback.answer()
         try:
             await callback.message.delete()
@@ -5017,27 +5062,29 @@ async def cb_leave_thread(callback: types.CallbackQuery, board_id: str | None):
             pass
         return
 
-    # Сохраняем, какой пост был последним в треде перед уходом
     thread_id = current_location
     thread_info = b_data.get('threads_data', {}).get(thread_id)
     if thread_info:
         last_thread_post = thread_info.get('posts', [0])[-1] if thread_info.get('posts') else 0
         user_s.setdefault('last_seen_threads', {})[thread_id] = last_thread_post
     
-    # Перемещаем пользователя на главную доску
     user_s['location'] = 'main'
     user_s['last_location_switch'] = time.time()
     
-    # Отправляем сообщение о выходе и удаляем старое
     response_text = random.choice(thread_messages[lang]['leave_thread_success'])
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавлена клавиатура ---
+    leave_keyboard = _get_leave_thread_keyboard(board_id)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
     await callback.answer()
     try:
-        await callback.message.answer(response_text)
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Клавиатура передается в .answer() ---
+        await callback.message.answer(response_text, reply_markup=leave_keyboard)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         await callback.message.delete()
     except (TelegramForbiddenError, TelegramBadRequest):
         pass
 
-    # Подгружаем пропущенные сообщения с доски
     await send_missed_messages(callback.bot, board_id, user_id, 'main')
 
 @dp.message(Command("leave"))
@@ -5069,26 +5116,26 @@ async def cmd_leave(message: types.Message, board_id: str | None):
         await message.delete()
         return
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Сохраняем, какой пост был последним в треде перед уходом
     thread_id = current_location
     thread_info = b_data.get('threads_data', {}).get(thread_id)
     if thread_info:
         last_thread_post = thread_info.get('posts', [0])[-1] if thread_info.get('posts') else 0
         user_s.setdefault('last_seen_threads', {})[thread_id] = last_thread_post
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     user_s['location'] = 'main'
     user_s['last_location_switch'] = now_ts
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Сначала удаляем команду, чтобы избежать "двойных" сообщений
+    await message.delete()
+    
     # Подгружаем пропущенные сообщения с доски
     await send_missed_messages(message.bot, board_id, user_id, 'main')
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавлена клавиатура к сообщению о выходе ---
     response_text = random.choice(thread_messages[lang]['leave_thread_success'])
-    await message.answer(response_text)
-    await message.delete()
+    leave_keyboard = _get_leave_thread_keyboard(board_id)
+    await message.answer(response_text, reply_markup=leave_keyboard)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 @dp.message(Command("mute"))
 async def cmd_mute(message: Message, board_id: str | None):
@@ -5769,14 +5816,78 @@ async def cmd_monogatari(message: types.Message, board_id: str | None):
         is_shadow_muted=is_shadow_muted
     )
 
+@dp.message(Command("hent", "fap"))
+async def cmd_hentai(message: types.Message, board_id: str | None):
+    """Отправляет в чат случайное SFW/NSFW аниме-изображение или GIF."""
+    if not board_id:
+        return
+
+    user_id = message.from_user.id
+    b_data = board_data[board_id]
+
+    # --- Базовые проверки пользователя ---
+    if user_id in b_data['users']['banned'] or \
+       (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
+        return
+
+    # Получаем изображение или GIF
+    image_url = await get_random_anime_image()
+    
+    # Удаляем команду пользователя в любом случае
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
+    # Если изображение не найдено, уведомляем и выходим
+    if not image_url:
+        lang = 'en' if board_id == 'int' else 'ru'
+        fail_text = "Sorry, couldn't fetch an image right now. Please try again later." \
+            if lang == 'en' else "Не удалось получить изображение. Попробуйте позже."
+        try:
+            error_msg = await message.answer(fail_text)
+            asyncio.create_task(delete_message_after_delay(error_msg, 10))
+        except (TelegramForbiddenError, TelegramBadRequest):
+            pass
+        return
+
+    # --- Подготовка и отправка поста ---
+    is_shadow_muted = (user_id in b_data['shadow_mutes'] and
+                       b_data['shadow_mutes'][user_id] > datetime.now(UTC))
+
+    # Определяем тип контента по расширению файла
+    content_type = 'animation' if image_url.lower().endswith('.gif') else 'photo'
+    
+    content = {
+        'type': content_type,
+        'file_id': image_url,  # Для URL-адресов aiogram сам обработает file_id
+        'image_url': image_url,
+        'caption': '' # Подпись не нужна
+    }
+
+    # Используем существующий обработчик для консистентной отправки
+    await process_new_post(
+        bot_instance=message.bot,
+        board_id=board_id,
+        user_id=user_id,
+        content=content,
+        reply_to_post=None,
+        is_shadow_muted=is_shadow_muted
+    )
+
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: Message, board_id: str | None):
-    global last_deanon_time
     if not board_id: return
     
     current_time = time.time()
     async with deanon_lock:
-        if current_time - last_deanon_time < DEANON_COOLDOWN:
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        b_data = board_data[board_id]
+        if current_time - b_data['last_deanon_time'] < DEANON_COOLDOWN:
             cooldown_msg = random.choice(DEANON_COOLDOWN_PHRASES)
             try:
                 sent_msg = await message.answer(cooldown_msg)
@@ -5784,7 +5895,8 @@ async def cmd_deanon(message: Message, board_id: str | None):
             except Exception: pass
             await message.delete()
             return
-        last_deanon_time = current_time
+        b_data['last_deanon_time'] = current_time
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     lang = 'en' if board_id == 'int' else 'ru'
     if not message.reply_to_message:
@@ -5794,7 +5906,7 @@ async def cmd_deanon(message: Message, board_id: str | None):
         return
 
     user_id = message.from_user.id
-    b_data = board_data[board_id]
+    # b_data уже определена выше, в блоке lock
     user_location = 'main'
     if board_id in THREAD_BOARDS:
         user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
@@ -5824,13 +5936,8 @@ async def cmd_deanon(message: Message, board_id: str | None):
         await message.delete()
         return
         
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # 1. Вызываем обновленную функцию, которая возвращает одну готовую строку
     deanon_text = generate_deanon_info(lang=lang)
-    
-    # 2. Устанавливаем заголовок в зависимости от языка
     header_text = "### DEANON ###" if lang == 'en' else "### ДЕАНОН ###"
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     content = {"type": "text", "header": header_text, "text": deanon_text, "reply_to_post": target_post}
 
@@ -5863,7 +5970,7 @@ async def cmd_deanon(message: Message, board_id: str | None):
         "board_id": board_id
     })
     await message.delete()
-
+    
 async def delete_message_after_delay(message: types.Message, delay: int):
     """Удаляет сообщение после задержки"""
     await asyncio.sleep(delay)
