@@ -485,6 +485,7 @@ def sync_git_operations(token: str) -> bool:
             # Инициализируем пустой репозиторий
             subprocess.run(["git", "-C", work_dir, "init"], check=True, timeout=GIT_LOCAL_TIMEOUT)
             subprocess.run(["git", "-C", work_dir, "remote", "add", "origin", repo_url], check=True, timeout=GIT_LOCAL_TIMEOUT)
+            subprocess.run(["git", "-C", work_dir, "branch", "-m", "main"], check=True, timeout=GIT_LOCAL_TIMEOUT)
             
             # Пытаемся получить последнюю версию, но без истории (--depth=1)
             # --allow-unrelated-histories нужен для последующих push
@@ -534,6 +535,8 @@ def sync_git_operations(token: str) -> bool:
         push_cmd = ["git", "-C", work_dir, "push", "--force", "origin", "main"]
         print(f"Git: Выполняю: {' '.join(push_cmd)}")
         result = subprocess.run(push_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+        print("GIT PUSH STDOUT:", result.stdout)
+        print("GIT PUSH STDERR:", result.stderr)
 
         if result.returncode == 0:
             print(f"✅ Бекап успешно отправлен в GitHub.")
