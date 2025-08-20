@@ -2423,7 +2423,7 @@ async def process_new_post(
 async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, post_num: int, content: dict):
     """
     Надежно пересылает копию поста в реал-тайм архивный канал,
-    обрабатывая лимиты API. (ФИНАЛЬНАЯ ИСПРАВЛЕННАЯ ВЕРСИЯ)
+    обрабатывая лимиты API. (ФИНАЛЬНАЯ ИСПРАВЛЕННАЯ ВЕРСИЯ 2.0)
     """
     archive_bot = GLOBAL_BOTS.get(ARCHIVE_POSTING_BOT_ID)
     if not archive_bot:
@@ -2437,45 +2437,53 @@ async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, po
                 text_or_caption_raw = content_to_send.get('text') or content_to_send.get('caption') or ""
                 final_text = f"{header}\n\n{text_or_caption_raw}"
                 
-                # --- НАЧАЛО ИЗМЕНЕНИЙ (ФИКС #2): Правильное получение типа контента ---
                 ct_raw = content_to_send.get("type")
-                # Эта строка надежно извлекает 'sticker' из 'ContentType.STICKER' или 'sticker' из 'sticker'
                 content_type = str(ct_raw).split('.')[-1].lower()
-                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
                 if content_type == "media_group":
                     builder = MediaGroupBuilder()
                     caption_added = False
                     for media in content_to_send.get('media', []):
-                        # --- ИСПРАВЛЕНИЕ: Правильное получение типа медиа внутри группы ---
                         media_type_str = str(media['type']).split('.')[-1].lower()
-                        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                         caption = final_text if not caption_added else None
                         builder.add(type=media_type_str, media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
                         caption_added = True
                     await archive_bot.send_media_group(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, media=builder.build())
 
-                elif content_type in ['sticker', 'voice', 'video_note']:
-                    method_name = f"send_{content_type}"
-                    send_method = getattr(archive_bot, method_name)
-                    # --- ИСПРАВЛЕНИЕ: Передаем file_id напрямую, а не через kwargs ---
-                    sent_msg = await send_method(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, **{content_type: content_to_send.get("file_id")})
-                    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-                    await archive_bot.send_message(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, text=header, parse_mode="HTML", reply_to_message_id=sent_msg.message_id)
-                
+                # --- НАЧАЛО ИЗМЕНЕНИЙ: ПРАВИЛЬНАЯ ОТПРАВКА ВСЕХ ТИПОВ ---
                 else:
-                    if len(final_text) > 4096 and content_type == 'text':
-                        final_text = final_text[:4093] + "..."
-                    elif len(final_text) > 1024:
-                        final_text = final_text[:1021] + "..."
+                    method_name = f"send_{content_type}"
+                    if content_type == 'text':
+                        method_name = 'send_message' # Корректируем для текстовых сообщений
+                    
+                    send_method = getattr(archive_bot, method_name)
+                    
+                    kwargs = {'chat_id': REALTIME_ARCHIVE_CHANNEL_ID}
 
                     if content_type == 'text':
-                        await archive_bot.send_message(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, text=final_text, parse_mode="HTML")
-                    else:
-                        method_name = f"send_{content_type}"
-                        send_method = getattr(archive_bot, method_name)
+                        if len(final_text) > 4096:
+                            final_text = final_text[:4093] + "..."
+                        kwargs['text'] = final_text
+                        kwargs['parse_mode'] = "HTML"
+                    
+                    elif content_type in ['sticker', 'voice', 'video_note']:
+                        # Эти типы не имеют подписи, отправляем отдельно
+                        kwargs[content_type] = content_to_send.get("file_id")
+                        sent_msg = await send_method(**kwargs)
+                        await archive_bot.send_message(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, text=header, parse_mode="HTML", reply_to_message_id=sent_msg.message_id)
+                        return # Выходим, чтобы не было двойной отправки
+                    
+                    else: # Для фото, видео, документов и т.д.
+                        if len(final_text) > 1024:
+                            final_text = final_text[:1021] + "..."
+                        
                         file_source = content_to_send.get('image_url') or content_to_send.get("file_id")
-                        await send_method(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, **{content_type: file_source, 'caption': final_text, 'parse_mode': "HTML"})
+                        kwargs[content_type] = file_source
+                        kwargs['caption'] = final_text
+                        kwargs['parse_mode'] = "HTML"
+
+                    await send_method(**kwargs)
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             except TelegramRetryAfter as e:
                 print(f"⚠️ Попали на лимит API при отправке в архив. Ждем {e.retry_after} секунд...")
@@ -2493,9 +2501,7 @@ async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, po
     except Exception as e:
         import traceback
         print(f"❌ Не удалось отправить пост #{post_num} в реал-тайм архив: {e}")
-        # Печатаем traceback только для непредвиденных ошибок, а не для AttributeError
-        if not isinstance(e, AttributeError):
-            traceback.print_exc()
+        traceback.print_exc()
             
 async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     """
@@ -7568,7 +7574,15 @@ async def initialize_bots() -> tuple[dict[str, Bot], AiohttpSession]:
     for board_id, config in BOARD_CONFIG.items():
         token = config.get("token")
         if token:
-            bots_temp[board_id] = Bot(token=token, default=default_properties, session=session)
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            try:
+                bot = Bot(token=token, default=default_properties, session=session)
+                await bot.get_me() # Проверяем токен на валидность
+                bots_temp[board_id] = bot
+                print(f"✅ Бот для доски '{board_id}' успешно инициализирован.")
+            except Exception as e:
+                print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать бота для доски '{board_id}'. Ошибка: {e}. Пропускаем...")
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         else:
             print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
     
