@@ -668,9 +668,9 @@ SAVE_INTERVAL = 900  # секунд
 STICKER_WINDOW = 10  # секунд
 STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
-REPLY_CACHE = 5000  # сколько постов держать в кэше для каждой доски
+REPLY_CACHE = 2900  # сколько постов держать в кэше для каждой доски
 REPLY_FILE = "reply_cache.json"  # отдельный файл для reply
-MAX_MESSAGES_IN_MEMORY = 5000  # храним только последние 5900 постов в общей памяти
+MAX_MESSAGES_IN_MEMORY = 2500  # храним только последние 2500 постов в общей памяти
 
 
 # Мотивационные сообщения для приглашений
@@ -3018,71 +3018,62 @@ async def _send_single_missed_post(bot: Bot, user_id: int, post_num: int):
     except Exception as e:
         print(f"Ошибка отправки пропущенного сообщения #{post_num} юзеру {user_id}: {e}")
 
-async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_location: str) -> bool:
+async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_location: str) -> tuple[bool, bool]:
     """
     Отправляет пользователю пропущенные сообщения. Гарантирует, что ОП-пост
-    треда будет показан первым, даже если пропущено много сообщений.
+    треда будет показан первым.
+    Возвращает кортеж (были ли отправлены сообщения, нужно ли показать кнопку "Вся летопись").
     """
     b_data = board_data[board_id]
     user_s = b_data['user_state'].setdefault(user_id, {})
     
-    missed_post_nums = []
+    missed_post_nums_full = []
     last_seen_post = 0
-    
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Новая логика сбора пропущенных постов ---
     op_post_num = None
     
     async with storage_lock:
         if target_location == 'main':
             last_seen_post = user_s.get('last_seen_main', 0)
-            all_main_posts = [
+            all_main_posts = sorted([
                 p_num for p_num, p_data in messages_storage.items() 
                 if p_data.get('board_id') == board_id and not p_data.get('thread_id')
-            ]
-            all_main_posts.sort()
-            missed_post_nums = [p_num for p_num in all_main_posts if p_num > last_seen_post]
-        
-        else: # Пользователь входит в тред
+            ])
+            missed_post_nums_full = [p_num for p_num in all_main_posts if p_num > last_seen_post]
+        else:
             thread_id = target_location
             thread_info = b_data.get('threads_data', {}).get(thread_id)
-            if not thread_info: return False
+            if not thread_info: return False, False
 
-            # Находим ОП-пост треда
             all_thread_posts = sorted(thread_info.get('posts', []))
             if all_thread_posts:
                 op_post_num = all_thread_posts[0]
-
             last_seen_threads = user_s.setdefault('last_seen_threads', {})
             last_seen_post = last_seen_threads.get(thread_id, 0)
-            
-            missed_post_nums = [p_num for p_num in all_thread_posts if p_num > last_seen_post]
+            missed_post_nums_full = [p_num for p_num in all_thread_posts if p_num > last_seen_post]
 
-    # Если ничего не пропущено, выходим
-    if not missed_post_nums:
-        return False
+    if not missed_post_nums_full:
+        return False, False
 
+    missed_post_nums_to_send = missed_post_nums_full.copy()
+    
     MAX_MISSED_TO_SEND = 70
-    if len(missed_post_nums) > MAX_MISSED_TO_SEND:
-        missed_post_nums = missed_post_nums[-MAX_MISSED_TO_SEND:]
+    if len(missed_post_nums_to_send) > MAX_MISSED_TO_SEND:
+        missed_post_nums_to_send = missed_post_nums_to_send[-MAX_MISSED_TO_SEND:]
 
     lang = 'en' if board_id == 'int' else 'ru'
+    show_history_button = False
 
-    # --- Новая логика отправки с приоритетом ОП-поста ---
-    
-    # Сценарий 1: Пользователь в треде, и ОП-пост был пропущен
-    if op_post_num and op_post_num in missed_post_nums:
+    if op_post_num and op_post_num in missed_post_nums_to_send:
         await _send_single_missed_post(bot, user_id, op_post_num)
-        # Удаляем ОП-пост из списка, чтобы не отправлять его дважды
-        missed_post_nums.remove(op_post_num)
+        missed_post_nums_to_send.remove(op_post_num)
 
     THRESHOLD = 30
     
-    # Сценарий 2: Осталось много пропущенных сообщений -> гибридная отправка
-    if len(missed_post_nums) > THRESHOLD:
-        posts_to_skip_count = len(missed_post_nums) - THRESHOLD
-        latest_posts = missed_post_nums[-THRESHOLD:]
-        
-        # Уведомляем о пропуске
+    if len(missed_post_nums_full) > THRESHOLD:
+        show_history_button = True
+        posts_to_skip_count = len(missed_post_nums_full) - THRESHOLD
+        posts_to_send = [p for p in missed_post_nums_full if p > last_seen_post][-THRESHOLD:]
+
         skip_notice_text = random.choice(thread_messages[lang]['missed_posts_notification']).format(count=posts_to_skip_count)
         try:
             await bot.send_message(user_id, f"<i>{skip_notice_text}</i>", parse_mode="HTML")
@@ -3090,38 +3081,30 @@ async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_loc
         except (TelegramForbiddenError, TelegramBadRequest):
             pass
 
-        # Отправляем только последние посты
-        for post_num in latest_posts:
-            await _send_single_missed_post(bot, user_id, post_num)
-            
-    # Сценарий 3: Осталось мало пропущенных сообщений -> отправляем все
+        for post_num in posts_to_send:
+            if post_num != op_post_num:
+                await _send_single_missed_post(bot, user_id, post_num)
     else:
-        for post_num in missed_post_nums:
+        for post_num in missed_post_nums_to_send:
             await _send_single_missed_post(bot, user_id, post_num)
     
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-    # Финальное сообщение с кнопками
     final_text = "All new messages loaded." if lang == 'en' else "Все новые сообщения загружены."
-    entry_keyboard = _get_thread_entry_keyboard(board_id)
+    entry_keyboard = _get_thread_entry_keyboard(board_id, show_history_button)
     
     try:
         await bot.send_message(user_id, final_text, reply_markup=entry_keyboard, parse_mode="HTML")
     except (TelegramForbiddenError, TelegramBadRequest):
         pass
 
-    # Обновляем состояние пользователя (берем последний пост из исходного списка missed_post_nums)
-    if missed_post_nums:
-        new_last_seen = missed_post_nums[-1]
-        if op_post_num and new_last_seen < op_post_num:
-             new_last_seen = op_post_num
-
+    if missed_post_nums_full:
+        new_last_seen = missed_post_nums_full[-1]
+        
         if target_location == 'main':
             user_s['last_seen_main'] = new_last_seen
         else:
             user_s.setdefault('last_seen_threads', {})[target_location] = new_last_seen
     
-    return True
+    return True, show_history_button
 
 async def help_broadcaster():
     """
@@ -4584,7 +4567,7 @@ async def post_special_num_to_channel(bots: dict[str, Bot], board_id: str, post_
         print(f"⛔ Не удалось отправить пост #{post_num} в канал: {e}")
 
 
-def _get_thread_entry_keyboard(board_id: str) -> InlineKeyboardMarkup:
+def _get_thread_entry_keyboard(board_id: str, show_history_button: bool = False) -> InlineKeyboardMarkup:
     """
     Создает и возвращает инлайн-клавиатуру для сообщения о входе в тред.
     """
@@ -4593,17 +4576,49 @@ def _get_thread_entry_keyboard(board_id: str) -> InlineKeyboardMarkup:
     if lang == 'en':
         button_good_thread_text = "👍 Good Thread"
         button_leave_text = "Leave Thread"
+        button_history_text = "📜 Full History"
     else:
         button_good_thread_text = "👍 Годный тред"
         button_leave_text = "Выйти из треда"
+        button_history_text = "📜 Вся летопись"
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    # Базовая клавиатура
+    keyboard_layout = [
         [
             InlineKeyboardButton(text=button_good_thread_text, callback_data="thread_like_placeholder"),
             InlineKeyboardButton(text=button_leave_text, callback_data="leave_thread")
         ]
-    ])
+    ]
+
+    # Если флаг show_history_button равен True, добавляем кнопку "Вся летопись"
+    if show_history_button:
+        keyboard_layout.append([
+            InlineKeyboardButton(text=button_history_text, callback_data="show_current_thread_history")
+        ])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_layout)
     return keyboard
+
+@dp.callback_query(F.data == "show_current_thread_history")
+async def cq_show_current_thread_history(callback: types.CallbackQuery, board_id: str | None):
+    """
+    Обрабатывает нажатие на кнопку "Вся летопись" внутри треда.
+    """
+    if not board_id or board_id not in THREAD_BOARDS:
+        await callback.answer()
+        return
+
+    user_id = callback.from_user.id
+    b_data = board_data[board_id]
+    user_s = b_data.get('user_state', {}).get(user_id, {})
+    location = user_s.get('location', 'main')
+
+    if location == 'main':
+        await callback.answer("You are not in a thread.", show_alert=True)
+        return
+
+    callback.data = f"show_history_{location}"
+    await cq_thread_history(callback, board_id)
 
 async def _send_op_commands_info(bot: Bot, chat_id: int, board_id: str):
     """
@@ -5142,29 +5157,27 @@ async def cq_thread_history(callback: types.CallbackQuery, board_id: str | None)
     last_history_req = user_s.get('last_history_request', 0)
     
     if now_ts - last_history_req < THREAD_HISTORY_COOLDOWN:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасное получение текста ---
         cooldown_phrases = tm_lang.get('history_cooldown', ["Cooldown! Wait {minutes} min."])
         cooldown_msg = random.choice(cooldown_phrases).format(minutes=str(THREAD_HISTORY_COOLDOWN // 60))
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         await callback.answer(cooldown_msg, show_alert=True)
         return
 
     thread_info = b_data.get('threads_data', {}).get(thread_id)
     if not thread_info:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасное получение текста ---
         not_found_phrases = tm_lang.get('thread_not_found', ["Thread not found."])
         not_found_msg = random.choice(not_found_phrases)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         await callback.answer(not_found_msg, show_alert=True)
         return
 
     user_s['last_history_request'] = now_ts
     await callback.answer("⏳ Загружаю историю...")
 
+    # Временно сбрасываем счетчик просмотренных постов для этого треда до 0
     temp_user_state = user_s.copy()
-    temp_user_state['last_seen_threads'] = {thread_id: 0}
+    temp_user_state.setdefault('last_seen_threads', {})[thread_id] = 0
     b_data['user_state'][user_id] = temp_user_state
 
+    # Вызываем функцию отправки, которая теперь загрузит ВСЕ посты
     await send_missed_messages(callback.bot, board_id, user_id, thread_id)
 
 async def _enter_thread_logic(bot: Bot, board_id: str, user_id: int, thread_id: str, message_to_delete: types.Message | None = None):
@@ -5178,8 +5191,6 @@ async def _enter_thread_logic(bot: Bot, board_id: str, user_id: int, thread_id: 
     
     threads_data = b_data.get('threads_data', {})
     if thread_id not in threads_data:
-        # Если тред не найден, просто выходим, возможно, уведомив пользователя
-        # (в данном случае, хендлеры уже делают это)
         return
 
     user_s = b_data['user_state'].setdefault(user_id, {})
@@ -5190,7 +5201,6 @@ async def _enter_thread_logic(bot: Bot, board_id: str, user_id: int, thread_id: 
         cooldown_phrases = tm_lang.get('location_switch_cooldown', ["Too fast! Please wait a moment."])
         cooldown_msg = random.choice(cooldown_phrases)
         try:
-            # Отправляем временное сообщение о кулдауне
             sent_msg = await bot.send_message(user_id, cooldown_msg)
             asyncio.create_task(delete_message_after_delay(sent_msg, 5))
         except (TelegramForbiddenError, TelegramBadRequest):
@@ -5199,7 +5209,7 @@ async def _enter_thread_logic(bot: Bot, board_id: str, user_id: int, thread_id: 
 
     current_location = user_s.get('location', 'main')
     if current_location == thread_id:
-        return # Уже в треде, ничего не делаем
+        return
         
     if current_location == 'main':
         user_s['last_seen_main'] = state.get('post_counter', 0)
@@ -5214,8 +5224,10 @@ async def _enter_thread_logic(bot: Bot, board_id: str, user_id: int, thread_id: 
         except TelegramBadRequest:
             pass
 
-    was_missed = await send_missed_messages(bot, board_id, user_id, thread_id)
+    # Получаем ДВА значения из обновленной функции
+    was_missed, show_history_button = await send_missed_messages(bot, board_id, user_id, thread_id)
     
+    # Этот блок выполняется, только если send_missed_messages НЕ отправила финальное сообщение
     if not was_missed:
         thread_title = threads_data[thread_id].get('title', '...')
         seen_threads = user_s.setdefault('last_seen_threads', {})
@@ -5227,7 +5239,8 @@ async def _enter_thread_logic(bot: Bot, board_id: str, user_id: int, thread_id: 
             success_phrases = tm_lang.get('enter_thread_success', [f"Re-entered thread: {thread_title}"])
             response_text = random.choice(success_phrases).format(title=thread_title)
         
-        entry_keyboard = _get_thread_entry_keyboard(board_id)
+        # Передаем флаг (он будет False), чтобы сгенерировать клавиатуру без кнопки "Вся летопись"
+        entry_keyboard = _get_thread_entry_keyboard(board_id, show_history_button)
         try:
             await bot.send_message(user_id, response_text, reply_markup=entry_keyboard, parse_mode="HTML")
         except (TelegramForbiddenError, TelegramBadRequest):
