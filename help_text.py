@@ -19,7 +19,9 @@ HELP_TEXT_COMMANDS = [
         "/zaputin - режим 🇷🇺 За Путина\n"
         "/slavaukraine - режим 💙💛 Слава Украине\n"
         "/suka_blyat - режим 💢 Сука Блять\n"
-        "/b /po /a /vg /sex /int /threads -команды для перехода на другую доску"
+        "/b /po /a /vg /sex /int /threads -команды для перехода на другую доску\n\n"
+        "Канал ТГАЧ НОВОСТИ  https://t.me/tgach_bot\n"
+        "Канал ТГАЧ АРХИВ (все посты) https://t.me/tgach_archive\n"
     ),
     (
         "<b>Абу напоминает, что есть команды:</b>\n\n"
@@ -36,7 +38,9 @@ HELP_TEXT_COMMANDS = [
         "/zaputin - 🇷🇺 режим для z-пидоров\n"
         "/slavaukraine - 💙💛 режим для хохло-пидоров\n"
         "/suka_blyat - 💢 режим для просто пидоров\n"
-        "/b /po /a /vg /sex /int /threads -команды для перехода на другую доску"
+        "/b /po /a /vg /sex /int /threads -команды для перехода на другую доску\n\n"
+        "Канал ТГАЧ НОВОСТИ  https://t.me/tgach_bot\n"
+        "Канал ТГАЧ АРХИВ (все посты) https://t.me/tgach_archive\n"
     ),
     (
         "<b>Список доступных команд:</b>\n\n"
@@ -53,7 +57,9 @@ HELP_TEXT_COMMANDS = [
         "/zaputin - Включить режим 🇷🇺 За Путина.\n"
         "/slavaukraine - Включить режим 💙💛 Слава Украине.\n"
         "/suka_blyat - Включить режим 💢 Сука Блять.\n"
-        "/b /po /a /vg /sex /int /threads -команды для перехода на другую доску"
+        "/b /po /a /vg /sex /int /threads -команды для перехода на другую доску\n\n"
+        "Канал ТГАЧ НОВОСТИ  https://t.me/tgach_bot\n"
+        "Канал ТГАЧ АРХИВ (все посты) https://t.me/tgach_archive\n"
     )
 ]
 
@@ -70,6 +76,9 @@ HELP_TEXT_EN_COMMANDS = [
         "/active - boards activity\n"
         "/hent /fap /gatari - anime pic\n"
         "/anime - activate 🌸 Anime mode"
+        "/b /po /a /vg /sex /int /threads - other boards\n\n"
+        "TGCHAN NEWS  https://t.me/tgach_bot\n"
+        "TGCHAN archive https://t.me/tgach_archive\n"
     ),
     (
         "<b>List of available commands:</b>\n\n"
@@ -83,6 +92,9 @@ HELP_TEXT_EN_COMMANDS = [
         "/active - To show the activity of all boards.\n"
         "/hent /fap /gatari - To send an anime art.\n"
         "/anime - To activate the 🌸 Anime mode."
+        "/b /po /a /vg /sex /int /threads - other boards\n\n"
+        "TGCHAN NEWS  https://t.me/tgach_bot\n"
+        "TGCHAN archive https://t.me/tgach_archive\n"
     ),
     (
         "<b>Abu reminds you that there are commands:</b>\n\n"
@@ -96,6 +108,9 @@ HELP_TEXT_EN_COMMANDS = [
         "/active - where the most shit is\n"
         "/hent /fap /gatari - to fap\n"
         "/anime - 🌸 mode for faggots"
+        "/b /po /a /vg /sex /int /threads - other boards\n\n"
+        "TGCHAN NEWS  https://t.me/tgach_bot\n"
+        "TGCHAN archive https://t.me/tgach_archive\n"
     )
 ]
 
