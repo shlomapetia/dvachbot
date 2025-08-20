@@ -51,7 +51,7 @@ from deanonymizer import (
     DEANON_SURNAMES,
     generate_deanon_info,
 )
-from help_text import HELP_TEXT, HELP_TEXT_EN, HELP_TEXT_COMMANDS, HELP_TEXT_EN_COMMANDS, generate_boards_list
+from help_text import HELP_TEXT, HELP_TEXT_EN, HELP_TEXT_COMMANDS, HELP_TEXT_EN_COMMANDS, generate_boards_list, THREAD_PROMO_TEXT_RU, THREAD_PROMO_TEXT_EN
 from japanese_translator import anime_transform, get_random_anime_image, get_monogatari_image
 from summarize import summarize_text_with_hf
 from thread_texts import thread_messages
@@ -946,30 +946,53 @@ def is_admin(uid: int, board_id: str) -> bool:
         return False
     return uid in BOARD_CONFIG.get(board_id, {}).get('admins', set())
 
+def _sync_get_board_activity(
+    board_id: str,
+    time_threshold: datetime,
+    all_messages_storage: dict
+) -> int:
+    """
+    Синхронная, блокирующая функция для подсчета постов. Безопасна для executor'а.
+    Работает только с переданными ей данными.
+    """
+    post_count = 0
+    # Эта сортировка является основной причиной блокировки
+    sorted_post_keys = sorted(all_messages_storage.keys(), reverse=True)
+    for post_num in sorted_post_keys:
+        post_data = all_messages_storage.get(post_num, {})
+        post_time = post_data.get("timestamp")
+
+        if not post_time or post_time < time_threshold:
+            break
+        
+        if post_data.get("board_id") == board_id:
+            post_count += 1
+            
+    return post_count
+
 async def get_board_activity_last_hours(board_id: str, hours: int = 2) -> float:
-    """Подсчитывает среднее количество постов в час для указанной доски за последние N часов."""
+    """
+    Подсчитывает среднее количество постов в час для указанной доски за последние N часов.
+    Выполняет блокирующие операции в отдельном потоке, чтобы не замораживать event loop.
+    """
     if hours <= 0:
         return 0.0
 
     time_threshold = datetime.now(UTC) - timedelta(hours=hours)
-    post_count = 0
-
+    
+    # 1. Быстро и безопасно копируем данные под блокировкой
     async with storage_lock:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизированный подсчет ---
-        # Итерируем по отсортированным ключам в обратном порядке
-        sorted_post_keys = sorted(messages_storage.keys(), reverse=True)
-        for post_num in sorted_post_keys:
-            post_data = messages_storage[post_num]
-            post_time = post_data.get("timestamp")
+        messages_storage_copy = messages_storage.copy()
 
-            # Если пост слишком старый, прекращаем итерацию, так как все предыдущие будут еще старше
-            if not post_time or post_time < time_threshold:
-                break
-            
-            # Считаем только посты с нужной доски
-            if post_data.get("board_id") == board_id:
-                post_count += 1
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    # 2. Выполняем медленную, блокирующую операцию в отдельном потоке
+    loop = asyncio.get_running_loop()
+    post_count = await loop.run_in_executor(
+        save_executor,  # Используем существующий executor
+        _sync_get_board_activity,
+        board_id,
+        time_threshold,
+        messages_storage_copy
+    )
             
     activity = post_count / hours
     return activity
@@ -1308,7 +1331,10 @@ def load_archived_post(post_num):
     return None
 
 def load_reply_cache(board_id: str):
-    """Читаем reply_cache для конкретной доски, восстанавливаем общие словари."""
+    """
+    Читаем reply_cache для конкретной доски, восстанавливаем общие словари
+    с ПРОВЕРКОЙ на принадлежность поста к доске для предотвращения загрязнения кэша.
+    """
     global message_to_post, post_to_messages, messages_storage
     
     reply_file = f"{board_id}_reply_cache.json"
@@ -1322,31 +1348,47 @@ def load_reply_cache(board_id: str):
         print(f"Файл {reply_file} повреждён ({e}), игнорирую")
         return
 
-    # Восстанавливаем общие словари, они пополняются данными со всех досок
-    for key, post_num in data.get("message_to_post", {}).items():
-        uid, mid = map(int, key.split("_"))
-        message_to_post[(uid, mid)] = post_num
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Логика самоочистки кэша при загрузке ---
 
-    for p_str, mapping in data.get("post_to_messages", {}).items():
-        post_to_messages[int(p_str)] = {
-            int(uid): mid
-            for uid, mid in mapping.items()
-        }
-
+    # 1. Сначала отбираем только те посты, которые действительно принадлежат этой доске
+    valid_post_nums = set()
     for p_str, meta in data.get("messages_storage_meta", {}).items():
-        p = int(p_str)
-        if 'timestamp' in meta:
-            dt = datetime.fromisoformat(meta['timestamp'])
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-            messages_storage[p] = {
-                "author_id": meta["author_id"],
-                "timestamp": dt,
-                "author_message_id": meta.get("author_msg"),
-                "board_id": board_id # Важно: сохраняем, с какой доски пришел пост
-            }
+        # Проверяем, что метаданные поста содержат board_id и он соответствует файлу
+        if meta.get("board_id") == board_id:
+            p = int(p_str)
+            valid_post_nums.add(p)
             
-    print(f"[{board_id}] reply-cache загружен: {len(data.get('post_to_messages', {}))} постов")
+            # Загружаем метаданные только для валидных постов
+            if 'timestamp' in meta:
+                dt = datetime.fromisoformat(meta['timestamp'])
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                messages_storage[p] = {
+                    "author_id": meta["author_id"],
+                    "timestamp": dt,
+                    "author_message_id": meta.get("author_msg"),
+                    "board_id": meta["board_id"] # Используем board_id из метаданных
+                }
+
+    # 2. Восстанавливаем словари, используя только номера валидных постов
+    loaded_post_count = 0
+    for p_str, mapping in data.get("post_to_messages", {}).items():
+        p_num = int(p_str)
+        if p_num in valid_post_nums:
+            post_to_messages[p_num] = {
+                int(uid): mid
+                for uid, mid in mapping.items()
+            }
+            loaded_post_count += 1
+            
+    for key, post_num in data.get("message_to_post", {}).items():
+        if post_num in valid_post_nums:
+            uid, mid = map(int, key.split("_"))
+            message_to_post[(uid, mid)] = post_num
+            
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
+    print(f"[{board_id}] reply-cache загружен: {loaded_post_count} постов (очищено)")
 
 async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | None = None):
     """Обработчик корректного сохранения данных ВСЕХ досок перед остановкой."""
@@ -1540,8 +1582,35 @@ async def auto_memory_cleaner():
         gc.collect()
         print(f"🧹 Очистка памяти завершена. Следующая через 10 минут.")
         
+def _sync_collect_board_statistics(hour_ago: datetime, all_messages_storage: dict) -> defaultdict[str, int]:
+    """
+    Синхронная, блокирующая функция для сбора статистики постов за последний час.
+    Безопасна для выполнения в executor'е, работает только с переданными данными.
+    """
+    posts_per_hour = defaultdict(int)
+    # Эта сортировка является основной причиной блокировки event loop'а
+    sorted_post_keys = sorted(all_messages_storage.keys(), reverse=True)
+    
+    for post_num in sorted_post_keys:
+        post_data = all_messages_storage.get(post_num)
+        if not post_data:
+            continue
+        
+        post_time = post_data.get('timestamp')
+        if not post_time or post_time < hour_ago:
+            break
+        
+        b_id = post_data.get('board_id')
+        if b_id:
+            posts_per_hour[b_id] += 1
+            
+    return posts_per_hour
+
 async def board_statistics_broadcaster():
-    """Раз в час собирает общую статистику и рассылает на каждую доску."""
+    """
+    Раз в час собирает общую статистику и рассылает на каждую доску.
+    Блокирующие операции вынесены в executor для предотвращения "заморозки" процесса.
+    """
     await asyncio.sleep(300)
 
     while True:
@@ -1551,22 +1620,20 @@ async def board_statistics_broadcaster():
             now = datetime.now(UTC)
             hour_ago = now - timedelta(hours=1)
             
-            posts_per_hour = defaultdict(int)
+            # 1. Быстро и безопасно копируем данные под блокировкой
             async with storage_lock:
-                # --- НАЧАЛО ИЗМЕНЕНИЙ: Идентичная оптимизация, как в предыдущем шаге ---
-                sorted_post_keys = sorted(messages_storage.keys(), reverse=True)
-                for post_num in sorted_post_keys:
-                    post_data = messages_storage[post_num]
-                    post_time = post_data.get('timestamp')
-
-                    if not post_time or post_time < hour_ago:
-                        break
-                    
-                    b_id = post_data.get('board_id')
-                    if b_id:
-                        posts_per_hour[b_id] += 1
-                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                messages_storage_copy = messages_storage.copy()
             
+            # 2. Выполняем медленную, блокирующую операцию в отдельном потоке
+            loop = asyncio.get_running_loop()
+            posts_per_hour = await loop.run_in_executor(
+                save_executor,
+                _sync_collect_board_statistics,
+                hour_ago,
+                messages_storage_copy
+            )
+            
+            # 3. Продолжаем с асинхронной логикой, используя полученные данные
             for board_id in BOARDS:
                 if board_id == 'test':
                     continue
@@ -1584,7 +1651,7 @@ async def board_statistics_broadcaster():
                 stats_lines = []
                 for b_id_inner, config_inner in BOARD_CONFIG.items():
                     if b_id_inner == 'test': continue
-                    hour_stat = posts_per_hour.get(b_id_inner, 0) # Используем .get для безопасности
+                    hour_stat = posts_per_hour.get(b_id_inner, 0)
                     total_stat = board_data[b_id_inner].get('board_post_count', 0)
                     template = "<b>{name}</b> - {hour} pst/hr, total: {total}" if board_id == 'int' else "<b>{name}</b> - {hour} пст/час, всего: {total}"
                     stats_lines.append(template.format(
@@ -2928,8 +2995,8 @@ async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_loc
 
 async def help_broadcaster():
     """
-    Раз в ~12 часов отправляет на каждую доску либо список команд (30%),
-    либо список всех досок (70%).
+    Раз в ~12 часов отправляет на каждую доску одно из трех сообщений:
+    список команд, список досок или рекламу тредов, выбирая случайный вариант текста.
     """
     await asyncio.sleep(600)  # Начальная задержка 10 минут
 
@@ -2952,11 +3019,17 @@ async def help_broadcaster():
                 lang = 'en' if board_id == 'int' else 'ru'
                 message_text = ""
 
-                # --- Вероятностный выбор контента ---
-                if random.random() < 0.7:  # 70% шанс на список досок
+                # --- Равновероятный выбор одного из трех типов контента ---
+                choice = random.randint(1, 3)
+                
+                if choice == 1: # 1. Список команд
+                    message_text = random.choice(HELP_TEXT_EN_COMMANDS) if lang == 'en' else random.choice(HELP_TEXT_COMMANDS)
+                
+                elif choice == 2: # 2. Список досок
                     message_text = generate_boards_list(BOARD_CONFIG, lang)
-                else:  # 30% шанс на список команд
-                    message_text = HELP_TEXT_EN_COMMANDS if lang == 'en' else HELP_TEXT_COMMANDS
+
+                else: # 3. Реклама тредов
+                    message_text = random.choice(THREAD_PROMO_TEXT_EN) if lang == 'en' else random.choice(THREAD_PROMO_TEXT_RU)
                 
                 header, post_num = await format_header(board_id)
                 content = {
@@ -2980,7 +3053,6 @@ async def help_broadcaster():
         except Exception as e:
             print(f"❌ [{board_id}] Ошибка в help_broadcaster: {e}")
             await asyncio.sleep(120)
-
 
 async def motivation_broadcaster():
     """Отправляет мотивационные сообщения на каждую доску в разное время."""
@@ -7317,7 +7389,6 @@ async def start_background_tasks(bots: dict[str, Bot]):
     """Поднимаем все фоновые корутины ОДИН раз за весь runtime через надежную обертку."""
     from conan import conan_roaster
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавлена новая задача ---
     tasks_to_run = {
         "auto_backup": auto_backup(),
         "message_broadcaster": message_broadcaster(bots),
@@ -7326,14 +7397,13 @@ async def start_background_tasks(bots: dict[str, Bot]):
             message_queues, format_header, board_data, storage_lock
         ),
         "motivation_broadcaster": motivation_broadcaster(),
-        "help_broadcaster": help_broadcaster(),  # <-- НОВАЯ ЗАДАЧА
+        "help_broadcaster": help_broadcaster(),
         "auto_memory_cleaner": auto_memory_cleaner(),
         "board_statistics_broadcaster": board_statistics_broadcaster(),
         "thread_lifecycle_manager": thread_lifecycle_manager(bots),
         "thread_notifier": thread_notifier(),
         "thread_activity_monitor": thread_activity_monitor(bots)
     }
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     tasks = [
         asyncio.create_task(_run_background_task(coro, name))
