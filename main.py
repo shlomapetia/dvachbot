@@ -2995,14 +2995,14 @@ async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_loc
 
 async def help_broadcaster():
     """
-    Раз в ~12 часов отправляет на каждую доску одно из трех сообщений:
+    Раз в ~4 часов отправляет на каждую доску одно из трех сообщений:
     список команд, список досок или рекламу тредов, выбирая случайный вариант текста.
     """
-    await asyncio.sleep(600)  # Начальная задержка 10 минут
+    await asyncio.sleep(300)  # Начальная задержка 10 минут
 
     while True:
         # Случайная задержка от 11 до 13 часов
-        delay = random.randint(39600, 46800)
+        delay = random.randint(9600, 16800)
         await asyncio.sleep(delay)
         
         try:
