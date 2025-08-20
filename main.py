@@ -168,10 +168,14 @@ BOARD_CONFIG = {
     }
 }
 
+
+
 # ========== НОВЫЕ КОНСТАНТЫ ДЛЯ СИСТЕМЫ ТРЕДОВ ==========
 THREAD_BOARDS = {'thread', 'test'} # Доски, на которых будет работать система тредов
 DATA_DIR = "data"  # Папка для хранения данных (например, архивов тредов)
 os.makedirs(DATA_DIR, exist_ok=True) # Гарантируем, что папка существует
+# --- НОВАЯ КОНСТАНТА: ID КАНАЛА ДЛЯ РЕАЛ-ТАЙМ АРХИВА ---
+REALTIME_ARCHIVE_CHANNEL_ID = -1003026863876
 
 # --- Конфигурация уведомлений ---
 THREAD_NOTIFY_THRESHOLD = 30 # Порог постов для отправки уведомления об активности
@@ -2388,6 +2392,14 @@ async def process_new_post(
                 'board_id': board_id, 'thread_id': thread_id
             })
 
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Отправка копии в реал-тайм архив ---
+        # Проверяем, что это не системное сообщение, перед отправкой
+        if not content.get('is_system_message'):
+            asyncio.create_task(_forward_post_to_realtime_archive(
+                bot_instance=bot_instance, board_id=board_id, post_num=current_post_num, content=content
+            ))
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     except TelegramForbiddenError:
         b_data['users']['active'].discard(user_id)
         print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота (из process_new_post).")
@@ -2400,7 +2412,82 @@ async def process_new_post(
         if current_post_num:
             async with storage_lock:
                 messages_storage.pop(current_post_num, None)
+
+async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, post_num: int, content: dict):
+    """
+    Надежно пересылает копию поста в реал-тайм архивный канал,
+    обрабатывая лимиты API.
+    """
+    # Используем того же бота, что и для других постов в канал
+    archive_bot = GLOBAL_BOTS.get(ARCHIVE_POSTING_BOT_ID)
+    if not archive_bot:
+        print(f"⛔ Ошибка: бот для постинга в реал-тайм архив ('{ARCHIVE_POSTING_BOT_ID}') не найден.")
+        return
+
+    try:
+        board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
+        lang = 'en' if board_id == 'int' else 'ru'
+        
+        # Формируем заголовок
+        header_text = f"<b>{board_name}</b> | №{post_num}"
+
+        # Копируем контент, чтобы не изменить оригинал
+        content = content.copy()
+        
+        # Определяем основной текст/подпись
+        text_or_caption_raw = content.get('text') or content.get('caption') or ""
+        
+        # Собираем финальный текст для отправки
+        final_text = f"{header_text}\n\n{text_or_caption_raw}"
+
+        content_type = content.get("type")
+
+        # Функция для повторной попытки при ошибке Rate Limit
+        async def send_with_retry():
+            try:
+                if content_type == "media_group":
+                    builder = MediaGroupBuilder()
+                    # Устанавливаем общую подпись только для первого элемента
+                    caption_added = False
+                    for media in content.get('media', []):
+                        caption = final_text if not caption_added else None
+                        builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
+                        caption_added = True
+                    await archive_bot.send_media_group(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, media=builder.build())
+
+                elif content_type in ['sticker', 'voice', 'video_note']:
+                    # Эти типы не могут иметь подпись, отправляем двумя сообщениями
+                    method_name = f"send_{content_type}"
+                    send_method = getattr(archive_bot, method_name)
+                    sent_msg = await send_method(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, file_id=content.get("file_id"))
+                    await archive_bot.send_message(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, text=header_text, parse_mode="HTML", reply_to_message_id=sent_msg.message_id)
                 
+                else: # Для всех остальных типов (text, photo, video и т.д.)
+                    if len(final_text) > 4096 and content_type == 'text':
+                        final_text = final_text[:4093] + "..."
+                    elif len(final_text) > 1024:
+                         final_text = final_text[:1021] + "..."
+
+                    if content_type == 'text':
+                        await archive_bot.send_message(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, text=final_text, parse_mode="HTML")
+                    else:
+                        method_name = f"send_{content_type}"
+                        send_method = getattr(archive_bot, method_name)
+                        file_source = content.get('image_url') or content.get("file_id")
+                        await send_method(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, **{content_type: file_source, 'caption': final_text, 'parse_mode': "HTML"})
+
+            except TelegramRetryAfter as e:
+                print(f"⚠️ Попали на лимит API при отправке в архив. Ждем {e.retry_after} секунд...")
+                await asyncio.sleep(e.retry_after)
+                await send_with_retry() # Повторяем отправку
+
+        await send_with_retry()
+
+    except Exception as e:
+        import traceback
+        print(f"❌ Не удалось отправить пост #{post_num} в реал-тайм архив: {e}")
+        traceback.print_exc()
+
 async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     """
     Централизованно применяет все трансформации режимов с улучшенной обработкой аниме-изображений.
@@ -3491,38 +3578,30 @@ async def _send_thread_info_if_applicable(message: types.Message, board_id: str)
 
 # ========== КОМАНДЫ ==========
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext, board_id: str | None): # Добавлен state в аргументы
+async def cmd_start(message: types.Message, state: FSMContext, board_id: str | None):
     user_id = message.from_user.id
     if not board_id: return
     
     b_data = board_data[board_id]
-    
     command_payload = message.text.split()[1] if len(message.text.split()) > 1 else None
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Логика входа в тред через диплинк ---
     if command_payload and command_payload.startswith("thread_"):
         thread_id = command_payload.split('_')[-1]
         
         if board_id in THREAD_BOARDS and thread_id in b_data.get('threads_data', {}):
-            b_data['users']['active'].add(user_id)
-            user_s = b_data['user_state'].setdefault(user_id, {})
+            b_data['users']['active'].add(user_id) # Добавляем юзера в активные, если его там нет
             
-            user_s['location'] = thread_id
-            user_s['last_location_switch'] = time.time()
-            b_data['threads_data'][thread_id].setdefault('subscribers', set()).add(user_id)
-            
-            # --- ИЗМЕНЕНИЕ: Используем cb_create_thread_confirm для унификации входа ---
-            # Создаем фейковый колбэк, чтобы передать в функцию
-            fake_callback_query = types.CallbackQuery(
-                id=str(user_id), from_user=message.from_user, chat_instance="", message=message,
-                data=f"enter_thread_{thread_id}" # Добавляем data для совместимости
+            # ВЫЗЫВАЕМ НОВУЮ УНИВЕРСАЛЬНУЮ ФУНКЦИЮ
+            await _enter_thread_logic(
+                bot=message.bot,
+                board_id=board_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                message_to_delete=message
             )
-            await cq_enter_thread(fake_callback_query, board_id) # Вызываем хендлер входа в тред
-            
-            try:
-                await message.delete()
-            except TelegramBadRequest:
-                pass
-            return
+            return # Завершаем выполнение, чтобы не отправлять стартовое сообщение
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if user_id not in b_data['users']['active']:
         b_data['users']['active'].add(user_id)
@@ -3532,9 +3611,7 @@ async def cmd_start(message: types.Message, state: FSMContext, board_id: str | N
     
     await message.answer(start_text, parse_mode="HTML", disable_web_page_preview=True)
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Замена старого кода на вызов новой функции ---
     await _send_thread_info_if_applicable(message, board_id)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     try:
         await message.delete()
@@ -5074,7 +5151,75 @@ async def cq_thread_history(callback: types.CallbackQuery, board_id: str | None)
     b_data['user_state'][user_id] = temp_user_state
 
     await send_missed_messages(callback.bot, board_id, user_id, thread_id)
+
+async def _enter_thread_logic(bot: Bot, board_id: str, user_id: int, thread_id: str, message_to_delete: types.Message | None = None):
+    """
+    Универсальная и правильная логика для входа пользователя в тред.
+    Вызывается как из cmd_start, так и из cq_enter_thread.
+    """
+    b_data = board_data[board_id]
+    lang = 'en' if board_id == 'int' else 'ru'
+    tm_lang = thread_messages.get(lang, {})
     
+    threads_data = b_data.get('threads_data', {})
+    if thread_id not in threads_data:
+        # Если тред не найден, просто выходим, возможно, уведомив пользователя
+        # (в данном случае, хендлеры уже делают это)
+        return
+
+    user_s = b_data['user_state'].setdefault(user_id, {})
+    
+    now_ts = time.time()
+    last_switch = user_s.get('last_location_switch', 0)
+    if now_ts - last_switch < LOCATION_SWITCH_COOLDOWN:
+        cooldown_phrases = tm_lang.get('location_switch_cooldown', ["Too fast! Please wait a moment."])
+        cooldown_msg = random.choice(cooldown_phrases)
+        try:
+            # Отправляем временное сообщение о кулдауне
+            sent_msg = await bot.send_message(user_id, cooldown_msg)
+            asyncio.create_task(delete_message_after_delay(sent_msg, 5))
+        except (TelegramForbiddenError, TelegramBadRequest):
+            pass
+        return
+
+    current_location = user_s.get('location', 'main')
+    if current_location == thread_id:
+        return # Уже в треде, ничего не делаем
+        
+    if current_location == 'main':
+        user_s['last_seen_main'] = state.get('post_counter', 0)
+
+    user_s['location'] = thread_id
+    user_s['last_location_switch'] = now_ts
+    threads_data[thread_id].setdefault('subscribers', set()).add(user_id)
+    
+    if message_to_delete:
+        try:
+            await message_to_delete.delete()
+        except TelegramBadRequest:
+            pass
+
+    was_missed = await send_missed_messages(bot, board_id, user_id, thread_id)
+    
+    if not was_missed:
+        thread_title = threads_data[thread_id].get('title', '...')
+        seen_threads = user_s.setdefault('last_seen_threads', {})
+        
+        if thread_id not in seen_threads:
+            prompt_phrases = tm_lang.get('enter_thread_prompt', [f"Entered thread: {thread_title}"])
+            response_text = random.choice(prompt_phrases).format(title=thread_title)
+        else:
+            success_phrases = tm_lang.get('enter_thread_success', [f"Re-entered thread: {thread_title}"])
+            response_text = random.choice(success_phrases).format(title=thread_title)
+        
+        entry_keyboard = _get_thread_entry_keyboard(board_id)
+        try:
+            await bot.send_message(user_id, response_text, reply_markup=entry_keyboard, parse_mode="HTML")
+        except (TelegramForbiddenError, TelegramBadRequest):
+            pass
+        
+    await _send_op_commands_info(bot, user_id, board_id)
+
 @dp.callback_query(F.data.startswith("enter_thread_"))
 async def cq_enter_thread(callback: types.CallbackQuery, board_id: str | None):
     """Обрабатывает вход пользователя в тред по нажатию кнопки."""
@@ -5089,75 +5234,19 @@ async def cq_enter_thread(callback: types.CallbackQuery, board_id: str | None):
         return
         
     user_id = callback.from_user.id
-    b_data = board_data[board_id]
-    lang = 'en' if board_id == 'int' else 'ru'
-    tm_lang = thread_messages.get(lang, {})
     
-    threads_data = b_data.get('threads_data', {})
-    if thread_id not in threads_data:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасное получение текста ---
-        not_found_phrases = tm_lang.get('thread_not_found', ["Thread not found."])
-        not_found_msg = random.choice(not_found_phrases)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-        await callback.answer(not_found_msg, show_alert=True)
-        text, keyboard = await generate_threads_page(b_data, user_id, page=0)
-        try:
-            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-        except TelegramBadRequest: pass
-        return
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Вся логика заменена на вызов одной функции ---
+    await callback.answer() # Отвечаем на колбэк, чтобы кнопка перестала "грузиться"
 
-    user_s = b_data['user_state'].setdefault(user_id, {})
-    
-    now_ts = time.time()
-    last_switch = user_s.get('last_location_switch', 0)
-    if now_ts - last_switch < LOCATION_SWITCH_COOLDOWN:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасное получение текста ---
-        cooldown_phrases = tm_lang.get('location_switch_cooldown', ["Too fast! Please wait a moment."])
-        cooldown_msg = random.choice(cooldown_phrases)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-        await callback.answer(cooldown_msg, show_alert=True)
-        return
-
-    current_location = user_s.get('location', 'main')
-    if current_location == thread_id:
-        await callback.answer()
-        return
-        
-    if current_location == 'main':
-        user_s['last_seen_main'] = state.get('post_counter', 0)
-
-    user_s['location'] = thread_id
-    user_s['last_location_switch'] = now_ts
-    threads_data[thread_id].setdefault('subscribers', set()).add(user_id)
-    
-    await callback.answer()
-    try:
-        await callback.message.delete()
-    except TelegramBadRequest:
-        pass
-
-    was_missed = await send_missed_messages(callback.bot, board_id, user_id, thread_id)
-    
-    if not was_missed:
-        thread_title = threads_data[thread_id].get('title', '...')
-        seen_threads = user_s.setdefault('last_seen_threads', {})
-        
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасное получение текста ---
-        if thread_id not in seen_threads:
-            prompt_phrases = tm_lang.get('enter_thread_prompt', [f"Entered thread: {thread_title}"])
-            response_text = random.choice(prompt_phrases).format(title=thread_title)
-        else:
-            success_phrases = tm_lang.get('enter_thread_success', [f"Re-entered thread: {thread_title}"])
-            response_text = random.choice(success_phrases).format(title=thread_title)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-        
-        entry_keyboard = _get_thread_entry_keyboard(board_id)
-        try:
-            await callback.message.answer(response_text, reply_markup=entry_keyboard, parse_mode="HTML")
-        except (TelegramForbiddenError, TelegramBadRequest):
-            pass
-        
-    await _send_op_commands_info(callback.bot, user_id, board_id)
+    # ВЫЗЫВАЕМ НОВУЮ УНИВЕРСАЛЬНУЮ ФУНКЦИЮ
+    await _enter_thread_logic(
+        bot=callback.bot,
+        board_id=board_id,
+        user_id=user_id,
+        thread_id=thread_id,
+        message_to_delete=callback.message
+    )
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
 @dp.callback_query(F.data == "leave_thread")
 async def cb_leave_thread(callback: types.CallbackQuery, board_id: str | None):
