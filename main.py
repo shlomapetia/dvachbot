@@ -1431,13 +1431,15 @@ async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | Non
     is_shutting_down = True
     print("🛑 Получен сигнал shutdown, начинаем процедуру завершения...")
 
+    # 1. Останавливаем прием новых апдейтов
     try:
         await dp.stop_polling()
         print("⏸ Polling для всех ботов остановлен.")
     except Exception as e:
         print(f"⚠️ Не удалось остановить polling: {e}")
 
-    print("Ожидание опустошения очередей...")
+    # 2. Даем немного времени на обработку уже полученных апдейтов
+    print("Ожидание опустошения очередей (до 10 секунд)...")
     all_queues_empty = False
     for _ in range(10):
         if all(q.empty() for q in message_queues.values()):
@@ -1450,6 +1452,19 @@ async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | Non
     else:
         print("⚠️ Таймаут ожидания очередей. Некоторые сообщения могли не отправиться.")
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: ПРАВИЛЬНЫЙ ПОРЯДОК ОСТАНОВКИ ---
+
+    # 3. Отменяем ВСЕ активные задачи (включая рассылку, фоновые таски и т.д.)
+    print("Отменяем все активные задачи...")
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    
+    # Ждем завершения отмененных задач
+    await asyncio.gather(*tasks, return_exceptions=True)
+    print("✅ Все задачи остановлены.")
+
+    # 4. ТОЛЬКО ТЕПЕРЬ делаем финальный бэкап. Сессия еще жива.
     print("💾 Попытка финального сохранения и бэкапа в GitHub (таймаут 120 секунд)...")
     backup_task = asyncio.create_task(save_all_boards_and_backup())
     
@@ -1457,38 +1472,30 @@ async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | Non
         await asyncio.wait_for(backup_task, timeout=120.0)
         print("✅ Финальный бэкап успешно завершен в рамках таймаута.")
     except asyncio.TimeoutError:
-        print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Финальный бэкап не успел выполниться за 120 секунд и был прерван!")
+        print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Финальный бэкап не успел выполниться и был прерван!")
         backup_task.cancel()
-        try:
-            await backup_task
-        except asyncio.CancelledError:
-            print("ℹ️ Задача бэкапа успешно отменена.")
     except Exception as e:
         print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Не удалось выполнить финальный бэкап: {e}")
 
+    # 5. Завершаем работу с остальными компонентами (healthcheck, executor'ы)
     print("Завершение остальных компонентов...")
     try:
         if healthcheck_site:
             await healthcheck_site.stop()
             print("🛑 Healthcheck server stopped")
 
+        # Executor'ы лучше закрывать без ожидания, так как их задачи уже отменены
         git_executor.shutdown(wait=False, cancel_futures=True)
         save_executor.shutdown(wait=False, cancel_futures=True)
         print("🛑 Executors shutdown initiated.")
 
-        if hasattr(dp, 'storage') and dp.storage:
-            await dp.storage.close()
-        
-        print("✅ Сессии ботов будут закрыты централизованно.")
     except Exception as e:
-        print(f"Error during final shutdown procedures: {e}")
-
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    for task in tasks:
-        task.cancel()
+        print(f"Ошибка при завершении компонентов: {e}")
     
-    await asyncio.gather(*tasks, return_exceptions=True)
-    print("✅ Все задачи остановлены, завершаем работу.")
+    # 6. В самом конце, когда уже точно никто не использует сессию, мы ее закрываем
+    # Это будет сделано в блоке finally функции main(), что является правильным местом.
+    print("✅ Процедура graceful_shutdown завершена. Сессия будет закрыта в main().")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
 def _sync_clean_message_to_post(
     current_message_to_post: dict, 
@@ -2416,9 +2423,8 @@ async def process_new_post(
 async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, post_num: int, content: dict):
     """
     Надежно пересылает копию поста в реал-тайм архивный канал,
-    обрабатывая лимиты API.
+    обрабатывая лимиты API. (ИСПРАВЛЕННАЯ ВЕРСИЯ)
     """
-    # Используем того же бота, что и для других постов в канал
     archive_bot = GLOBAL_BOTS.get(ARCHIVE_POSTING_BOT_ID)
     if not archive_bot:
         print(f"⛔ Ошибка: бот для постинга в реал-тайм архив ('{ARCHIVE_POSTING_BOT_ID}') не найден.")
@@ -2428,60 +2434,56 @@ async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, po
         board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
         lang = 'en' if board_id == 'int' else 'ru'
         
-        # Формируем заголовок
-        header_text = f"<b>{board_name}</b> | №{post_num}"
-
-        # Копируем контент, чтобы не изменить оригинал
-        content = content.copy()
+        header_text = f"<b>{board_name}</b> | {'Post' if lang == 'en' else 'Пост'} №{post_num}"
         
-        # Определяем основной текст/подпись
-        text_or_caption_raw = content.get('text') or content.get('caption') or ""
-        
-        # Собираем финальный текст для отправки
-        final_text = f"{header_text}\n\n{text_or_caption_raw}"
-
-        content_type = content.get("type")
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Передаем переменные в send_with_retry явно ---
 
         # Функция для повторной попытки при ошибке Rate Limit
-        async def send_with_retry():
+        async def send_with_retry(content_to_send: dict, header: str):
             try:
+                # Собираем финальный текст ВНУТРИ функции, используя переданные аргументы
+                text_or_caption_raw = content_to_send.get('text') or content_to_send.get('caption') or ""
+                final_text = f"{header}\n\n{text_or_caption_raw}"
+                content_type = content_to_send.get("type")
+
                 if content_type == "media_group":
                     builder = MediaGroupBuilder()
-                    # Устанавливаем общую подпись только для первого элемента
                     caption_added = False
-                    for media in content.get('media', []):
+                    for media in content_to_send.get('media', []):
                         caption = final_text if not caption_added else None
                         builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
                         caption_added = True
                     await archive_bot.send_media_group(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, media=builder.build())
 
                 elif content_type in ['sticker', 'voice', 'video_note']:
-                    # Эти типы не могут иметь подпись, отправляем двумя сообщениями
                     method_name = f"send_{content_type}"
                     send_method = getattr(archive_bot, method_name)
-                    sent_msg = await send_method(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, file_id=content.get("file_id"))
-                    await archive_bot.send_message(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, text=header_text, parse_mode="HTML", reply_to_message_id=sent_msg.message_id)
+                    sent_msg = await send_method(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, **{content_type: content_to_send.get("file_id")})
+                    await archive_bot.send_message(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, text=header, parse_mode="HTML", reply_to_message_id=sent_msg.message_id)
                 
-                else: # Для всех остальных типов (text, photo, video и т.д.)
+                else:
                     if len(final_text) > 4096 and content_type == 'text':
                         final_text = final_text[:4093] + "..."
                     elif len(final_text) > 1024:
-                         final_text = final_text[:1021] + "..."
+                        final_text = final_text[:1021] + "..."
 
                     if content_type == 'text':
                         await archive_bot.send_message(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, text=final_text, parse_mode="HTML")
                     else:
                         method_name = f"send_{content_type}"
                         send_method = getattr(archive_bot, method_name)
-                        file_source = content.get('image_url') or content.get("file_id")
+                        file_source = content_to_send.get('image_url') or content_to_send.get("file_id")
                         await send_method(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, **{content_type: file_source, 'caption': final_text, 'parse_mode': "HTML"})
 
             except TelegramRetryAfter as e:
                 print(f"⚠️ Попали на лимит API при отправке в архив. Ждем {e.retry_after} секунд...")
                 await asyncio.sleep(e.retry_after)
-                await send_with_retry() # Повторяем отправку
+                # Повторяем отправку, передавая те же аргументы
+                await send_with_retry(content_to_send, header)
 
-        await send_with_retry()
+        # Вызываем send_with_retry, передавая ей нужные данные
+        await send_with_retry(content.copy(), header_text)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     except Exception as e:
         import traceback
@@ -7621,7 +7623,13 @@ async def main():
         print(f"✅ Инициализировано {len(GLOBAL_BOTS)} ботов: {list(GLOBAL_BOTS.keys())}")
         
         await setup_pinned_messages(GLOBAL_BOTS)
-        healthcheck_site = await start_healthcheck()
+        # --- ИЗМЕНЕНИЕ: Запускаем healthcheck до настройки сигналов ---
+        try:
+            healthcheck_site = await start_healthcheck()
+        except Exception as e:
+            print(f"⛔ Не удалось запустить healthcheck сервер: {e}. Продолжаем без него.")
+            healthcheck_site = None
+
         setup_lifecycle_handlers(loop, list(GLOBAL_BOTS.values()), healthcheck_site)
         await start_background_tasks(GLOBAL_BOTS)
 
@@ -7637,14 +7645,18 @@ async def main():
 
     except Exception as e:
         import traceback
-        print(f"🔥 Critical error in main: {e}\n{traceback.format_exc()}")
+        print(f"🔥 Критическая ошибка в main: {e}\n{traceback.format_exc()}")
     finally:
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: ГАРАНТИРУЕМ ПРАВИЛЬНЫЙ ПОРЯДОК ---
         if not is_shutting_down:
-            await graceful_shutdown(list(GLOBAL_BOTS.values()), healthcheck_site)
+            # Если shutdown еще не был запущен (например, из-за ошибки в polling), запускаем его
+            await graceful_shutdown(active_bots_list, healthcheck_site)
         
         if session:
+            # Закрываем сессию ПОСЛЕ того, как graceful_shutdown завершил все свои дела
             await session.close()
             print("✅ Общая HTTP сессия закрыта.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         if os.path.exists(lock_file):
             try:
@@ -7652,7 +7664,7 @@ async def main():
                 if pid_in_file == current_pid: os.remove(lock_file)
             except (IOError, ValueError):
                 os.remove(lock_file)
-
+                
 if __name__ == "__main__":
     try:
         asyncio.run(main())
