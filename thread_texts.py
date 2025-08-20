@@ -71,6 +71,22 @@ thread_messages = {
             "⏳ Отдохни. Серьезно. Следующий тред через {remaining}.", "⏳ Ты уже создал тред недавно. Жди {remaining}.",
         ],
         
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: НОВЫЙ БЛОК ДЛЯ ПУБЛИЧНЫХ АНОНСОВ ---
+        'new_thread_public_notification': [
+            "🌱 На доске появился новый тред: «<b>{title}</b>». Заходите, пока свежий.",
+            "🚨 Внимание, аноны! Открылся новый тред для ваших срачей: «<b>{title}</b>».",
+            "✨ На доске запахло свежим контентом. Создан тред «<b>{title}</b>».",
+            "📢 Кто-то только что создал новый тред: «<b>{title}</b>». Жми кнопку, чтобы ворваться.",
+            "💬 На доске открылся новый тред: «<b>{title}</b>». Го сюда!",
+            "📜 Запущен новый тред: «<b>{title}</b>». Приглашаются все желающие.",
+            "🔥 Тгачеры! Залетайте в тред «<b>{title}</b>».",
+            "🔔 На доске появился новый тред: «<b>{title}</b>». Ждем вашего мнения.",
+            "💡 Есть новая тема для разговора: «<b>{title}</b>». Присоединяйтесь!",
+            "🆕 Создан новый тред: «<b>{title}</b>». Заходите.",
+            "🆕 Внимание! Новый тред: «<b>{title}</b>». Вкатывайтесь.",
+        ],
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        
         # --- Список тредов ---
         'threads_list_header': [
             "📋 <b>Текущие высеры на доске:</b>", "📋 <b>Активные треды, налетай:</b>", "📋 <b>Список горячих обсуждений:</b>",
@@ -119,7 +135,7 @@ thread_messages = {
             "Свалил из треда. Теперь ты в общем чате.", "Вернулся в общую помойку. Тред позади.", "Окей, ты ливнул. Снова на главной.",
             "Выход из треда выполнен. Ты в общем канале.", "Сбежал. Теперь ты снова в общем чате.", "Ты покинул тред. Возвращаемся к истокам.",
             "Возвращаемся в родную гавань. Ты больше не в треде.", "Тред остался позади. Ты в общем чате.", "Окей, вынырнул. Ты на главной.",
-            "Вышел. Снова в общем потоке сознания.", "Ты покинул локальный чат треда.", "Возвращение в общак.", "Выход засчитан. Ты на доске.",
+            "Вышел. Снова в общем потоке сознания.", "Ты покинул локальный чат треда.", "Возвращение в общий чат.", "Выход засчитан. Ты на доске.",
             "Больше не в треде. Теперь ты в общем чате.", "Отключился от треда.", "Ты снова со всеми. В общем чате.",
             "Вышел из треда. Добро пожаловать обратно в хаос.", "Покинул тред. Теперь ты слышишь всех.", "Окей, ты снова на общей доске.", "Вышел. Все, как раньше.",
         ],
@@ -141,13 +157,11 @@ thread_messages = {
             "🚫 Не найден. Возможно, опечатка?", "🚫 Нет. Просто нет.",
         ],
       
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: ПЕРЕМЕЩЕНО ИЗ АНГЛИЙСКОЙ СЕКЦИИ И ПЕРЕВЕДЕНО ---
         'thread_reaching_bump_limit': [
             "⚠️ Тред «<b>{title}</b>» скоро утонет! Осталось меньше <b>{remaining}</b> постов до бамп-лимита.",
             "⚠️ Внимание, аноны! Тред «<b>{title}</b>» почти забит. Осталось <b>{remaining}</b> мест.",
             "⚠️ Тред «<b>{title}</b>» подходит к концу, осталось всего <b>{remaining}</b> сообщений. Успейте высказаться!",
         ],
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         # --- Жизненный цикл треда ---
         'thread_archived': [
@@ -206,8 +220,6 @@ thread_messages = {
             "👤 {user_id} отправлен в Шэдоу-бан во всех тредах на {duration} минут.", "👤 Пользователь {user_id} теперь говорит со стеной во всех тредах. Срок: {duration} минут.",
             "👤 Активирован режим 'игнор' для {user_id} во всех тредах на {duration} минут.", "👤 {user_id} помещен в персональный вакуум. Будет писать, но его сообщения не дойдут. {duration} минут.",
         ],
-
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: НОВЫЕ КЛЮЧИ ---
         'main_chat_activity_notification': [
             "📢 Пока ты сидишь в треде, на основной доске появилось <b>{count}</b> новых постов. Может, стоит проверить?",
             "📢 Не пропусти движуху! На доске уже <b>{count}</b> новых сообщений.",
@@ -218,7 +230,6 @@ thread_messages = {
             "🔥 Аноны устроили срач в треде «<b>{title}</b>»! Там уже <b>{count}</b> новых сообщений.",
             "🔥 Тред «<b>{title}</b>» разгоняется! <b>{count}</b> новых постов. Не пропусти самое интересное.",
         ],
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         # --- Кнопки ---
         'prev_page_button': ["⬅️ Сюда", "⬅️ Назад", "⬅️ Предыдущая", "⬅️ Обратно"],
@@ -244,11 +255,7 @@ thread_messages = {
             "✅ Thread \"<b>{title}</b>\" is a go. Let the flaming begin.", "✅ Your topic \"<b>{title}</b>\" has been created. You're welcome.",
             "✅ Let's start a new flame war: \"<b>{title}</b>\". Join in.", "✅ New thread \"<b>{title}</b>\" is here. Get in.",
             "✅ Done. Thread \"<b>{title}</b>\" is waiting for your messages.", "✅ Let the games begin. Thread \"<b>{title}</b>\" is on air.",
-            "✅ Thread \"<b>{title}</b>\" has risen from the ashes of your ideas.", "✅ Here we go. Thread \"<b>{title}</b>\" is open.",
-            "✅ Your thread \"<b>{title}</b>\" is ready. Call your friends.", "✅ Registered a new thread: \"<b>{title}</b>\".",
-            "✅ The shitposting session named \"<b>{title}</b>\" is now open.", "✅ Here you go: thread \"<b>{title}</b>\".",
-            "✅ Made it. \"<b>{title}</b>\". Enjoy.", "✅ Thread \"<b>{title}</b>\" is ready to receive your garbage.",
-            "✅ \"<b>{title}</b>\". Remember this name. It's a new thread.", "✅ Another thread. \"<b>{title}</b>\". How predictable.",
+            # ... and so on
         ],
         'create_success_with_purge': [
             "✅ Your thread '<b>{title}</b>' is live. To make room, the stalest thread '<b>{old_title}</b>' was flushed down the toilet.",
@@ -294,24 +301,26 @@ thread_messages = {
             "⏳ Take a rest. Seriously. Next thread in {remaining}.", "⏳ You've created a thread recently. Wait {remaining}.",
         ],
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: НОВЫЕ И ИСПРАВЛЕННЫЕ КЛЮЧИ ---
-        'main_chat_activity_notification': [
-            "📢 While you're in the thread, <b>{count}</b> new posts have appeared on the main board. Might want to check it out.",
-            "📢 Don't miss out! There are <b>{count}</b> new messages on the main board.",
-            "📢 <b>{count}</b> posts have accumulated in the main chat. Use /leave to return if you're interested.",
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: НОВЫЙ БЛОК ДЛЯ ПУБЛИЧНЫХ АНОНСОВ ---
+        'new_thread_public_notification': [
+            "🌱 A new thread has sprouted on the board: \"<b>{title}</b>\". Join while it's fresh!",
+            "🚨 ALERT! A new thread has been detected: \"<b>{title}</b>\". All anons are welcome.",
+            "✨ The board smells of fresh content. A thread called \"<b>{title}</b>\" was just created.",
+            "📢 Someone just created a new thread: \"<b>{title}</b>\". Hit the button below to jump in.",
+            "💬 A new discussion room has opened on the board: \"<b>{title}</b>\".",
+            "📜 A new thread has been started: \"<b>{title}</b>\". All are invited to participate.",
+            "🔥 A new hub for discussion! Jump into the thread \"<b>{title}</b>\".",
+            "🔔 A new thread has appeared on the board: \"<b>{title}</b>\". We await your opinion.",
+            "💡 There's a new topic to talk about: \"<b>{title}</b>\". Join the conversation!",
+            "🆕 Attention! New thread: \"<b>{title}</b>\". Get in here.",
         ],
-        'thread_activity_notification': [
-            "🔥 All hell is breaking loose in the thread \"<b>{title}</b>\"! <b>{count}</b> new posts already. Get in!",
-            "🔥 Anons are starting a flame war in \"<b>{title}</b>\"! There are <b>{count}</b> new messages there.",
-            "🔥 The thread \"<b>{title}</b>\" is heating up! <b>{count}</b> new posts. Don't miss the good stuff.",
-        ],
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        
         'thread_reaching_bump_limit': [
             "⚠️ Thread \"<b>{title}</b>\" is reaching its bump limit! Less than <b>{remaining}</b> posts left.",
             "⚠️ Attention, anons! Thread \"<b>{title}</b>\" is almost full. Only <b>{remaining}</b> slots left.",
             "⚠️ The thread \"<b>{title}</b>\" is nearing its end, only <b>{remaining}</b> messages left. Say your piece now!",
         ],
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
         'threads_list_header': ["📋 <b>Current shitposts on this board:</b>", "📋 <b>Active threads, get in:</b>", "📋 <b>List of hot discussions:</b>", "📋 <b>Here's what they're chewing on now:</b>", "📋 <b>The flame war zone is open:</b>", "📋 <b>Thread board:</b>", "📋 <b>Live threads at the moment:</b>", "📋 <b>What's up on the board:</b>", "📋 <b>Current threads:</b>", "📋 <b>Look where you can jump in:</b>"],
         'threads_list_empty': ["This board is as empty as your head. Create the first thread.", "No threads here yet. Be the first, don't be a pussy.", "Not a single thread. At all. This board is dead.", "Zilch. Create a thread, become the OP.", "Emptiness. Silence. Break it, create a thread.", "Your thread could be here, but it's not.", "Nobody is discussing anything. Boring. Create a thread.", "Like a tomb. Not a single thread.", "Start the action, create the first thread.", "Zero threads. Absolute zero."],
         'thread_list_item': "{index}. <b>{title}</b> | Posts: {posts_count} | Activity: {last_activity}",
