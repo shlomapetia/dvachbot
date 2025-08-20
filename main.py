@@ -2375,9 +2375,9 @@ async def process_new_post(
             if reply_to_post:
                 reply_info_for_author = post_to_messages.get(reply_to_post, {})
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавлено .copy() ---
         content_for_author = await _apply_mode_transformations(content.copy(), board_id)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Меняем порядок сохранения и вызова ---
         author_results = await send_message_to_users(
             bot_instance=bot_instance, recipients={user_id},
             content=content_for_author, reply_info=reply_info_for_author
@@ -2386,21 +2386,26 @@ async def process_new_post(
         if author_results and author_results[0] and author_results[0][1]:
             sent_to_author = author_results[0][1]
             messages_to_save = sent_to_author if isinstance(sent_to_author, list) else [sent_to_author]
+            author_message_id_to_archive = messages_to_save[0].message_id
+            
             async with storage_lock:
+                # Сначала обновляем author_message_id в хранилище
+                if current_post_num in messages_storage:
+                    messages_storage[current_post_num]['author_message_id'] = author_message_id_to_archive
+                
+                # Остальная логика сохранения связей
                 for m in messages_to_save:
-                    if current_post_num in messages_storage:
-                        messages_storage[current_post_num]['author_message_id'] = m.message_id
                     post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
                     message_to_post[(user_id, m.message_id)] = current_post_num
-
+        
+        # Теперь ставим пост в очередь для других
         if not is_shadow_muted and recipients:
             await message_queues[board_id].put({
                 'recipients': recipients, 'content': content, 'post_num': current_post_num,
                 'board_id': board_id, 'thread_id': thread_id
             })
 
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Отправка копии в реал-тайм архив ---
-        # Проверяем, что это не системное сообщение, перед отправкой
+        # И только теперь, когда author_message_id сохранен, вызываем архивацию
         if not content.get('is_system_message'):
             asyncio.create_task(_forward_post_to_realtime_archive(
                 bot_instance=bot_instance, board_id=board_id, post_num=current_post_num, content=content
@@ -2422,8 +2427,8 @@ async def process_new_post(
 
 async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, post_num: int, content: dict):
     """
-    Надежно пересылает копию поста в реал-тайм архивный канал,
-    обрабатывая лимиты API. (ФИНАЛЬНАЯ ИСПРАВЛЕННАЯ ВЕРСИЯ 2.0)
+    Надежно копирует пост в реал-тайм архивный канал, а затем редактирует его подпись.
+    (ФИНАЛЬНАЯ ВЕРСИЯ 3.0)
     """
     archive_bot = GLOBAL_BOTS.get(ARCHIVE_POSTING_BOT_ID)
     if not archive_bot:
@@ -2431,72 +2436,71 @@ async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, po
         return
 
     try:
-        # Функция для повторной попытки при ошибке Rate Limit
-        async def send_with_retry(content_to_send: dict, header: str):
-            try:
-                text_or_caption_raw = content_to_send.get('text') or content_to_send.get('caption') or ""
-                final_text = f"{header}\n\n{text_or_caption_raw}"
-                
-                ct_raw = content_to_send.get("type")
-                content_type = str(ct_raw).split('.')[-1].lower()
+        # Получаем ID чата и сообщения автора, чтобы знать, что копировать
+        author_id = messages_storage.get(post_num, {}).get('author_id')
+        author_message_id = messages_storage.get(post_num, {}).get('author_message_id')
 
-                if content_type == "media_group":
-                    builder = MediaGroupBuilder()
-                    caption_added = False
-                    for media in content_to_send.get('media', []):
-                        media_type_str = str(media['type']).split('.')[-1].lower()
-                        caption = final_text if not caption_added else None
-                        builder.add(type=media_type_str, media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
-                        caption_added = True
-                    await archive_bot.send_media_group(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, media=builder.build())
+        if not (author_id and author_message_id):
+            print(f"⚠️ Не удалось найти автора или ID сообщения для поста #{post_num} для пересылки в архив.")
+            return
 
-                # --- НАЧАЛО ИЗМЕНЕНИЙ: ПРАВИЛЬНАЯ ОТПРАВКА ВСЕХ ТИПОВ ---
-                else:
-                    method_name = f"send_{content_type}"
-                    if content_type == 'text':
-                        method_name = 'send_message' # Корректируем для текстовых сообщений
-                    
-                    send_method = getattr(archive_bot, method_name)
-                    
-                    kwargs = {'chat_id': REALTIME_ARCHIVE_CHANNEL_ID}
-
-                    if content_type == 'text':
-                        if len(final_text) > 4096:
-                            final_text = final_text[:4093] + "..."
-                        kwargs['text'] = final_text
-                        kwargs['parse_mode'] = "HTML"
-                    
-                    elif content_type in ['sticker', 'voice', 'video_note']:
-                        # Эти типы не имеют подписи, отправляем отдельно
-                        kwargs[content_type] = content_to_send.get("file_id")
-                        sent_msg = await send_method(**kwargs)
-                        await archive_bot.send_message(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, text=header, parse_mode="HTML", reply_to_message_id=sent_msg.message_id)
-                        return # Выходим, чтобы не было двойной отправки
-                    
-                    else: # Для фото, видео, документов и т.д.
-                        if len(final_text) > 1024:
-                            final_text = final_text[:1021] + "..."
-                        
-                        file_source = content_to_send.get('image_url') or content_to_send.get("file_id")
-                        kwargs[content_type] = file_source
-                        kwargs['caption'] = final_text
-                        kwargs['parse_mode'] = "HTML"
-
-                    await send_method(**kwargs)
-                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-            except TelegramRetryAfter as e:
-                print(f"⚠️ Попали на лимит API при отправке в архив. Ждем {e.retry_after} секунд...")
-                await asyncio.sleep(e.retry_after)
-                await send_with_retry(content_to_send, header)
-
-        # Собираем данные один раз снаружи
+        # Формируем нашу стандартную шапку
         board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
         lang = 'en' if board_id == 'int' else 'ru'
         header_text = f"<b>{board_name}</b> | {'Post' if lang == 'en' else 'Пост'} №{post_num}"
-        
-        # Вызываем send_with_retry, передавая ей нужные данные
-        await send_with_retry(content.copy(), header_text)
+
+        async def copy_with_retry():
+            try:
+                # Шаг 1: Копируем оригинальное сообщение пользователя в канал.
+                # Используем bot_instance (бота доски), т.к. именно он "видит" чат с пользователем.
+                copied_message = await bot_instance.copy_message(
+                    chat_id=REALTIME_ARCHIVE_CHANNEL_ID,
+                    from_chat_id=author_id,
+                    message_id=author_message_id
+                )
+                
+                # Шаг 2: Редактируем подпись или отвечаем на скопированное сообщение.
+                # Это делает уже archive_bot, т.к. сообщение теперь в его юрисдикции.
+                original_caption = copied_message.caption or copied_message.text or ""
+                final_caption = f"{header_text}\n\n{original_caption}"
+
+                # Если это было текстовое сообщение, редактируем его текст
+                if copied_message.text:
+                     if len(final_caption) > 4096: final_caption = final_caption[:4093] + "..."
+                     await archive_bot.edit_message_text(
+                         text=final_caption, 
+                         chat_id=REALTIME_ARCHIVE_CHANNEL_ID, 
+                         message_id=copied_message.message_id, 
+                         parse_mode="HTML"
+                     )
+                
+                # Если это было медиа с подписью, редактируем подпись
+                elif copied_message.caption is not None: # Проверяем именно на None, т.к. может быть пустая строка
+                    if len(final_caption) > 1024: final_caption = final_caption[:1021] + "..."
+                    await archive_bot.edit_message_caption(
+                        caption=final_caption, 
+                        chat_id=REALTIME_ARCHIVE_CHANNEL_ID, 
+                        message_id=copied_message.message_id, 
+                        parse_mode="HTML"
+                    )
+                
+                # Если это медиа без подписи (стикер, фото, гифка)
+                else:
+                    await archive_bot.send_message(
+                        text=header_text, 
+                        chat_id=REALTIME_ARCHIVE_CHANNEL_ID, 
+                        reply_to_message_id=copied_message.message_id, 
+                        parse_mode="HTML"
+                    )
+
+            except TelegramRetryAfter as e:
+                print(f"⚠️ Попали на лимит API при отправке в архив. Ждем {e.retry_after} секунд...")
+                await asyncio.sleep(e.retry_after + 1) # Добавляем +1 для надежности
+                await copy_with_retry()
+            except TelegramBadRequest as e:
+                print(f"❌ BadRequest при копировании поста #{post_num} в архив: {e}")
+
+        await copy_with_retry()
 
     except Exception as e:
         import traceback
@@ -4516,55 +4520,74 @@ async def post_archive_to_channel(bots: dict[str, Bot], file_path: str, board_id
         print(f"⛔ Не удалось отправить архив в канал {ARCHIVE_CHANNEL_ID}: {e}")
 
 async def post_special_num_to_channel(bots: dict[str, Bot], board_id: str, post_num: int, level: int, content: dict, author_id: int):
-    """Пересылает пост со "счастливым" номером в канал архивов."""
-    bot_instance = bots.get(ARCHIVE_POSTING_BOT_ID)
-    if not bot_instance:
-        print(f"⛔ Ошибка: бот для постинга ('{ARCHIVE_POSTING_BOT_ID}') не найден.")
+    """
+    Копирует "счастливый" пост в канал архивов и добавляет информацию о достижении.
+    (ФУНДАМЕНТАЛЬНО ПЕРЕРАБОТАННАЯ ВЕРСИЯ)
+    """
+    archive_bot = GLOBAL_BOTS.get(ARCHIVE_POSTING_BOT_ID)
+    # Бот, который изначально получил сообщение (нужен для copy_message)
+    original_bot = GLOBAL_BOTS.get(board_id)
+
+    if not archive_bot or not original_bot:
+        print(f"⛔ Ошибка: не найден бот для постинга ('{ARCHIVE_POSTING_BOT_ID}') или бот доски ('{board_id}').")
         return
         
     try:
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Логика на основе copy_message ---
+        
+        # Шаг 1: Получаем ID оригинального сообщения автора
+        author_message_id = messages_storage.get(post_num, {}).get('author_message_id')
+
+        if not author_message_id:
+            print(f"⚠️ Не удалось найти author_message_id для счастливого поста #{post_num}. Архивация невозможна.")
+            return
+
+        # Шаг 2: Формируем текстовое уведомление о достижении
         config = SPECIAL_NUMERALS_CONFIG[level]
         emoji = random.choice(config['emojis'])
         label = config['label'].upper()
-        
         board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
 
-        header = f"{emoji} <b>{label} #{post_num}</b> {emoji}\n\n<b>Доска:</b> {board_name}\n"
-        
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        text_or_caption_raw = content.get('text') or content.get('caption') or ""
-        post_text = clean_html_tags(text_or_caption_raw)
-        
-        # Если текста/подписи нет, добавляем плейсхолдер для медиа
-        if not post_text:
-            content_type = content.get('type', 'unknown')
-            media_placeholders = {
-                'photo': '[Фото]',
-                'video': '[Видео]',
-                'animation': '[GIF]',
-                'sticker': '[Стикер]',
-                'document': '[Документ]',
-                'audio': '[Аудио]',
-                'voice': '[Голосовое сообщение]',
-                'video_note': '[Кружок]'
-            }
-            post_text = media_placeholders.get(content_type, '[Медиа]')
+        notification_text = (
+            f"{emoji} <b>{label} #{post_num}</b> {emoji}\n\n"
+            f"<b>Доска:</b> {board_name}"
+        )
 
-        final_text = f"{header}\n{post_text}"
-        
-        if len(final_text) > 4096:
-            final_text = final_text[:4093] + "..."
+        async def copy_with_retry():
+            try:
+                # Шаг 3: Копируем оригинальное сообщение пользователя в канал
+                # Используем original_bot, так как он "знает" чат автора
+                copied_message = await original_bot.copy_message(
+                    chat_id=ARCHIVE_CHANNEL_ID,
+                    from_chat_id=author_id,
+                    message_id=author_message_id
+                )
+
+                # Шаг 4: Отправляем уведомление в ответ на скопированное сообщение
+                # Это делает уже archive_bot
+                await archive_bot.send_message(
+                    text=notification_text,
+                    chat_id=ARCHIVE_CHANNEL_ID,
+                    reply_to_message_id=copied_message.message_id,
+                    parse_mode="HTML"
+                )
+                print(f"✅ Счастливый пост #{post_num} ({label}) скопирован в канал.")
+
+            except TelegramRetryAfter as e:
+                print(f"⚠️ Попали на лимит API при копировании счастливого поста #{post_num}. Ждем {e.retry_after} сек...")
+                await asyncio.sleep(e.retry_after + 1)
+                await copy_with_retry()
+            except TelegramBadRequest as e:
+                print(f"❌ BadRequest при копировании счастливого поста #{post_num}: {e}")
+
+        await copy_with_retry()
+
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        await bot_instance.send_message(
-            chat_id=ARCHIVE_CHANNEL_ID,
-            text=final_text,
-            parse_mode="HTML"
-        )
-        print(f"✅ Пост #{post_num} ({label}) отправлен в канал.")
-
     except Exception as e:
-        print(f"⛔ Не удалось отправить пост #{post_num} в канал: {e}")
+        import traceback
+        print(f"⛔ Не удалось отправить счастливый пост #{post_num} в канал: {e}")
+        traceback.print_exc()
 
 
 def _get_thread_entry_keyboard(board_id: str, show_history_button: bool = False) -> InlineKeyboardMarkup:
