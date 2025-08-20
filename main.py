@@ -2427,8 +2427,8 @@ async def process_new_post(
 
 async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, post_num: int, content: dict):
     """
-    Надежно копирует пост в реал-тайм архивный канал, а затем редактирует его подпись.
-    (ФИНАЛЬНАЯ ВЕРСИЯ 3.0)
+    Надежно пересылает копию поста в реал-тайм архивный канал, получая прямые ссылки на файлы.
+    (ФИНАЛЬНАЯ ВЕРСИЯ 4.0)
     """
     archive_bot = GLOBAL_BOTS.get(ARCHIVE_POSTING_BOT_ID)
     if not archive_bot:
@@ -2436,71 +2436,69 @@ async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, po
         return
 
     try:
-        # Получаем ID чата и сообщения автора, чтобы знать, что копировать
-        author_id = messages_storage.get(post_num, {}).get('author_id')
-        author_message_id = messages_storage.get(post_num, {}).get('author_message_id')
-
-        if not (author_id and author_message_id):
-            print(f"⚠️ Не удалось найти автора или ID сообщения для поста #{post_num} для пересылки в архив.")
-            return
-
-        # Формируем нашу стандартную шапку
         board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
         lang = 'en' if board_id == 'int' else 'ru'
         header_text = f"<b>{board_name}</b> | {'Post' if lang == 'en' else 'Пост'} №{post_num}"
-
-        async def copy_with_retry():
+        
+        async def send_with_retry(content_to_send: dict, header: str):
             try:
-                # Шаг 1: Копируем оригинальное сообщение пользователя в канал.
-                # Используем bot_instance (бота доски), т.к. именно он "видит" чат с пользователем.
-                copied_message = await bot_instance.copy_message(
-                    chat_id=REALTIME_ARCHIVE_CHANNEL_ID,
-                    from_chat_id=author_id,
-                    message_id=author_message_id
-                )
-                
-                # Шаг 2: Редактируем подпись или отвечаем на скопированное сообщение.
-                # Это делает уже archive_bot, т.к. сообщение теперь в его юрисдикции.
-                original_caption = copied_message.caption or copied_message.text or ""
-                final_caption = f"{header_text}\n\n{original_caption}"
+                text_or_caption_raw = content_to_send.get('text') or content_to_send.get('caption') or ""
+                final_text = f"{header}\n\n{text_or_caption_raw}"
+                ct_raw = content_to_send.get("type")
+                content_type = str(ct_raw).split('.')[-1].lower()
 
-                # Если это было текстовое сообщение, редактируем его текст
-                if copied_message.text:
-                     if len(final_caption) > 4096: final_caption = final_caption[:4093] + "..."
-                     await archive_bot.edit_message_text(
-                         text=final_caption, 
-                         chat_id=REALTIME_ARCHIVE_CHANNEL_ID, 
-                         message_id=copied_message.message_id, 
-                         parse_mode="HTML"
-                     )
-                
-                # Если это было медиа с подписью, редактируем подпись
-                elif copied_message.caption is not None: # Проверяем именно на None, т.к. может быть пустая строка
-                    if len(final_caption) > 1024: final_caption = final_caption[:1021] + "..."
-                    await archive_bot.edit_message_caption(
-                        caption=final_caption, 
-                        chat_id=REALTIME_ARCHIVE_CHANNEL_ID, 
-                        message_id=copied_message.message_id, 
-                        parse_mode="HTML"
-                    )
-                
-                # Если это медиа без подписи (стикер, фото, гифка)
-                else:
-                    await archive_bot.send_message(
-                        text=header_text, 
-                        chat_id=REALTIME_ARCHIVE_CHANNEL_ID, 
-                        reply_to_message_id=copied_message.message_id, 
-                        parse_mode="HTML"
-                    )
+                kwargs = {'chat_id': REALTIME_ARCHIVE_CHANNEL_ID}
+
+                if content_type == 'text':
+                    if len(final_text) > 4096: final_text = final_text[:4093] + "..."
+                    await archive_bot.send_message(text=final_text, parse_mode="HTML", **kwargs)
+
+                elif content_type == "media_group":
+                    builder = MediaGroupBuilder()
+                    caption_added = False
+                    for media in content_to_send.get('media', []):
+                        media_type_str = str(media['type']).split('.')[-1].lower()
+                        caption = final_text if not caption_added else None
+                        
+                        # --- НАЧАЛО ИЗМЕНЕНИЙ: Получаем прямую ссылку ---
+                        file_info = await bot_instance.get_file(media['file_id'])
+                        file_url = bot_instance.session.api.file_url(bot_instance.token, file_info.file_path)
+                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                        
+                        builder.add(type=media_type_str, media=file_url, caption=caption, parse_mode="HTML" if caption else None)
+                        caption_added = True
+                    await archive_bot.send_media_group(media=builder.build(), **kwargs)
+
+                else: # Все остальные типы медиа
+                    file_id = content_to_send.get("file_id")
+                    if not file_id: return
+                    
+                    # --- НАЧАЛО ИЗМЕНЕНИЙ: Получаем прямую ссылку ---
+                    file_info = await bot_instance.get_file(file_id)
+                    file_url = bot_instance.session.api.file_url(bot_instance.token, file_info.file_path)
+                    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                    
+                    method_name = f"send_{content_type}"
+                    send_method = getattr(archive_bot, method_name)
+                    
+                    # Аргументы для отправки
+                    send_kwargs = {content_type: file_url}
+
+                    if content_type not in ['sticker', 'voice', 'video_note']:
+                        if len(final_text) > 1024: final_text = final_text[:1021] + "..."
+                        send_kwargs['caption'] = final_text
+                        send_kwargs['parse_mode'] = "HTML"
+
+                    await send_method(**kwargs, **send_kwargs)
 
             except TelegramRetryAfter as e:
                 print(f"⚠️ Попали на лимит API при отправке в архив. Ждем {e.retry_after} секунд...")
-                await asyncio.sleep(e.retry_after + 1) # Добавляем +1 для надежности
-                await copy_with_retry()
+                await asyncio.sleep(e.retry_after + 1)
+                await send_with_retry(content_to_send, header)
             except TelegramBadRequest as e:
-                print(f"❌ BadRequest при копировании поста #{post_num} в архив: {e}")
+                print(f"❌ BadRequest при отправке поста #{post_num} в архив: {e}")
 
-        await copy_with_retry()
+        await send_with_retry(content.copy(), header_text)
 
     except Exception as e:
         import traceback
@@ -4521,28 +4519,16 @@ async def post_archive_to_channel(bots: dict[str, Bot], file_path: str, board_id
 
 async def post_special_num_to_channel(bots: dict[str, Bot], board_id: str, post_num: int, level: int, content: dict, author_id: int):
     """
-    Копирует "счастливый" пост в канал архивов и добавляет информацию о достижении.
-    (ФУНДАМЕНТАЛЬНО ПЕРЕРАБОТАННАЯ ВЕРСИЯ)
+    Пересылает "счастливый" пост в канал архивов, получая прямые ссылки на файлы.
+    (ФИНАЛЬНАЯ ВЕРСИЯ 4.0)
     """
     archive_bot = GLOBAL_BOTS.get(ARCHIVE_POSTING_BOT_ID)
-    # Бот, который изначально получил сообщение (нужен для copy_message)
     original_bot = GLOBAL_BOTS.get(board_id)
-
     if not archive_bot or not original_bot:
         print(f"⛔ Ошибка: не найден бот для постинга ('{ARCHIVE_POSTING_BOT_ID}') или бот доски ('{board_id}').")
         return
         
     try:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Логика на основе copy_message ---
-        
-        # Шаг 1: Получаем ID оригинального сообщения автора
-        author_message_id = messages_storage.get(post_num, {}).get('author_message_id')
-
-        if not author_message_id:
-            print(f"⚠️ Не удалось найти author_message_id для счастливого поста #{post_num}. Архивация невозможна.")
-            return
-
-        # Шаг 2: Формируем текстовое уведомление о достижении
         config = SPECIAL_NUMERALS_CONFIG[level]
         emoji = random.choice(config['emojis'])
         label = config['label'].upper()
@@ -4552,37 +4538,48 @@ async def post_special_num_to_channel(bots: dict[str, Bot], board_id: str, post_
             f"{emoji} <b>{label} #{post_num}</b> {emoji}\n\n"
             f"<b>Доска:</b> {board_name}"
         )
-
-        async def copy_with_retry():
+        
+        async def send_with_retry(content_to_send: dict, header: str):
             try:
-                # Шаг 3: Копируем оригинальное сообщение пользователя в канал
-                # Используем original_bot, так как он "знает" чат автора
-                copied_message = await original_bot.copy_message(
-                    chat_id=ARCHIVE_CHANNEL_ID,
-                    from_chat_id=author_id,
-                    message_id=author_message_id
-                )
+                ct_raw = content_to_send.get("type")
+                content_type = str(ct_raw).split('.')[-1].lower()
+                kwargs = {'chat_id': ARCHIVE_CHANNEL_ID}
 
-                # Шаг 4: Отправляем уведомление в ответ на скопированное сообщение
-                # Это делает уже archive_bot
-                await archive_bot.send_message(
-                    text=notification_text,
-                    chat_id=ARCHIVE_CHANNEL_ID,
-                    reply_to_message_id=copied_message.message_id,
-                    parse_mode="HTML"
-                )
-                print(f"✅ Счастливый пост #{post_num} ({label}) скопирован в канал.")
+                if content_type == 'text':
+                    text_content = content_to_send.get('text', '')
+                    full_text = f"{header}\n\n{text_content}"
+                    if len(full_text) > 4096: full_text = full_text[:4093] + "..."
+                    await archive_bot.send_message(text=full_text, parse_mode="HTML", **kwargs)
+                else:
+                    file_id = content_to_send.get("file_id")
+                    if not file_id: return
+
+                    file_info = await original_bot.get_file(file_id)
+                    file_url = original_bot.session.api.file_url(original_bot.token, file_info.file_path)
+
+                    method_name = f"send_{content_type}"
+                    send_method = getattr(archive_bot, method_name)
+                    
+                    send_kwargs = {content_type: file_url}
+                    original_caption = content_to_send.get('caption')
+                    
+                    full_caption = f"{header}\n\n{original_caption}" if original_caption else header
+                    if len(full_caption) > 1024: full_caption = full_caption[:1021] + "..."
+                    
+                    send_kwargs['caption'] = full_caption
+                    send_kwargs['parse_mode'] = "HTML"
+                    
+                    await send_method(**kwargs, **send_kwargs)
 
             except TelegramRetryAfter as e:
                 print(f"⚠️ Попали на лимит API при копировании счастливого поста #{post_num}. Ждем {e.retry_after} сек...")
                 await asyncio.sleep(e.retry_after + 1)
-                await copy_with_retry()
+                await send_with_retry(content_to_send, header)
             except TelegramBadRequest as e:
-                print(f"❌ BadRequest при копировании счастливого поста #{post_num}: {e}")
+                print(f"❌ BadRequest при отправке счастливого поста #{post_num}: {e}")
 
-        await copy_with_retry()
-
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        await send_with_retry(content.copy(), notification_text)
+        print(f"✅ Счастливый пост #{post_num} ({label}) отправлен в канал.")
 
     except Exception as e:
         import traceback
