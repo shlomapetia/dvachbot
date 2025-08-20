@@ -51,7 +51,7 @@ from deanonymizer import (
     DEANON_SURNAMES,
     generate_deanon_info,
 )
-from help_text import HELP_TEXT, HELP_TEXT_EN, HELP_TEXT_COMMANDS, HELP_TEXT_EN_COMMANDS, generate_boards_list, THREAD_PROMO_TEXT_RU, THREAD_PROMO_TEXT_EN
+from help_text import HELP_TEXT_COMMANDS, HELP_TEXT_EN_COMMANDS, generate_boards_list, THREAD_PROMO_TEXT_RU, THREAD_PROMO_TEXT_EN
 from japanese_translator import anime_transform, get_random_anime_image, get_monogatari_image
 from summarize import summarize_text_with_hf
 from thread_texts import thread_messages
@@ -357,61 +357,65 @@ SPAM_RULES = {
 def restore_backup_on_start():
     """
     Забирает файлы из backup-репозитория с повторными попытками.
-    Возвращает True в случае успеха, False в случае полной неудачи.
+    Восстанавливает как новые (.gz), так и старые (.json) форматы кэша.
     """
     repo_url = "https://github.com/shlomapetia/dvachbot-backup.git"
     backup_dir = "/app/backup"
-    max_attempts = 3  # Количество попыток
+    max_attempts = 3
     
-    # --- Логика без изменений: быстрая проверка для перезапусков ---
-    # Если файлы state уже существуют локально, считаем это успешным запуском,
-    # чтобы не зависеть от GitHub при каждом перезапуске.
     if glob.glob("*_state.json"):
         print("✅ Локальные файлы состояния найдены, восстановление из git не требуется.")
         return True
     
-    # --- Основной цикл клонирования (без изменений) ---
     for attempt in range(max_attempts):
         try:
             if os.path.exists(backup_dir):
                 shutil.rmtree(backup_dir)
             
             print(f"Попытка клонирования бэкапа #{attempt+1}...")
-            # --- ИЗМЕНЕНИЕ: Увеличен таймаут до 180 секунд ---
-            subprocess.run([
-                "git", "clone", "--depth", "1", repo_url, backup_dir
-            ], check=True, timeout=180)
+            subprocess.run(
+                ["git", "clone", "--depth", "1", repo_url, backup_dir],
+                check=True, timeout=180
+            )
             
             backup_files = glob.glob(os.path.join(backup_dir, "*_state.json"))
             if not backup_files:
                 print("⚠️ Файлы для восстановления в репозитории не найдены, запуск с чистого состояния.")
                 return True
             
+            # Добавляем оба формата файлов кэша
+            backup_files += glob.glob(os.path.join(backup_dir, "*_reply_cache.json.gz"))
             backup_files += glob.glob(os.path.join(backup_dir, "*_reply_cache.json"))
             
-            for src_path in backup_files:
+            # --- Логика для предотвращения дублирования ---
+            # Если для доски есть и .gz, и .json, оставляем только .gz
+            final_files_to_copy = {}
+            for f in backup_files:
+                # Получаем "базовое имя" файла, например, 'b_reply_cache'
+                base_name = os.path.basename(f).replace('.json','').replace('.gz','')
+                # Если файла с таким базовым именем еще нет, или текущий файл - сжатый, добавляем/обновляем
+                if base_name not in final_files_to_copy or f.endswith('.gz'):
+                    final_files_to_copy[base_name] = f
+
+            for src_path in final_files_to_copy.values():
                 shutil.copy2(src_path, os.getcwd())
             
-            print(f"✅ Восстановлено {len(backup_files)} файлов из backup")
+            print(f"✅ Восстановлено {len(final_files_to_copy)} файлов из backup")
             return True
         
         except Exception as e:
             print(f"❌ Ошибка при восстановлении (попытка {attempt+1}): {e}")
             time.sleep(5)
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Резервная проверка после сбоя клонирования ---
     print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Все попытки восстановления из git провалились.")
     
-    # В качестве последнего шанса проверяем, существуют ли локальные файлы.
-    # Это может спасти бота, если git-операции не работают, но состояние в файловой системе сохранилось.
     if glob.glob("*_state.json"):
         print("⚠️ Не удалось обновить бэкап из Git, но найдены локальные файлы состояния. Запускаемся с ними.")
         return True
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Локальные файлы состояния также отсутствуют. Невозможно запустить бота.")
-    return False # Полная неудача
-
+    return False
+    
 async def healthcheck(request):
     print("🚀 Получен запрос на healthcheck")
     return web.Response(text="Bot is alive")
@@ -466,57 +470,59 @@ async def git_commit_and_push():
 def sync_git_operations(token: str) -> bool:
     """
     Синхронные Git-операции для бэкапа. Оптимизировано для сред с медленным диском.
-    Клонирует репозиторий только один раз.
+    Работает с новым форматом .json.gz и удаляет старые .json файлы.
     """
     GIT_TIMEOUT = 45
-    GIT_LOCAL_TIMEOUT = 30  # Таймаут для локальных операций увеличен
+    GIT_LOCAL_TIMEOUT = 30
     
     try:
         work_dir = "/tmp/git_backup"
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot-backup.git"
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизированная логика инициализации репозитория ---
+        # Логика инициализации репозитория остается без изменений
         if not os.path.exists(os.path.join(work_dir, ".git")):
+            # ... (вся логика git init, remote add, pull остается здесь без изменений)
             print("Git: Локальный репозиторий не найден, создаю...")
             if os.path.exists(work_dir):
                 shutil.rmtree(work_dir)
             os.makedirs(work_dir)
-            
-            # Инициализируем пустой репозиторий
             subprocess.run(["git", "-C", work_dir, "init"], check=True, timeout=GIT_LOCAL_TIMEOUT)
             subprocess.run(["git", "-C", work_dir, "remote", "add", "origin", repo_url], check=True, timeout=GIT_LOCAL_TIMEOUT)
             subprocess.run(["git", "-C", work_dir, "branch", "-m", "main"], check=True, timeout=GIT_LOCAL_TIMEOUT)
-            
-            # Пытаемся получить последнюю версию, но без истории (--depth=1)
-            # --allow-unrelated-histories нужен для последующих push
             pull_cmd = ["git", "-C", work_dir, "pull", "origin", "main", "--depth=1", "--allow-unrelated-histories"]
             print(f"Git: Выполняю начальную загрузку: {' '.join(pull_cmd)}")
             result = subprocess.run(pull_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
-            
-            # Ошибка на этом этапе не критична, если репозиторий пуст. Продолжаем.
             if result.returncode != 0:
                 print(f"⚠️ Git: Не удалось выполнить начальную загрузку (возможно, репозиторий пуст). Код {result.returncode}:\n{result.stderr}")
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        # --- Копирование файлов ---
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновление логики копирования и очистки ---
+        
+        # 1. Копируем state-файлы и новые сжатые кэши
         files_to_copy_state = glob.glob(os.path.join(os.getcwd(), "*_state.json"))
-        files_to_copy_state += glob.glob(os.path.join(os.getcwd(), "*_reply_cache.json"))
+        files_to_copy_state += glob.glob(os.path.join(os.getcwd(), "*_reply_cache.json.gz"))
         
         for src_path in files_to_copy_state:
             shutil.copy2(src_path, work_dir)
 
+        # 2. Копируем архивы тредов (без изменений)
         archives_dir_in_repo = os.path.join(work_dir, "archives")
         os.makedirs(archives_dir_in_repo, exist_ok=True)
         files_to_copy_archives = glob.glob(os.path.join(DATA_DIR, "archive_*.html"))
         
         for src_path in files_to_copy_archives:
             shutil.copy2(src_path, archives_dir_in_repo)
+            
+        # 3. Ищем старые .json файлы в рабочей копии git для удаления
+        old_json_caches_in_repo = glob.glob(os.path.join(work_dir, "*_reply_cache.json"))
+        if old_json_caches_in_repo:
+            print(f"Git: Найдены устаревшие .json кэши для удаления: {[os.path.basename(f) for f in old_json_caches_in_repo]}")
+            # Выполняем git rm для каждого старого файла
+            for old_file in old_json_caches_in_repo:
+                subprocess.run(["git", "-C", work_dir, "rm", os.path.basename(old_file)], check=False, timeout=GIT_LOCAL_TIMEOUT)
 
-        if not files_to_copy_state and not files_to_copy_archives:
-            print("⚠️ Нет файлов для бэкапа, пропуск.")
-            return True
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        # --- Локальные операции ---
+        # Локальные операции (без изменений)
         subprocess.run(["git", "-C", work_dir, "config", "user.name", "Backup Bot"], check=True, timeout=GIT_LOCAL_TIMEOUT)
         subprocess.run(["git", "-C", work_dir, "config", "user.email", "backup@dvachbot.com"], check=True, timeout=GIT_LOCAL_TIMEOUT)
         subprocess.run(["git", "-C", work_dir, "add", "."], check=True, timeout=GIT_LOCAL_TIMEOUT)
@@ -527,11 +533,9 @@ def sync_git_operations(token: str) -> bool:
             return True
 
         commit_msg = f"Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
         subprocess.run(["git", "-C", work_dir, "commit", "-m", commit_msg], check=True, timeout=GIT_TIMEOUT)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        # --- Отправка ---
+        # Отправка (без изменений)
         push_cmd = ["git", "-C", work_dir, "push", "--force", "origin", "main"]
         print(f"Git: Выполняю: {' '.join(push_cmd)}")
         result = subprocess.run(push_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
@@ -546,6 +550,7 @@ def sync_git_operations(token: str) -> bool:
             return False
 
     except subprocess.TimeoutExpired as e:
+        # ... (обработка ошибок без изменений)
         print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Таймаут операции git! Команда '{' '.join(e.cmd)}' не завершилась за {e.timeout} секунд.")
         print(f"--- stderr ---\n{e.stderr or '(пусто)'}\n--- stdout ---\n{e.stdout or '(пусто)'}")
         return False
@@ -1121,8 +1126,8 @@ def _sync_save_reply_cache(
     all_message_to_post: dict,
     all_messages_storage_meta: dict
 ):
-    """Синхронная, блокирующая функция для сохранения кэша. Работает с переданными ей данными."""
-    reply_file = f"{board_id}_reply_cache.json"
+    """Синхронная, блокирующая функция для сохранения кэша. Работает с переданными ей данными, записывая сжатый gzip-файл."""
+    reply_file = f"{board_id}_reply_cache.json.gz"
     try:
         recent_posts_set = set(recent_board_posts)
 
@@ -1131,7 +1136,6 @@ def _sync_save_reply_cache(
                 os.remove(reply_file)
             return True
 
-        # Собираем данные для сохранения из переданных копий, фильтруя по recent_posts_set
         new_data = {
             "post_to_messages": {
                 str(p_num): data
@@ -1143,7 +1147,6 @@ def _sync_save_reply_cache(
                 for (uid, mid), p_num in all_message_to_post.items()
                 if p_num in recent_posts_set
             },
-            # Фильтруем метаданные по списку recent_board_posts, как в оригинале
             "messages_storage_meta": {
                 str(p_num): all_messages_storage_meta[p_num]
                 for p_num in recent_board_posts
@@ -1151,8 +1154,8 @@ def _sync_save_reply_cache(
             }
         }
 
-        # Сохраняем новые данные
-        with open(reply_file, 'w', encoding='utf-8') as f:
+        # Используем gzip.open в текстовом режиме 'wt' для сохранения сжатого JSON
+        with gzip.open(reply_file, 'wt', encoding='utf-8') as f:
             json.dump(new_data, f, ensure_ascii=False, indent=2)
 
         return True
@@ -1332,53 +1335,64 @@ def load_archived_post(post_num):
 
 def load_reply_cache(board_id: str):
     """
-    Читаем reply_cache для конкретной доски, восстанавливаем общие словари
-    с ПРОВЕРКОЙ на принадлежность поста к доске для предотвращения загрязнения кэша.
+    Читает reply_cache для конкретной доски, обеспечивая бесшовный переход
+    со старого формата (.json) на новый сжатый (.json.gz).
     """
     global message_to_post, post_to_messages, messages_storage
     
-    reply_file = f"{board_id}_reply_cache.json"
-    if not os.path.exists(reply_file) or os.path.getsize(reply_file) == 0:
-        return
+    new_reply_file = f"{board_id}_reply_cache.json.gz"
+    old_reply_file = f"{board_id}_reply_cache.json"
+    
+    reply_file = None
+    is_gzipped = False
+
+    if os.path.exists(new_reply_file) and os.path.getsize(new_reply_file) > 0:
+        reply_file = new_reply_file
+        is_gzipped = True
+    elif os.path.exists(old_reply_file) and os.path.getsize(old_reply_file) > 0:
+        reply_file = old_reply_file
+    else:
+        return # Нет ни нового, ни старого файла
 
     try:
-        with open(reply_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
+        if is_gzipped:
+            with gzip.open(reply_file, "rt", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            with open(reply_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+    except (json.JSONDecodeError, OSError, gzip.BadGzipFile) as e:
         print(f"Файл {reply_file} повреждён ({e}), игнорирую")
         return
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Логика самоочистки кэша при загрузке ---
-
-    # 1. Сначала отбираем только те посты, которые действительно принадлежат этой доске
+    # Логика валидации данных остается той же
     valid_post_nums = set()
     for p_str, meta in data.get("messages_storage_meta", {}).items():
-        # Проверяем, что метаданные поста содержат board_id и он соответствует файлу
-        if meta.get("board_id") == board_id:
+        # Валидируем только если board_id присутствует, иначе доверяем файлу
+        # Это обеспечивает совместимость со старым форматом, где поля board_id в meta могло не быть
+        if "board_id" not in meta or meta.get("board_id") == board_id:
             p = int(p_str)
             valid_post_nums.add(p)
             
-            # Загружаем метаданные только для валидных постов
             if 'timestamp' in meta:
                 dt = datetime.fromisoformat(meta['timestamp'])
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=UTC)
+                
+                # Присваиваем board_id из метаданных, если он есть, иначе из имени файла
+                final_board_id = meta.get("board_id", board_id)
                 messages_storage[p] = {
                     "author_id": meta["author_id"],
                     "timestamp": dt,
                     "author_message_id": meta.get("author_msg"),
-                    "board_id": meta["board_id"] # Используем board_id из метаданных
+                    "board_id": final_board_id
                 }
 
-    # 2. Восстанавливаем словари, используя только номера валидных постов
     loaded_post_count = 0
     for p_str, mapping in data.get("post_to_messages", {}).items():
         p_num = int(p_str)
         if p_num in valid_post_nums:
-            post_to_messages[p_num] = {
-                int(uid): mid
-                for uid, mid in mapping.items()
-            }
+            post_to_messages[p_num] = { int(uid): mid for uid, mid in mapping.items() }
             loaded_post_count += 1
             
     for key, post_num in data.get("message_to_post", {}).items():
@@ -1386,9 +1400,8 @@ def load_reply_cache(board_id: str):
             uid, mid = map(int, key.split("_"))
             message_to_post[(uid, mid)] = post_num
             
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-            
-    print(f"[{board_id}] reply-cache загружен: {loaded_post_count} постов (очищено)")
+    status = "сжато" if is_gzipped else "старый формат"
+    print(f"[{board_id}] reply-cache загружен: {loaded_post_count} постов ({status})")
 
 async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | None = None):
     """Обработчик корректного сохранения данных ВСЕХ досок перед остановкой."""
@@ -1691,7 +1704,7 @@ async def setup_pinned_messages(bots: dict[str, Bot]):
         
         # Выбираем правильный текст помощи и генерируем список досок на нужном языке
         if board_id == 'int':
-            base_help_text = HELP_TEXT_EN
+            base_help_text = random.choice(HELP_TEXT_EN_COMMANDS)
             boards_header = "🌐 <b>All boards:</b>"
             board_links = "\n".join(
                 f"<b>{config['name']}</b> {config['description_en']} - {config['username']}"
@@ -1710,7 +1723,7 @@ async def setup_pinned_messages(bots: dict[str, Bot]):
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         else:
-            base_help_text = HELP_TEXT
+            base_help_text = random.choice(HELP_TEXT_COMMANDS)
             boards_header = "🌐 <b>Все доски:</b>"
             board_links = "\n".join(
                 f"<b>{config['name']}</b> {config['description']} - {config['username']}"
@@ -4177,27 +4190,47 @@ async def cb_create_thread_confirm(callback: types.CallbackQuery, state: FSMCont
     user_s = b_data['user_state'].setdefault(user_id, {})
     user_s['last_thread_creation'] = now_ts
 
-    success_phrases = thread_messages.get(lang, {}).get('create_success', [])
-    default_success_text = f"Thread '{title}' created!" if lang == 'en' else f"Тред «{title}» создан!"
-    success_text = random.choice(success_phrases).format(title=title) if success_phrases else default_success_text
+    notification_text = random.choice(thread_messages.get(lang, {}).get('new_thread_public_notification', [])).format(title=title)
+    if not notification_text:
+        notification_text = f"Создан новый тред: «<b>{title}</b>»"
 
-    header, pnum = await format_header(board_id)
-    content = {'type': 'text', 'header': header, 'text': success_text, 'is_system_message': True}
-    messages_storage[pnum] = {'author_id': 0, 'timestamp': now_dt, 'content': content, 'board_id': board_id}
-    await message_queues[board_id].put({'recipients': b_data['users']['active'], 'content': content, 'post_num': pnum, 'board_id': board_id})
+    bot_username = BOARD_CONFIG[board_id]['username'].lstrip('@')
+    deeplink_url = f"https://t.me/{bot_username}?start=thread_{thread_id}"
+    button_text = "Войти в тред" if lang == 'ru' else "Enter Thread"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=button_text, url=deeplink_url)]
+    ])
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Форматирование ОП-поста ---
+    header, pnum_notify = await format_header(board_id)
+    content_notify = {'type': 'text', 'header': header, 'text': notification_text, 'is_system_message': True}
+    messages_storage[pnum_notify] = {'author_id': 0, 'timestamp': now_dt, 'content': content_notify, 'board_id': board_id}
+    await message_queues[board_id].put({
+        'recipients': b_data['users']['active'], 
+        'content': content_notify, 
+        'post_num': pnum_notify, 
+        'board_id': board_id, 
+        'keyboard': keyboard
+    })
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Ручное создание ОП-поста без трансляции в общий чат ---
+    
+    # 1. Обновляем локацию пользователя ДО создания поста.
+    # Это ключевой шаг, который предотвратит отправку поста в общий чат,
+    # так как `process_new_post` не найдет получателей в 'main'.
+    user_s['location'] = thread_id
+    user_s['last_location_switch'] = now_ts
+    
+    # 2. Используем process_new_post, который теперь не будет делать рассылку
+    # благодаря обновленной локации пользователя. Он корректно сохранит пост
+    # и отправит его только автору.
     formatted_op_text = f"<b>ОП-ПОСТ</b>\n_______________________________\n{op_post_text}"
     op_post_content = {'type': 'text', 'text': formatted_op_text}
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-    
+
     await process_new_post(
         bot_instance=callback.bot, board_id=board_id, user_id=user_id, content=op_post_content,
         reply_to_post=None, is_shadow_muted=False
     )
-    
-    user_s['location'] = thread_id
-    user_s['last_location_switch'] = now_ts
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     await callback.answer()
     try:
