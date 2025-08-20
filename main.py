@@ -357,7 +357,8 @@ SPAM_RULES = {
 def restore_backup_on_start():
     """
     Забирает файлы из backup-репозитория с повторными попытками.
-    Восстанавливает как новые (.gz), так и старые (.json) форматы кэша.
+    Восстанавливает как новые (.gz), так и старые (.json) форматы кэша,
+    а также корректно восстанавливает директорию `data`.
     """
     repo_url = "https://github.com/shlomapetia/dvachbot-backup.git"
     backup_dir = "/app/backup"
@@ -378,29 +379,37 @@ def restore_backup_on_start():
                 check=True, timeout=180
             )
             
-            backup_files = glob.glob(os.path.join(backup_dir, "*_state.json"))
-            if not backup_files:
-                print("⚠️ Файлы для восстановления в репозитории не найдены, запуск с чистого состояния.")
-                return True
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: УДАЛЕН ПРЕЖДЕВРЕМЕННЫЙ ВЫХОД ---
             
-            # Добавляем оба формата файлов кэша
-            backup_files += glob.glob(os.path.join(backup_dir, "*_reply_cache.json.gz"))
-            backup_files += glob.glob(os.path.join(backup_dir, "*_reply_cache.json"))
-            
-            # --- Логика для предотвращения дублирования ---
-            # Если для доски есть и .gz, и .json, оставляем только .gz
-            final_files_to_copy = {}
-            for f in backup_files:
-                # Получаем "базовое имя" файла, например, 'b_reply_cache'
-                base_name = os.path.basename(f).replace('.json','').replace('.gz','')
-                # Если файла с таким базовым именем еще нет, или текущий файл - сжатый, добавляем/обновляем
-                if base_name not in final_files_to_copy or f.endswith('.gz'):
-                    final_files_to_copy[base_name] = f
+            # 1. Восстанавливаем файлы из корня бэкапа (state, reply_cache)
+            root_backup_files = glob.glob(os.path.join(backup_dir, "*_state.json"))
+            root_backup_files += glob.glob(os.path.join(backup_dir, "*_reply_cache.json.gz"))
+            root_backup_files += glob.glob(os.path.join(backup_dir, "*_reply_cache.json"))
 
-            for src_path in final_files_to_copy.values():
-                shutil.copy2(src_path, os.getcwd())
+            final_root_files = {}
+            for f in root_backup_files:
+                base_name = os.path.basename(f).replace('.json','').replace('.gz','')
+                if base_name not in final_root_files or f.endswith('.gz'):
+                    final_root_files[base_name] = f
             
-            print(f"✅ Восстановлено {len(final_files_to_copy)} файлов из backup")
+            if not final_root_files:
+                print("⚠️ Корневые файлы состояния в репозитории не найдены.")
+            else:
+                for src_path in final_root_files.values():
+                    shutil.copy2(src_path, os.getcwd())
+                print(f"✅ Восстановлено {len(final_root_files)} файлов из корня бэкапа.")
+
+            # 2. Восстанавливаем директорию 'data' целиком, если она есть
+            backup_data_dir = os.path.join(backup_dir, DATA_DIR)
+            if os.path.isdir(backup_data_dir):
+                shutil.copytree(backup_data_dir, DATA_DIR, dirs_exist_ok=True)
+                print(f"✅ Директория '{DATA_DIR}' успешно восстановлена из бэкапа.")
+            else:
+                print(f"⚠️ Директория '{DATA_DIR}' в бэкапе не найдена.")
+
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
+            print(f"✅ Восстановление из backup завершено.")
             return True
         
         except Exception as e:
@@ -471,53 +480,53 @@ def sync_git_operations(token: str) -> bool:
     """
     Синхронные Git-операции для бэкапа. Оптимизировано для сред с медленным диском.
     Работает с новым форматом .json.gz и удаляет старые .json файлы.
+    САМОСТОЯТЕЛЬНО ОБНОВЛЯЕТ СТРУКТУРУ РЕПОЗИТОРИЯ.
     """
-    GIT_TIMEOUT = 45
-    GIT_LOCAL_TIMEOUT = 30
+    GIT_TIMEOUT = 90  # Увеличим таймаут для надежности
+    GIT_LOCAL_TIMEOUT = 60
     
     try:
         work_dir = "/tmp/git_backup"
         repo_url = f"https://{token}@github.com/shlomapetia/dvachbot-backup.git"
 
-        # Логика инициализации репозитория остается без изменений
-        if not os.path.exists(os.path.join(work_dir, ".git")):
-            # ... (вся логика git init, remote add, pull остается здесь без изменений)
-            print("Git: Локальный репозиторий не найден, создаю...")
-            if os.path.exists(work_dir):
-                shutil.rmtree(work_dir)
-            os.makedirs(work_dir)
-            subprocess.run(["git", "-C", work_dir, "init"], check=True, timeout=GIT_LOCAL_TIMEOUT)
-            subprocess.run(["git", "-C", work_dir, "remote", "add", "origin", repo_url], check=True, timeout=GIT_LOCAL_TIMEOUT)
-            subprocess.run(["git", "-C", work_dir, "branch", "-m", "main"], check=True, timeout=GIT_LOCAL_TIMEOUT)
-            pull_cmd = ["git", "-C", work_dir, "pull", "origin", "main", "--depth=1", "--allow-unrelated-histories"]
-            print(f"Git: Выполняю начальную загрузку: {' '.join(pull_cmd)}")
-            result = subprocess.run(pull_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
-            if result.returncode != 0:
-                print(f"⚠️ Git: Не удалось выполнить начальную загрузку (возможно, репозиторий пуст). Код {result.returncode}:\n{result.stderr}")
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: УМНАЯ СИНХРОНИЗАЦИЯ ВМЕСТО ПРОСТОГО КЛОНИРОВАНИЯ ---
 
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Обновление логики копирования и очистки ---
+        # 1. Подготовка рабочей директории
+        if os.path.exists(work_dir):
+            shutil.rmtree(work_dir)
+        os.makedirs(work_dir)
+
+        # 2. Клонируем репозиторий с последними изменениями
+        print("Git: Клонирую последнюю версию бэкапа...")
+        subprocess.run(
+            ["git", "clone", "--depth", "1", repo_url, work_dir],
+            check=True, timeout=GIT_TIMEOUT
+        )
+        print("Git: Клонирование завершено.")
         
-        # 1. Копируем state-файлы и новые сжатые кэши
-        files_to_copy_state = glob.glob(os.path.join(os.getcwd(), "*_state.json"))
-        files_to_copy_state += glob.glob(os.path.join(os.getcwd(), "*_reply_cache.json.gz"))
+        # 3. Копируем АКТУАЛЬНЫЕ локальные файлы ПОВЕРХ скачанных
+        # Это ключевой шаг: мы обновляем бэкап свежими данными с сервера
+        print("Git: Обновляю локальную копию бэкапа актуальными файлами...")
         
-        for src_path in files_to_copy_state:
+        # Копируем файлы из корня проекта (*_state.json, *_reply_cache.json.gz)
+        root_files_to_copy = glob.glob(os.path.join(os.getcwd(), "*_state.json"))
+        root_files_to_copy += glob.glob(os.path.join(os.getcwd(), "*_reply_cache.json.gz"))
+        
+        for src_path in root_files_to_copy:
             shutil.copy2(src_path, work_dir)
 
-        # 2. Копируем архивы тредов (без изменений)
-        archives_dir_in_repo = os.path.join(work_dir, "archives")
-        os.makedirs(archives_dir_in_repo, exist_ok=True)
-        files_to_copy_archives = glob.glob(os.path.join(DATA_DIR, "archive_*.html"))
-        
-        for src_path in files_to_copy_archives:
-            shutil.copy2(src_path, archives_dir_in_repo)
+        # Рекурсивно копируем всю директорию DATA_DIR, если она существует
+        local_data_dir = os.path.join(os.getcwd(), DATA_DIR)
+        backup_data_dir = os.path.join(work_dir, DATA_DIR)
+        if os.path.exists(local_data_dir):
+            shutil.copytree(local_data_dir, backup_data_dir, dirs_exist_ok=True)
             
-        # 3. Ищем старые .json файлы в рабочей копии git для удаления
+        # 4. Удаляем устаревшие .json кэши из рабочей копии git (если они там еще есть)
         old_json_caches_in_repo = glob.glob(os.path.join(work_dir, "*_reply_cache.json"))
         if old_json_caches_in_repo:
             print(f"Git: Найдены устаревшие .json кэши для удаления: {[os.path.basename(f) for f in old_json_caches_in_repo]}")
-            # Выполняем git rm для каждого старого файла
             for old_file in old_json_caches_in_repo:
+                # Используем git rm для отслеживания удаления
                 subprocess.run(["git", "-C", work_dir, "rm", os.path.basename(old_file)], check=False, timeout=GIT_LOCAL_TIMEOUT)
 
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
@@ -536,21 +545,27 @@ def sync_git_operations(token: str) -> bool:
         subprocess.run(["git", "-C", work_dir, "commit", "-m", commit_msg], check=True, timeout=GIT_TIMEOUT)
 
         # Отправка (без изменений)
-        push_cmd = ["git", "-C", work_dir, "push", "--force", "origin", "main"]
+        push_cmd = ["git", "-C", work_dir, "push", "origin", "main"] # Убрал --force, т.к. мы теперь работаем с актуальной версией
         print(f"Git: Выполняю: {' '.join(push_cmd)}")
         result = subprocess.run(push_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
-        print("GIT PUSH STDOUT:", result.stdout)
-        print("GIT PUSH STDERR:", result.stderr)
-
+        
         if result.returncode == 0:
             print(f"✅ Бекап успешно отправлен в GitHub.")
             return True
         else:
-            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА PUSH (код {result.returncode}):\n--- stderr ---\n{result.stderr}\n--- stdout ---\n{result.stdout}")
-            return False
+            print(f"❌ ОШИБКА PUSH (код {result.returncode}):\n{result.stderr}")
+            # Если обычный push не прошел, пробуем --force как крайнюю меру
+            print("Git: Обычный push не удался, пробую принудительный push...")
+            force_push_cmd = ["git", "-C", work_dir, "push", "--force", "origin", "main"]
+            force_result = subprocess.run(force_push_cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+            if force_result.returncode == 0:
+                print("✅ Принудительный push успешен.")
+                return True
+            else:
+                print(f"❌ КРИТИЧЕСКАЯ ОШИБКА ДАЖЕ С --force (код {force_result.returncode}):\n{force_result.stderr}")
+                return False
 
     except subprocess.TimeoutExpired as e:
-        # ... (обработка ошибок без изменений)
         print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Таймаут операции git! Команда '{' '.join(e.cmd)}' не завершилась за {e.timeout} секунд.")
         print(f"--- stderr ---\n{e.stderr or '(пусто)'}\n--- stdout ---\n{e.stdout or '(пусто)'}")
         return False
@@ -3475,9 +3490,6 @@ async def _send_thread_info_if_applicable(message: types.Message, board_id: str)
         pass # Игнорируем, если не удалось доставить
 
 # ========== КОМАНДЫ ==========
-
-
-
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext, board_id: str | None): # Добавлен state в аргументы
     user_id = message.from_user.id
@@ -3501,9 +3513,10 @@ async def cmd_start(message: types.Message, state: FSMContext, board_id: str | N
             # --- ИЗМЕНЕНИЕ: Используем cb_create_thread_confirm для унификации входа ---
             # Создаем фейковый колбэк, чтобы передать в функцию
             fake_callback_query = types.CallbackQuery(
-                id=str(user_id), from_user=message.from_user, chat_instance="", message=message
+                id=str(user_id), from_user=message.from_user, chat_instance="", message=message,
+                data=f"enter_thread_{thread_id}" # Добавляем data для совместимости
             )
-            await cb_enter_thread(fake_callback_query) # Вызываем хендлер входа в тред
+            await cq_enter_thread(fake_callback_query, board_id) # Вызываем хендлер входа в тред
             
             try:
                 await message.delete()
