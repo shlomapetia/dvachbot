@@ -7587,14 +7587,10 @@ async def initialize_bots() -> tuple[dict[str, Bot], AiohttpSession]:
     for board_id, config in BOARD_CONFIG.items():
         token = config.get("token")
         if token:
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-            try:
-                bot = Bot(token=token, default=default_properties, session=session)
-                await bot.get_me() # Проверяем токен на валидность
-                bots_temp[board_id] = bot
-                print(f"✅ Бот для доски '{board_id}' успешно инициализирован.")
-            except Exception as e:
-                print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать бота для доски '{board_id}'. Ошибка: {e}. Пропускаем...")
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: УБИРАЕМ ПРОВЕРКУ ТОКЕНА await bot.get_me() ---
+            # Просто создаем объект бота. Проверка токена произойдет автоматически
+            # при первом же запросе к API, уже внутри запущенного event loop.
+            bots_temp[board_id] = Bot(token=token, default=default_properties, session=session)
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         else:
             print(f"⚠️ Токен для доски '{board_id}' не найден, пропуск.")
@@ -7638,7 +7634,7 @@ async def main():
     session = None
     healthcheck_site = None
     global GLOBAL_BOTS
-
+    
     try:
         global is_shutting_down
         loop = asyncio.get_running_loop()
@@ -7654,17 +7650,18 @@ async def main():
             print("❌ Не найдено ни одного токена бота. Завершение работы.")
             return
 
-        print(f"✅ Инициализировано {len(GLOBAL_BOTS)} ботов: {list(GLOBAL_BOTS.keys())}")
+        active_bots_list = list(GLOBAL_BOTS.values()) # --- ИЗМЕНЕНИЕ: Получаем список здесь
+        print(f"✅ Инициализировано {len(active_bots_list)} ботов: {list(GLOBAL_BOTS.keys())}")
         
         await setup_pinned_messages(GLOBAL_BOTS)
-        # --- ИЗМЕНЕНИЕ: Запускаем healthcheck до настройки сигналов ---
+        
         try:
             healthcheck_site = await start_healthcheck()
         except Exception as e:
             print(f"⛔ Не удалось запустить healthcheck сервер: {e}. Продолжаем без него.")
             healthcheck_site = None
 
-        setup_lifecycle_handlers(loop, list(GLOBAL_BOTS.values()), healthcheck_site)
+        setup_lifecycle_handlers(loop, active_bots_list, healthcheck_site)
         await start_background_tasks(GLOBAL_BOTS)
 
         print("⏳ Даем 7 секунд на инициализацию перед обработкой сообщений...")
@@ -7672,7 +7669,7 @@ async def main():
 
         print("🚀 Запускаем polling для всех ботов...")
         await dp.start_polling(
-            *GLOBAL_BOTS.values(), skip_updates=False,
+            *active_bots_list, skip_updates=False,
             allowed_updates=dp.resolve_used_update_types(),
             reset_webhook=True, timeout=60
         )
@@ -7681,16 +7678,15 @@ async def main():
         import traceback
         print(f"🔥 Критическая ошибка в main: {e}\n{traceback.format_exc()}")
     finally:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: ГАРАНТИРУЕМ ПРАВИЛЬНЫЙ ПОРЯДОК ---
         if not is_shutting_down:
-            # Если shutdown еще не был запущен (например, из-за ошибки в polling), запускаем его
+            # --- ИЗМЕНЕНИЕ: Убедимся, что active_bots_list определен ---
+            if 'active_bots_list' not in locals():
+                active_bots_list = list(GLOBAL_BOTS.values())
             await graceful_shutdown(active_bots_list, healthcheck_site)
         
         if session:
-            # Закрываем сессию ПОСЛЕ того, как graceful_shutdown завершил все свои дела
             await session.close()
             print("✅ Общая HTTP сессия закрыта.")
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         if os.path.exists(lock_file):
             try:
