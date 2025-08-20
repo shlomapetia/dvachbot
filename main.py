@@ -2423,7 +2423,7 @@ async def process_new_post(
 async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, post_num: int, content: dict):
     """
     Надежно пересылает копию поста в реал-тайм архивный канал,
-    обрабатывая лимиты API. (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+    обрабатывая лимиты API. (ФИНАЛЬНАЯ ИСПРАВЛЕННАЯ ВЕРСИЯ)
     """
     archive_bot = GLOBAL_BOTS.get(ARCHIVE_POSTING_BOT_ID)
     if not archive_bot:
@@ -2431,34 +2431,36 @@ async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, po
         return
 
     try:
-        board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
-        lang = 'en' if board_id == 'int' else 'ru'
-        
-        header_text = f"<b>{board_name}</b> | {'Post' if lang == 'en' else 'Пост'} №{post_num}"
-        
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Передаем переменные в send_with_retry явно ---
-
         # Функция для повторной попытки при ошибке Rate Limit
         async def send_with_retry(content_to_send: dict, header: str):
             try:
-                # Собираем финальный текст ВНУТРИ функции, используя переданные аргументы
                 text_or_caption_raw = content_to_send.get('text') or content_to_send.get('caption') or ""
                 final_text = f"{header}\n\n{text_or_caption_raw}"
-                content_type = content_to_send.get("type")
+                
+                # --- НАЧАЛО ИЗМЕНЕНИЙ (ФИКС #2): Правильное получение типа контента ---
+                ct_raw = content_to_send.get("type")
+                # Эта строка надежно извлекает 'sticker' из 'ContentType.STICKER' или 'sticker' из 'sticker'
+                content_type = str(ct_raw).split('.')[-1].lower()
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
                 if content_type == "media_group":
                     builder = MediaGroupBuilder()
                     caption_added = False
                     for media in content_to_send.get('media', []):
+                        # --- ИСПРАВЛЕНИЕ: Правильное получение типа медиа внутри группы ---
+                        media_type_str = str(media['type']).split('.')[-1].lower()
+                        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                         caption = final_text if not caption_added else None
-                        builder.add(type=media['type'], media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
+                        builder.add(type=media_type_str, media=media['file_id'], caption=caption, parse_mode="HTML" if caption else None)
                         caption_added = True
                     await archive_bot.send_media_group(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, media=builder.build())
 
                 elif content_type in ['sticker', 'voice', 'video_note']:
                     method_name = f"send_{content_type}"
                     send_method = getattr(archive_bot, method_name)
+                    # --- ИСПРАВЛЕНИЕ: Передаем file_id напрямую, а не через kwargs ---
                     sent_msg = await send_method(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, **{content_type: content_to_send.get("file_id")})
+                    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                     await archive_bot.send_message(chat_id=REALTIME_ARCHIVE_CHANNEL_ID, text=header, parse_mode="HTML", reply_to_message_id=sent_msg.message_id)
                 
                 else:
@@ -2478,18 +2480,23 @@ async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, po
             except TelegramRetryAfter as e:
                 print(f"⚠️ Попали на лимит API при отправке в архив. Ждем {e.retry_after} секунд...")
                 await asyncio.sleep(e.retry_after)
-                # Повторяем отправку, передавая те же аргументы
                 await send_with_retry(content_to_send, header)
 
+        # Собираем данные один раз снаружи
+        board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
+        lang = 'en' if board_id == 'int' else 'ru'
+        header_text = f"<b>{board_name}</b> | {'Post' if lang == 'en' else 'Пост'} №{post_num}"
+        
         # Вызываем send_with_retry, передавая ей нужные данные
         await send_with_retry(content.copy(), header_text)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     except Exception as e:
         import traceback
         print(f"❌ Не удалось отправить пост #{post_num} в реал-тайм архив: {e}")
-        traceback.print_exc()
-
+        # Печатаем traceback только для непредвиденных ошибок, а не для AttributeError
+        if not isinstance(e, AttributeError):
+            traceback.print_exc()
+            
 async def _apply_mode_transformations(content: dict, board_id: str) -> dict:
     """
     Централизованно применяет все трансформации режимов с улучшенной обработкой аниме-изображений.
