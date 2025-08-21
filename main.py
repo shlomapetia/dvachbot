@@ -1373,7 +1373,6 @@ def load_reply_cache(board_id: str):
     else:
         return
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: ЗАЩИТА ОТ ПОВРЕЖДЕННЫХ ФАЙЛОВ ---
     try:
         if is_gzipped:
             with gzip.open(reply_file, "rt", encoding="utf-8") as f:
@@ -1384,14 +1383,12 @@ def load_reply_cache(board_id: str):
     except (json.JSONDecodeError, OSError, gzip.BadGzipFile, EOFError) as e:
         print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА (НО ПЕРЕХВАЧЕНА): Файл кэша {reply_file} повреждён ({e}).")
         print("     Файл будет проигнорирован. При следующем сохранении он будет перезаписан.")
-        # Попытаемся удалить битый файл, чтобы не мешал в будущем
         try:
             os.remove(reply_file)
         except OSError:
             pass
-        return # Прерываем загрузку кэша для ЭТОЙ доски, но бот продолжит работу
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+        return
+    
     valid_post_nums = set()
     for p_str, meta in data.get("messages_storage_meta", {}).items():
         if "board_id" not in meta or meta.get("board_id") == board_id:
@@ -1412,7 +1409,7 @@ def load_reply_cache(board_id: str):
                         "board_id": final_board_id
                     }
             except (ValueError, TypeError):
-                continue # Пропускаем поврежденную запись
+                continue
 
     loaded_post_count = 0
     for p_str, mapping in data.get("post_to_messages", {}).items():
@@ -1510,92 +1507,76 @@ async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | Non
     print("✅ Процедура graceful_shutdown завершена. Сессия будет закрыта в main().")
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
-def _sync_clean_message_to_post(
+def _sync_collect_keys_to_delete(
     current_message_to_post: dict, 
     actual_post_nums: set
-) -> dict:
+) -> list:
     """
-    Синхронная функция для выполнения ресурсоемкой фильтрации словаря.
-    Удаляет только те записи, которые ссылаются на уже удаленные посты.
+    Синхронная функция для сбора ключей, которые нужно удалить из message_to_post.
+    НЕ создает новый словарь, что экономит память.
     """
-    # Создаем новый словарь только с валидными записями
-    valid_entries = {
-        key: post_num
-        for key, post_num in current_message_to_post.items()
-        if post_num in actual_post_nums
-    }
-    return valid_entries
+    keys_to_delete = [
+        key for key, post_num in current_message_to_post.items()
+        if post_num not in actual_post_nums
+    ]
+    return keys_to_delete
 
 async def auto_memory_cleaner():
     """Полная и честная очистка мусора каждые 10 минут с выносом тяжелых операций."""
-    cleanup_counter = 0
     loop = asyncio.get_running_loop()
 
     while True:
-        cleanup_counter += 1
         await asyncio.sleep(600)  # 10 минут
 
-        # --- Блок 1: Очистка старых постов (быстрые операции под блокировкой) ---
-        deleted_posts_count = 0
+        # --- Блок 1: Очистка старых постов ---
+        deleted_post_keys = []
         async with storage_lock:
             if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
                 to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
-                oldest_post_keys = sorted(messages_storage.keys())[:to_delete_count]
-                deleted_posts_count = len(oldest_post_keys)
+                deleted_post_keys = sorted(messages_storage.keys())[:to_delete_count]
                 
-                # Удаляем из messages_storage и post_to_messages
-                for post_num in oldest_post_keys:
+                for post_num in deleted_post_keys:
                     messages_storage.pop(post_num, None)
                     post_to_messages.pop(post_num, None)
 
-        if deleted_posts_count > 0:
-            print(f"🧹 Очистка памяти: удалено {deleted_posts_count} старых постов.")
+        if deleted_post_keys:
+            print(f"🧹 Очистка памяти: удалено {len(deleted_post_keys)} старых постов из основного хранилища.")
         
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Блок 2 заменен на новую, корректную логику ---
-        # Неблокирующая очистка message_to_post от ссылок на удаленные посты
+        # --- Блок 2: Неблокирующая очистка message_to_post ---
         async with storage_lock:
-            # Копируем данные для безопасной работы в другом потоке
             actual_post_nums = set(messages_storage.keys())
             message_to_post_copy = message_to_post.copy()
-        
-        # Выполняем тяжелую фильтрацию в отдельном потоке
-        cleaned_message_to_post = await loop.run_in_executor(
+
+        keys_to_delete = await loop.run_in_executor(
             save_executor,
-            _sync_clean_message_to_post,
+            _sync_collect_keys_to_delete,
             message_to_post_copy,
             actual_post_nums
         )
         
-        # Атомарно обновляем основной словарь
-        async with storage_lock:
-            initial_count = len(message_to_post)
-            message_to_post.clear()
-            message_to_post.update(cleaned_message_to_post)
-            removed_count = initial_count - len(message_to_post)
+        if keys_to_delete:
+            async with storage_lock:
+                for key in keys_to_delete:
+                    message_to_post.pop(key, None)
+            print(f"🧹 Очистка message_to_post: удалено {len(keys_to_delete)} неактуальных связей.")
         
-        if removed_count > 0:
-            print(f"🧹 Очистка message_to_post: удалено {removed_count} неактуальных связей (осталось {len(message_to_post)})")
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-        # --- Блок 3: Очистка данных досок (без изменений) ---
+        # --- Блок 3: Агрессивная очистка данных неактивных пользователей ---
         async with storage_lock:
             for board_id in BOARDS:
                 b_data = board_data[board_id]
                 now_utc = datetime.now(UTC)
+                
+                users_with_active_restrictions = {uid for uid, expiry in b_data.get('mutes', {}).items() if expiry > now_utc}
+                users_with_active_restrictions.update({uid for uid, expiry in b_data.get('shadow_mutes', {}).items() if expiry > now_utc})
 
-                if len(b_data['message_counter']) > 100:
-                    top_users = sorted(b_data['message_counter'].items(), key=lambda x: x[1], reverse=True)[:100]
-                    b_data['message_counter'] = defaultdict(int, top_users)
-
-                inactive_threshold = now_utc - timedelta(hours=24)
-                active_mutes = {uid for uid, expiry in b_data.get('mutes', {}).items() if expiry > now_utc}
-                active_shadow_mutes = {uid for uid, expiry in b_data.get('shadow_mutes', {}).items() if expiry > now_utc}
+                inactive_threshold = timedelta(hours=12)
                 
                 users_to_purge = [
                     uid for uid, last_time in b_data.get('last_activity', {}).items()
-                    if last_time < inactive_threshold and uid not in active_mutes and uid not in active_shadow_mutes
+                    if (now_utc - last_time) > inactive_threshold and uid not in users_with_active_restrictions
                 ]
                 
+                purged_count = 0
                 for user_id in users_to_purge:
                     b_data['last_activity'].pop(user_id, None)
                     b_data['last_texts'].pop(user_id, None)
@@ -1604,6 +1585,11 @@ async def auto_memory_cleaner():
                     b_data['spam_violations'].pop(user_id, None)
                     b_data['spam_tracker'].pop(user_id, None)
                     b_data['last_user_msgs'].pop(user_id, None)
+                    b_data['message_counter'].pop(user_id, None)
+                    purged_count += 1
+                
+                if purged_count > 0:
+                    print(f"🧹 [{board_id}] Очищены данные {purged_count} неактивных пользователей.")
 
                 for user_id in list(b_data.get('mutes', {}).keys()):
                     if b_data['mutes'][user_id] < now_utc:
@@ -1620,8 +1606,21 @@ async def auto_memory_cleaner():
                     if not spam_tracker_board[user_id]:
                         del spam_tracker_board[user_id]
         
-        # --- Блок 4: Очистка трекера реакций (без изменений) ---
+        # --- Блок 4: Очистка зависших медиа-групп ---
         now_ts = time.time()
+        stale_groups = [
+            group_id for group_id in current_media_groups
+            if group_id not in media_group_timers
+        ]
+        if stale_groups:
+             print(f"🧹 Найдено {len(stale_groups)} зависших медиа-групп для очистки.")
+             for group_id in stale_groups:
+                 current_media_groups.pop(group_id, None)
+                 if group_id in media_group_timers:
+                     media_group_timers[group_id].cancel()
+                     media_group_timers.pop(group_id, None)
+
+        # --- Блок 5: Очистка трекера реакций ---
         tracker_inactive_threshold_sec = 24 * 3600
         keys_to_delete_from_tracker = [
             author_id for author_id, timestamps in author_reaction_notify_tracker.items()
@@ -1631,6 +1630,7 @@ async def auto_memory_cleaner():
             for author_id in keys_to_delete_from_tracker:
                 del author_reaction_notify_tracker[author_id]
 
+        # --- Финальный вызов сборщика мусора ---
         gc.collect()
         print(f"🧹 Очистка памяти завершена. Следующая через 10 минут.")
         
