@@ -1355,7 +1355,7 @@ def load_archived_post(post_num):
 def load_reply_cache(board_id: str):
     """
     Читает reply_cache для конкретной доски, обеспечивая бесшовный переход
-    со старого формата (.json) на новый сжатый (.json.gz).
+    со старого формата (.json) на новый сжатый (.json.gz) и защитой от битых файлов.
     """
     global message_to_post, post_to_messages, messages_storage
     
@@ -1371,8 +1371,9 @@ def load_reply_cache(board_id: str):
     elif os.path.exists(old_reply_file) and os.path.getsize(old_reply_file) > 0:
         reply_file = old_reply_file
     else:
-        return # Нет ни нового, ни старого файла
+        return
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: ЗАЩИТА ОТ ПОВРЕЖДЕННЫХ ФАЙЛОВ ---
     try:
         if is_gzipped:
             with gzip.open(reply_file, "rt", encoding="utf-8") as f:
@@ -1380,44 +1381,56 @@ def load_reply_cache(board_id: str):
         else:
             with open(reply_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-    except (json.JSONDecodeError, OSError, gzip.BadGzipFile) as e:
-        print(f"Файл {reply_file} повреждён ({e}), игнорирую")
-        return
+    except (json.JSONDecodeError, OSError, gzip.BadGzipFile, EOFError) as e:
+        print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА (НО ПЕРЕХВАЧЕНА): Файл кэша {reply_file} повреждён ({e}).")
+        print("     Файл будет проигнорирован. При следующем сохранении он будет перезаписан.")
+        # Попытаемся удалить битый файл, чтобы не мешал в будущем
+        try:
+            os.remove(reply_file)
+        except OSError:
+            pass
+        return # Прерываем загрузку кэша для ЭТОЙ доски, но бот продолжит работу
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # Логика валидации данных остается той же
     valid_post_nums = set()
     for p_str, meta in data.get("messages_storage_meta", {}).items():
-        # Валидируем только если board_id присутствует, иначе доверяем файлу
-        # Это обеспечивает совместимость со старым форматом, где поля board_id в meta могло не быть
         if "board_id" not in meta or meta.get("board_id") == board_id:
-            p = int(p_str)
-            valid_post_nums.add(p)
-            
-            if 'timestamp' in meta:
-                dt = datetime.fromisoformat(meta['timestamp'])
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
+            try:
+                p = int(p_str)
+                valid_post_nums.add(p)
                 
-                # Присваиваем board_id из метаданных, если он есть, иначе из имени файла
-                final_board_id = meta.get("board_id", board_id)
-                messages_storage[p] = {
-                    "author_id": meta["author_id"],
-                    "timestamp": dt,
-                    "author_message_id": meta.get("author_msg"),
-                    "board_id": final_board_id
-                }
+                if 'timestamp' in meta:
+                    dt = datetime.fromisoformat(meta['timestamp'])
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=UTC)
+                    
+                    final_board_id = meta.get("board_id", board_id)
+                    messages_storage[p] = {
+                        "author_id": meta["author_id"],
+                        "timestamp": dt,
+                        "author_message_id": meta.get("author_msg"),
+                        "board_id": final_board_id
+                    }
+            except (ValueError, TypeError):
+                continue # Пропускаем поврежденную запись
 
     loaded_post_count = 0
     for p_str, mapping in data.get("post_to_messages", {}).items():
-        p_num = int(p_str)
-        if p_num in valid_post_nums:
-            post_to_messages[p_num] = { int(uid): mid for uid, mid in mapping.items() }
-            loaded_post_count += 1
+        try:
+            p_num = int(p_str)
+            if p_num in valid_post_nums:
+                post_to_messages[p_num] = { int(uid): mid for uid, mid in mapping.items() }
+                loaded_post_count += 1
+        except (ValueError, TypeError):
+            continue
             
     for key, post_num in data.get("message_to_post", {}).items():
-        if post_num in valid_post_nums:
-            uid, mid = map(int, key.split("_"))
-            message_to_post[(uid, mid)] = post_num
+        try:
+            if post_num in valid_post_nums:
+                uid, mid = map(int, key.split("_"))
+                message_to_post[(uid, mid)] = post_num
+        except (ValueError, TypeError):
+            continue
             
     status = "сжато" if is_gzipped else "старый формат"
     print(f"[{board_id}] reply-cache загружен: {loaded_post_count} постов ({status})")
@@ -1574,7 +1587,7 @@ async def auto_memory_cleaner():
                     top_users = sorted(b_data['message_counter'].items(), key=lambda x: x[1], reverse=True)[:100]
                     b_data['message_counter'] = defaultdict(int, top_users)
 
-                inactive_threshold = now_utc - timedelta(hours=12)
+                inactive_threshold = now_utc - timedelta(hours=24)
                 active_mutes = {uid for uid, expiry in b_data.get('mutes', {}).items() if expiry > now_utc}
                 active_shadow_mutes = {uid for uid, expiry in b_data.get('shadow_mutes', {}).items() if expiry > now_utc}
                 
@@ -2427,8 +2440,9 @@ async def process_new_post(
 
 async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, post_num: int, content: dict):
     """
-    Надежно пересылает копию поста в реал-тайм архивный канал, получая прямые ссылки на файлы.
-    (ФИНАЛЬНАЯ ВЕРСИЯ 4.0)
+    Надежно отправляет текстовую копию поста в реал-тайм архивный канал.
+    Для медиа используются текстовые заглушки.
+    (ВЕРСИЯ 7.0 - ВОЗВРАТ К ЗАГЛУШКАМ ДЛЯ СТАБИЛЬНОСТИ)
     """
     archive_bot = GLOBAL_BOTS.get(ARCHIVE_POSTING_BOT_ID)
     if not archive_bot:
@@ -2439,66 +2453,49 @@ async def _forward_post_to_realtime_archive(bot_instance: Bot, board_id: str, po
         board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
         lang = 'en' if board_id == 'int' else 'ru'
         header_text = f"<b>{board_name}</b> | {'Post' if lang == 'en' else 'Пост'} №{post_num}"
+
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Полный рефакторинг на текстовые заглушки ---
         
-        async def send_with_retry(content_to_send: dict, header: str):
+        text_content = ""
+        content_type_str = str(content.get("type", "")).split('.')[-1].lower()
+
+        if content_type_str == 'text':
+            text_content = content.get('text', '')
+        else:
+            # Для всех медиа-типов берем подпись, если она есть
+            text_content = content.get('caption', '') or ''
+            
+            # Создаем плейсхолдер для самого медиа
+            media_placeholders = {
+                'photo': '[Фото]', 'video': '[Видео]', 'animation': '[GIF]', 'sticker': '[Стикер]',
+                'document': '[Документ]', 'audio': '[Аудио]', 'voice': '[Голосовое сообщение]',
+                'video_note': '[Кружок]', 'media_group': '[Медиа-группа]'
+            }
+            placeholder = media_placeholders.get(content_type_str, f'[{content_type_str}]')
+            
+            # Собираем плейсхолдер и подпись
+            text_content = f"{placeholder}\n{text_content}".strip()
+
+        final_text = f"{header_text}\n\n{text_content}"
+        if len(final_text) > 4096:
+            final_text = final_text[:4093] + "..."
+
+        async def send_with_retry():
             try:
-                text_or_caption_raw = content_to_send.get('text') or content_to_send.get('caption') or ""
-                final_text = f"{header}\n\n{text_or_caption_raw}"
-                ct_raw = content_to_send.get("type")
-                content_type = str(ct_raw).split('.')[-1].lower()
-
-                kwargs = {'chat_id': REALTIME_ARCHIVE_CHANNEL_ID}
-
-                if content_type == 'text':
-                    if len(final_text) > 4096: final_text = final_text[:4093] + "..."
-                    await archive_bot.send_message(text=final_text, parse_mode="HTML", **kwargs)
-
-                elif content_type == "media_group":
-                    builder = MediaGroupBuilder()
-                    caption_added = False
-                    for media in content_to_send.get('media', []):
-                        media_type_str = str(media['type']).split('.')[-1].lower()
-                        caption = final_text if not caption_added else None
-                        
-                        # --- НАЧАЛО ИЗМЕНЕНИЙ: Получаем прямую ссылку ---
-                        file_info = await bot_instance.get_file(media['file_id'])
-                        file_url = bot_instance.session.api.file_url(bot_instance.token, file_info.file_path)
-                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-                        
-                        builder.add(type=media_type_str, media=file_url, caption=caption, parse_mode="HTML" if caption else None)
-                        caption_added = True
-                    await archive_bot.send_media_group(media=builder.build(), **kwargs)
-
-                else: # Все остальные типы медиа
-                    file_id = content_to_send.get("file_id")
-                    if not file_id: return
-                    
-                    # --- НАЧАЛО ИЗМЕНЕНИЙ: Получаем прямую ссылку ---
-                    file_info = await bot_instance.get_file(file_id)
-                    file_url = bot_instance.session.api.file_url(bot_instance.token, file_info.file_path)
-                    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-                    
-                    method_name = f"send_{content_type}"
-                    send_method = getattr(archive_bot, method_name)
-                    
-                    # Аргументы для отправки
-                    send_kwargs = {content_type: file_url}
-
-                    if content_type not in ['sticker', 'voice', 'video_note']:
-                        if len(final_text) > 1024: final_text = final_text[:1021] + "..."
-                        send_kwargs['caption'] = final_text
-                        send_kwargs['parse_mode'] = "HTML"
-
-                    await send_method(**kwargs, **send_kwargs)
-
+                await archive_bot.send_message(
+                    chat_id=REALTIME_ARCHIVE_CHANNEL_ID,
+                    text=final_text,
+                    parse_mode="HTML"
+                )
             except TelegramRetryAfter as e:
-                print(f"⚠️ Попали на лимит API при отправке в архив. Ждем {e.retry_after} секунд...")
+                print(f"⚠️ Попали на лимит API при отправке в архив. Ждем {e.retry_after} сек...")
                 await asyncio.sleep(e.retry_after + 1)
-                await send_with_retry(content_to_send, header)
+                await send_with_retry()
             except TelegramBadRequest as e:
                 print(f"❌ BadRequest при отправке поста #{post_num} в архив: {e}")
 
-        await send_with_retry(content.copy(), header_text)
+        await send_with_retry()
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     except Exception as e:
         import traceback
@@ -4519,13 +4516,13 @@ async def post_archive_to_channel(bots: dict[str, Bot], file_path: str, board_id
 
 async def post_special_num_to_channel(bots: dict[str, Bot], board_id: str, post_num: int, level: int, content: dict, author_id: int):
     """
-    Пересылает "счастливый" пост в канал архивов, получая прямые ссылки на файлы.
-    (ФИНАЛЬНАЯ ВЕРСИЯ 4.0)
+    Отправляет уведомление о "счастливом" посте в канал архивов.
+    Для медиа используются текстовые заглушки.
+    (ВЕРСИЯ 7.0 - ВОЗВРАТ К ЗАГЛУШКАМ ДЛЯ СТАБИЛЬНОСТИ)
     """
     archive_bot = GLOBAL_BOTS.get(ARCHIVE_POSTING_BOT_ID)
-    original_bot = GLOBAL_BOTS.get(board_id)
-    if not archive_bot or not original_bot:
-        print(f"⛔ Ошибка: не найден бот для постинга ('{ARCHIVE_POSTING_BOT_ID}') или бот доски ('{board_id}').")
+    if not archive_bot:
+        print(f"⛔ Ошибка: бот для постинга ('{ARCHIVE_POSTING_BOT_ID}') не найден.")
         return
         
     try:
@@ -4534,52 +4531,48 @@ async def post_special_num_to_channel(bots: dict[str, Bot], board_id: str, post_
         label = config['label'].upper()
         board_name = BOARD_CONFIG.get(board_id, {}).get('name', board_id)
 
-        notification_text = (
-            f"{emoji} <b>{label} #{post_num}</b> {emoji}\n\n"
-            f"<b>Доска:</b> {board_name}"
-        )
+        header = f"{emoji} <b>{label} #{post_num}</b> {emoji}\n\n<b>Доска:</b> {board_name}\n"
         
-        async def send_with_retry(content_to_send: dict, header: str):
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Логика на основе текстовых заглушек ---
+        
+        text_content = ""
+        content_type_str = str(content.get("type", "")).split('.')[-1].lower()
+
+        if content_type_str == 'text':
+            text_content = content.get('text', '')
+        else:
+            text_content = content.get('caption', '') or ''
+            
+            media_placeholders = {
+                'photo': '[Фото]', 'video': '[Видео]', 'animation': '[GIF]', 'sticker': '[Стикер]',
+                'document': '[Документ]', 'audio': '[Аудио]', 'voice': '[Голосовое сообщение]',
+                'video_note': '[Кружок]', 'media_group': '[Медиа-группа]'
+            }
+            placeholder = media_placeholders.get(content_type_str, f'[{content_type_str}]')
+            
+            text_content = f"{placeholder}\n{text_content}".strip()
+        
+        final_text = f"{header}\n{text_content}"
+        if len(final_text) > 4096:
+            final_text = final_text[:4093] + "..."
+
+        async def send_with_retry():
             try:
-                ct_raw = content_to_send.get("type")
-                content_type = str(ct_raw).split('.')[-1].lower()
-                kwargs = {'chat_id': ARCHIVE_CHANNEL_ID}
-
-                if content_type == 'text':
-                    text_content = content_to_send.get('text', '')
-                    full_text = f"{header}\n\n{text_content}"
-                    if len(full_text) > 4096: full_text = full_text[:4093] + "..."
-                    await archive_bot.send_message(text=full_text, parse_mode="HTML", **kwargs)
-                else:
-                    file_id = content_to_send.get("file_id")
-                    if not file_id: return
-
-                    file_info = await original_bot.get_file(file_id)
-                    file_url = original_bot.session.api.file_url(original_bot.token, file_info.file_path)
-
-                    method_name = f"send_{content_type}"
-                    send_method = getattr(archive_bot, method_name)
-                    
-                    send_kwargs = {content_type: file_url}
-                    original_caption = content_to_send.get('caption')
-                    
-                    full_caption = f"{header}\n\n{original_caption}" if original_caption else header
-                    if len(full_caption) > 1024: full_caption = full_caption[:1021] + "..."
-                    
-                    send_kwargs['caption'] = full_caption
-                    send_kwargs['parse_mode'] = "HTML"
-                    
-                    await send_method(**kwargs, **send_kwargs)
-
+                await archive_bot.send_message(
+                    chat_id=ARCHIVE_CHANNEL_ID,
+                    text=final_text,
+                    parse_mode="HTML"
+                )
             except TelegramRetryAfter as e:
-                print(f"⚠️ Попали на лимит API при копировании счастливого поста #{post_num}. Ждем {e.retry_after} сек...")
+                print(f"⚠️ Попали на лимит API при отправке счастливого поста #{post_num}. Ждем {e.retry_after} сек...")
                 await asyncio.sleep(e.retry_after + 1)
-                await send_with_retry(content_to_send, header)
+                await send_with_retry()
             except TelegramBadRequest as e:
                 print(f"❌ BadRequest при отправке счастливого поста #{post_num}: {e}")
 
-        await send_with_retry(content.copy(), notification_text)
-        print(f"✅ Счастливый пост #{post_num} ({label}) отправлен в канал.")
+        await send_with_retry()
+        print(f"✅ Уведомление о счастливом посте #{post_num} ({label}) отправлено в канал.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     except Exception as e:
         import traceback
