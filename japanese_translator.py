@@ -919,59 +919,50 @@ async def _fetch_from_booru_api(
     headers: dict
 ) -> Optional[str]:
     """
-    Универсальная функция для получения изображения с Booru-подобных API.
-    Использует предзагруженную конфигурацию и умную фильтрацию негативных тегов.
+    Универсальная и отказоустойчивая функция для получения изображения с Booru-подобных API.
+    Использует предзагруженную конфигурацию, корректные теги и полную обработку ошибок.
     """
     config = BOORU_API_CONFIGS.get(api_type)
     if not config:
         print(f"[_fetch_from_booru_api] Unknown api_type: {api_type}")
         return None
 
-    random_tag = 'sort:random' if api_type == 'gelbooru' else 'order:random'
-
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Умная фильтрация негативных тегов ---
-    active_negative_tags = config['negative_tags'].copy()
-
-    # Применяем фильтрацию только для Gelbooru, где обнаружен конфликт
-    if api_type == 'gelbooru':
-        if 'breasts' in base_tags:
-            active_negative_tags = [t for t in active_negative_tags if t not in ('-large_breasts', '-huge_breasts')]
-        if 'ass' in base_tags:
-            active_negative_tags = [t for t in active_negative_tags if t not in ('-large_ass', '-huge_ass')]
-        # Если базовый тег подразумевает наличие пениса, отключаем фильтры на его размер
-        if any(tag in base_tags for tag in ('blowjob', 'cum')):
-             active_negative_tags = [t for t in active_negative_tags if t not in ('-large_penis', '-huge_penis', '-monster_cock')]
-
-    negative_tags_str = " ".join(active_negative_tags)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-    
-    final_tags = f'{base_tags} {rating_tag} {negative_tags_str} {random_tag}'
-    
-    params = config['params'].copy()
-    params['tags'] = final_tags
-
-    user = config['user']
-    key = config['key']
-
-    if user and key:
-        params[config['user_param']] = user
-        params[config['key_param']] = key
-        print(f"[{api_type.capitalize()} API] Using authenticated request.")
-    else:
-        print(f"[{api_type.capitalize()} API] WARNING: Using anonymous request.")
-
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Полный рефакторинг с полной обработкой ошибок ---
     try:
+        random_tag = 'sort:random' if api_type == 'gelbooru' else 'order:random'
+
+        active_negative_tags = config['negative_tags'].copy()
+
+        if api_type == 'gelbooru':
+            if 'breasts' in base_tags:
+                active_negative_tags = [t for t in active_negative_tags if t not in ('-large_breasts', '-huge_breasts')]
+            if 'ass' in base_tags:
+                active_negative_tags = [t for t in active_negative_tags if t not in ('-large_ass', '-huge_ass')]
+            if any(tag in base_tags for tag in ('blowjob', 'cum')):
+                 active_negative_tags = [t for t in active_negative_tags if t not in ('-large_penis', '-huge_penis', '-monster_cock')]
+
+        negative_tags_str = " ".join(active_negative_tags)
+        final_tags = f'{base_tags} {rating_tag} {negative_tags_str} {random_tag}'
+        
+        params = config['params'].copy()
+        params['tags'] = final_tags
+
+        user = config['user']
+        key = config['key']
+
+        if user and key:
+            params[config['user_param']] = user
+            params[config['key_param']] = key
+            print(f"[{api_type.capitalize()} API] Using authenticated request.")
+        else:
+            print(f"[{api_type.capitalize()} API] WARNING: Using anonymous request.")
+
         async with session.get(config['url'], params=params, headers=headers) as response:
             if response.status != 200:
                 print(f"[{api_type.capitalize()}] API Error: Status {response.status}")
                 return None
             
-            try:
-                data = await response.json()
-            except aiohttp.ContentTypeError:
-                print(f"[{api_type.capitalize()}] Error: Response is not valid JSON. Body: {await response.text()}")
-                return None
-
+            data = await response.json()
             if not data:
                 print(f"[{api_type.capitalize()}] Error: Empty data structure received.")
                 return None
@@ -996,3 +987,8 @@ async def _fetch_from_booru_api(
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         print(f"[{api_type.capitalize()}] Request failed due to network/timeout error: {e}")
         return None
+    except Exception as e:
+        # Этот блок ловит любые непредвиденные ошибки (KeyError, TypeError, IndexError, JSONDecodeError)
+        print(f"⛔ [{api_type.capitalize()}] CRITICAL PARSING ERROR: {type(e).__name__}: {e}")
+        return None
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
