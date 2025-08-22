@@ -1,8 +1,11 @@
 # japanese_translator.py
+import asyncio
 import random
 import re
 import os
 import aiohttp
+from dotenv import load_dotenv
+from typing import Optional
 from aiohttp import ClientTimeout
 try:
     from main import escape_html
@@ -11,7 +14,8 @@ except ImportError:
     def escape_html(text: str) -> str:
         if not text: return text
         return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-
+        
+load_dotenv()
 
 # --- НОВЫЙ СУЩЕСТВЕННО РАСШИРЕННЫЙ СЛОВАРЬ ПЕРЕВОДОВ ---
 JAPANESE_WORD_REPLACEMENTS = {
@@ -569,11 +573,13 @@ KAWAII_EMOJIS = [
     escape_html(' (ﾉ◕ヮ◕)ﾉ*:･ﾟ✧ '), ' (●´□`)♡ ', ' (´｡• ω •｡`) ', escape_html(' (っ◕‿◕)っ '), escape_html(' (づ￣ ³￣)づ '),
     escape_html(' (ﾉ>ω<)ﾉ :｡･:*:･ﾟ’★,｡･:*:♪･ﾟ’☆ '), ' (●´ω｀●)ゞ ', ' ✧･ﾟ: *✧･ﾟ:* ',
     ' (●´艸`) ', escape_html(' (✪‿✪)ノ '),
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Унифицированное экранирование ---
     ' ^_^', ' ^o^', escape_html(' >_<'), ' T_T', ' ;_;', ' :3', ' :D', ' :P', ' :O', ' :*', escape_html(' <3'),
     ' (^_^) ', ' (^o^) ', escape_html(' (>_<) '), ' (T_T) ', ' (;_;) ',
     escape_html(' (｡>﹏<｡) '), ' (¬_¬) ', ' (⌒_⌒;) ', ' (＾▽＾) ', ' (￣ヘ￣) ', escape_html(' (╯°□°）╯︵ ┻━┻ '), ' ヽ(´▽`)/ ',
     ' ¯\\_(ツ)_//¯ ', ' ( ͡° ͜ʖ ͡°) ', escape_html(' (っ˘ω˘ς ) '), ' (´･ω･`) ', ' (＾ω＾) ',
     ' (；一_一) ', ' (´･_･`) ', ' (⊙_◎) ', ' (・_・;) ',
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 ]
 
 # --- Остальные константы без изменений ---
@@ -587,6 +593,53 @@ NUMERALS = {0: '零', 1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六'
 PARTICLES = ['ね', 'よ', 'か', 'わ', 'の', 'な', 'ぞ', 'ぜ', 'が', 'に', 'で', 'と', 'も', 'や', 'さ', 'かしら', 'とも', 'って', 'たら', 'のに', 'ので', 'から', 'し', 'こと']
 NYA_INTERJECTIONS = ['にゃあ', 'にゃん', 'にゃーん', 'にゃお', 'みゃあ', 'にゃっ', 'にゃんにゃん', 'にゃー', 'にゃんぱすー']
 END_PHRASES = ['です', 'ですね', 'ですよ', 'ですわ', 'なのです', 'かもしれません', 'でしょう', 'だろう', 'かもね', 'に違いない', 'に決まってる', 'だと思う', 'かな', 'なんだよね', 'ってこと', 'わけ', 'はず', 'みたい', 'そう', 'らしい', 'ようだ', 'みたいだ', '感じ', '気がする']
+
+# --- НОВЫЕ КОНСТАНТЫ ДЛЯ ФИЛЬТРАЦИИ DANBOORU ---
+# Верифицировано по https://danbooru.donmai.us/tags
+DANBOORU_NEGATIVE_TAGS = [
+    # Базовые фильтры безопасности
+    "-shota", "-cub",
+    # Жестокость и неприятный контент
+    "-guro", "-gore", "-vore",
+    # Копро-тематика
+    "-scat", "-coprophilia", "-coprophagia", # Тег "-copro" был неэффективен и удален
+    # Фетиши
+    "-femdom", "-inflation",
+    # Гипертрофированные/гигантские части тела
+    "-huge_breasts", "-hyper_breasts",
+    "-huge_ass", "-hyper_ass",
+    "-huge_penis", "-hyper_penis",
+    "-monster_cock",
+]
+
+# Верифицировано по https://gelbooru.com/index.php?page=tags&s=list
+GELBOORU_NEGATIVE_TAGS = [
+    # Базовые фильтры безопасности
+    "-shota", "-cub",
+    # Жестокость и неприятный контент
+    "-guro", "-gore", "-vore",
+    # Копро-тематика
+    "-scat", "-feces",
+    # Фетиши
+    "-femdom", "-inflation",
+    # Гипертрофированные/гигантские части тела (здесь основные теги - "large_*")
+    "-large_breasts", "-huge_breasts",
+    "-large_ass", "-huge_ass",
+    "-large_penis", "-huge_penis",
+    "-monster_cock",
+]
+
+# --- КОНСТАНТЫ С БАЗОВЫМИ ТЕГАМИ ДЛЯ УЛУЧШЕНИЯ РАЗНООБРАЗИЯ ---
+GELBOORU_NSFW_BASE_TAGS = [
+    "1girl", "solo", "ass", "pussy", "breasts", "panties", "thighhighs",
+    "nude", "sex", "oral", "blowjob", "cum", "ahegao", "masturbation",
+    "animated", "blush", "bestiality", "bondage", "feet", "nipples", "school_uniform",
+    "yuri", "bikini", "lingerie", "hentai",
+]
+
+WAIFUPICS_NSFW_CATEGORIES = [
+    "waifu", "neko", "blowjob",
+]
 
 def convert_number(num_str):
     try:
@@ -697,12 +750,31 @@ def anime_transform(text):
     return result.strip()
 
 
-async def get_random_anime_image():
+async def _process_api_response(api_source: str, response: aiohttp.ClientResponse) -> Optional[str]:
     """
-    Получает URL случайной аниме-картинки с нескольких API.
-    С вероятностью 10% пытается получить GIF-анимацию.
-    С вероятностью 25% пытается получить NSFW контент.
-    Автоматически переключается на следующий источник в случае ошибки.
+    Вспомогательная функция для обработки JSON-ответа от API изображений.
+    Извлекает URL из разных форматов ответа (waifu.pics, nekos.best).
+    """
+    try:
+        data = await response.json()
+    except aiohttp.ContentTypeError:
+        print(f"[{api_source}] Error: Response is not a valid JSON. Body: {await response.text()}")
+        return None
+
+    image_url = None
+    if "waifu.pics" in api_source:
+        image_url = data.get('url')
+    elif "nekos.best" in api_source:
+        results = data.get('results')
+        if results and isinstance(results, list) and results[0]:
+            image_url = results[0].get('url')
+    
+    return image_url
+
+async def get_random_anime_image() -> Optional[str]:
+    """
+    Получает URL случайной аниме-картинки с нескольких API, включая Gelbooru для NSFW.
+    (ВЕРСЯ С ИСПРАВЛЕННОЙ ФИЛЬТРАЦИЕЙ ТЕГОВ)
     """
     is_nsfw_request = random.random() < 0.25
     is_gif_request = random.random() < 0.1
@@ -712,165 +784,258 @@ async def get_random_anime_image():
     if is_gif_request:
         print(f"[ANIME DEBUG] Attempting to fetch a GIF (NSFW: {is_nsfw_request})...")
         if is_nsfw_request:
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Расширенный список NSFW GIF категорий ---
             apis = [
-                # waifu.pics имеет разнообразные NSFW GIF категории
-                {"url": f"https://api.waifu.pics/nsfw/{random.choice(['blowjob'])}", "source": "waifu.pics (nsfw-gif)"},
-                # nekos.best в основном сфокусирован на определенных действиях
-                {"url": f"https://nekos.best/api/v2/{random.choice(['cum', 'bJ'])}", "source": "nekos.best (nsfw-gif)"}
+                {"type": "fallback", "url": f"https://api.waifu.pics/nsfw/{random.choice(['blowjob'])}", "source": "waifu.pics (nsfw-gif)"},
+                {"type": "fallback", "url": f"https://nekos.best/api/v2/{random.choice(['cum', 'bJ'])}", "source": "nekos.best (nsfw-gif)"}
             ]
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         else:
-            # SFW GIF категории
             apis = [
-                {"url": f"https://api.waifu.pics/sfw/{random.choice(['dance', 'wave', 'blush', 'bonk', 'smile', 'highfive'])}", "source": "waifu.pics (sfw-gif)"},
-                {"url": f"https://nekos.best/api/v2/{random.choice(['cuddle', 'pat', 'baka', 'blush', 'slap', 'wink'])}", "source": "nekos.best (sfw-gif)"}
+                {"type": "fallback", "url": f"https://api.waifu.pics/sfw/{random.choice(['dance', 'wave', 'blush', 'bonk', 'smile', 'highfive'])}", "source": "waifu.pics (sfw-gif)"},
+                {"type": "fallback", "url": f"https://nekos.best/api/v2/{random.choice(['cuddle', 'pat', 'baka', 'blush', 'slap', 'wink'])}", "source": "nekos.best (sfw-gif)"}
             ]
     else:
         print(f"[ANIME DEBUG] Attempting to fetch a static image (NSFW: {is_nsfw_request})...")
         if is_nsfw_request:
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Расширенный список NSFW Static категорий ---
             apis = [
-                # waifu.pics имеет две основные категории для NSFW изображений
-                {"url": f"https://api.waifu.pics/nsfw/{random.choice(['waifu', 'neko'])}", "source": "waifu.pics (nsfw-static)"},
-                # nekos.best предлагает более широкий выбор статических NSFW тегов
-                {"url": f"https://nekos.best/api/v2/{random.choice(['pussy', 'neko', 'feet', 'yuri', 'cum', 'erofeet', 'blowjob', 'lewd'])}", "source": "nekos.best (nsfw-static)"}
+                {"type": "booru", "source": "gelbooru"},
+                {"type": "fallback", "url": f"https://api.waifu.pics/nsfw/{random.choice(['waifu', 'neko'])}", "source": "waifu.pics (nsfw-static)"},
+                {"type": "fallback", "url": f"https://nekos.best/api/v2/{random.choice(['pussy', 'neko', 'feet', 'yuri', 'cum', 'erofeet', 'blowjob', 'lewd'])}", "source": "nekos.best (nsfw-static)"}
             ]
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         else:
-            # SFW Static категории
             apis = [
-                {"url": "https://api.waifu.pics/sfw/waifu", "source": "waifu.pics (sfw-static)"},
-                {"url": "https://nekos.best/api/v2/waifu", "source": "nekos.best (sfw-static)"}
+                {"type": "fallback", "url": "https://api.waifu.pics/sfw/waifu", "source": "waifu.pics (sfw-static)"},
+                {"type": "fallback", "url": "https://nekos.best/api/v2/waifu", "source": "nekos.best (sfw-static)"}
             ]
 
     random.shuffle(apis)
 
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as session:
+    headers = {'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'}
+    
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as session:
         for api in apis:
             try:
-                async with session.get(api["url"]) as response:
-                    if response.status != 200:
-                        print(f"[{api['source']}] API Error: Status {response.status}")
-                        continue
+                image_url = None
+                api_source_name = api.get("source", "Unknown").capitalize()
 
-                    data = await response.json()
-                    image_url = None
+                if api.get("type") == "booru":
+                    # --- ИЗМЕНЕНИЕ: Упрощенный и корректный вызов ---
+                    image_url = await _fetch_from_booru_api(
+                        session=session,
+                        api_type=api["source"],
+                        base_tags=random.choice(GELBOORU_NSFW_BASE_TAGS),
+                        rating_tag=random.choice(['rating:explicit', 'rating:questionable']),
+                        headers=headers
+                    )
+                elif api.get("type") == "fallback":
+                    async with session.get(api["url"]) as response:
+                        if response.status != 200:
+                            print(f"[{api_source_name}] API Error: Status {response.status}")
+                            continue
+                        image_url = await _process_api_response(api['source'], response)
+                
+                if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
+                    print(f"[{api_source_name}] Image received: {image_url}")
+                    return image_url
+                else:
+                    if image_url is not None:
+                        print(f"[{api_source_name}] Invalid image URL or format: {image_url}")
 
-                    if "waifu.pics" in api["source"]:
-                        if data and 'url' in data:
-                            image_url = data['url']
-                    elif "nekos.best" in api["source"]:
-                        if data and 'results' in data and data['results']:
-                            image_url = data['results'][0]['url']
-                    
-                    if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
-                        print(f"[{api['source']}] Image received: {image_url}")
-                        return image_url
-                    else:
-                        print(f"[{api['source']}] Invalid image URL or format: {image_url}")
-
-            except Exception as e:
-                print(f"[{api['source']}] Request failed: {e}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                print(f"[{api.get('source', 'Unknown').capitalize()}] Request failed due to network/timeout error: {e}")
                 continue
     
     print("⛔ All random image APIs failed to provide an image.")
     return None
-    
-async def get_monogatari_image():
+
+async def get_monogatari_image() -> Optional[str]:
     """
     Получает URL случайной картинки из серии Monogatari.
-    С вероятностью 25% ищет NSFW (questionable, explicit) контент.
-    Использует Danbooru (с аутентификацией, если возможно) как основной источник
-    и другие API как резервные.
+    (ФИНАЛЬНАЯ ВЕРСИЯ С РЕФАКТОРИНГОМ)
     """
     apis = [
-        {"type": "danbooru", "source": "Danbooru"},
+        {"type": "booru", "source": "danbooru"},
+        {"type": "booru", "source": "gelbooru"},
         {"type": "fallback", "url": "https://api.waifu.pics/sfw/waifu", "source": "waifu.pics (fallback)"},
         {"type": "fallback", "url": "https://nekos.best/api/v2/waifu", "source": "nekos.best (fallback)"}
     ]
     random.shuffle(apis)
 
-    headers = {
-        'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'
-    }
+    headers = {'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'}
     
-    if random.random() < 0.25:
+    if random.random() < 0.15:
         rating_tag = random.choice(['rating:questionable', 'rating:explicit'])
-        print(f"[Danbooru API] Attempting to fetch NSFW Monogatari image with tag: {rating_tag}.")
     else:
         rating_tag = 'rating:safe'
-        print("[Danbooru API] Attempting to fetch SFW Monogatari image.")
-        
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Переход на мета-тег order:random ---
-    params_danbooru = {
-        # Добавляем order:random для получения случайного поста
-        'tags': f'monogatari_series {rating_tag} order:random',
-        'limit': 1 # Для order:random рекомендуется limit=1
-    }
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
-    danbooru_user = os.getenv("DANBOORU_USERNAME")
-    danbooru_key = os.getenv("DANBOORU_API_KEY")
-
-    if danbooru_user and danbooru_key:
-        params_danbooru['login'] = danbooru_user
-        params_danbooru['api_key'] = danbooru_key
-        print("[Danbooru API] Using authenticated request.")
-    else:
-        print("[Danbooru API] WARNING: Using anonymous request. May be unstable or return empty results.")
-
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
         for api in apis:
             try:
                 image_url = None
-                if api["type"] == "danbooru":
-                    async with session.get("https://danbooru.donmai.us/posts.json", params=params_danbooru, headers=headers) as response:
-                        if response.status != 200:
-                            print(f"[{api['source']}] API Error: Status {response.status}")
-                            continue
-
-                        data = await response.json()
-                        if not data or not isinstance(data, list):
-                            print(f"[{api['source']}] Error: Empty or invalid response.")
-                            continue
-                        
-                        # --- НАЧАЛО ИЗМЕНЕНИЙ: Упрощенная обработка ответа ---
-                        # Так как limit=1, мы просто берем первый (и единственный) пост
-                        selected_post = data[0]
-                        if 'file_url' in selected_post and selected_post['file_url'].lower().endswith(('.png', '.jpg', '.jpeg')):
-                            image_url = selected_post['file_url']
-                        else:
-                            print(f"[{api['source']}] No valid image found in the response post.")
-                            continue
-                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-                else: # Логика для резервных API (она всегда SFW)
+                if api["type"] == "booru":
+                    # --- ИЗМЕНЕНИЕ: Упрощенный вызов ---
+                    image_url = await _fetch_from_booru_api(
+                        session=session,
+                        api_type=api["source"],
+                        base_tags='monogatari_series',
+                        rating_tag=rating_tag,
+                        headers=headers
+                    )
+                else:
                     async with session.get(api["url"]) as response:
                         if response.status != 200:
                             print(f"[{api['source']}] API Error: Status {response.status}")
                             continue
+                        image_url = await _process_api_response(api['source'], response)
 
-                        data = await response.json()
-                        
-                        if "waifu.pics" in api["source"]:
-                            if data and 'url' in data:
-                                image_url = data['url']
-                        elif "nekos.best" in api["source"]:
-                            if data and 'results' in data and data['results']:
-                                image_url = data['results'][0]['url']
-
-                if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
-                    print(f"[{api['source']}] Image received: {image_url}")
+                if image_url and image_url.lower().endswith(('.png', 'jpeg', '.jpg', '.gif', '.webp')):
+                    print(f"[{api['source'].capitalize()}] Image received: {image_url}")
                     return image_url
                 else:
                     if image_url is not None:
-                        print(f"[{api['source']}] Invalid image URL or format: {image_url}")
+                        print(f"[{api['source'].capitalize()}] Invalid image URL or format: {image_url}")
                     continue
 
-            except Exception as e:
-                print(f"[{api['source']}] Request failed: {e}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                print(f"[{api['source'].capitalize()}] Request failed due to network/timeout error: {e}")
                 continue
     
     print("⛔ All Monogatari-related and fallback APIs failed to provide an image.")
     return None
+
+async def get_nsfw_anime_image() -> Optional[str]:
+    """
+    Получает URL ГАРАНТИРОВАННО NSFW аниме-картинки с нескольких API.
+    (ФИНАЛЬНАЯ ВЕРСИЯ С РЕФАКТОРИНГОМ)
+    """
+    apis = [
+        {"type": "booru", "source": "gelbooru"},
+        {"type": "fallback", "url": f"https://api.waifu.pics/nsfw/{random.choice(WAIFUPICS_NSFW_CATEGORIES)}", "source": "waifu.pics (nsfw-static)"},
+        {"type": "fallback", "url": f"https://nekos.best/api/v2/{random.choice(['pussy', 'neko', 'feet', 'yuri', 'cum', 'erofeet', 'blowjob', 'lewd'])}", "source": "nekos.best (nsfw-static)"}
+    ]
+    random.shuffle(apis)
+
+    headers = {'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'}
+    
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as session:
+        for api in apis:
+            try:
+                image_url = None
+                api_source_name = api.get("source", "Unknown").capitalize()
+
+                if api.get("type") == "booru":
+                    # --- ИЗМЕНЕНИЕ: Упрощенный вызов ---
+                    image_url = await _fetch_from_booru_api(
+                        session=session,
+                        api_type=api["source"],
+                        base_tags=random.choice(GELBOORU_NSFW_BASE_TAGS),
+                        rating_tag=random.choice(['rating:explicit', 'rating:questionable']),
+                        headers=headers
+                    )
+                elif api.get("type") == "fallback":
+                    async with session.get(api["url"]) as response:
+                        if response.status != 200:
+                            print(f"[{api_source_name}] API Error: Status {response.status}")
+                            continue
+                        image_url = await _process_api_response(api['source'], response)
+                
+                if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
+                    print(f"[{api_source_name}] Image received: {image_url}")
+                    return image_url
+                else:
+                    if image_url is not None:
+                        print(f"[{api_source_name}] Invalid image URL or format: {image_url}")
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                print(f"[{api.get('source', 'Unknown').capitalize()}] Request failed due to network/timeout error: {e}")
+                continue
+    
+    print("⛔ All NSFW image APIs failed to provide an image.")
+    return None
+
+async def _fetch_from_booru_api(
+    session: aiohttp.ClientSession,
+    api_type: str,
+    base_tags: str,
+    rating_tag: str,
+    headers: dict
+) -> Optional[str]:
+    """
+    Универсальная функция для получения изображения с Booru-подобных API.
+    (ФИНАЛЬНАЯ ВЕРСИЯ С РЕФАКТОРИНГОМ)
+    """
+    api_configs = {
+        'danbooru': {
+            'url': "https://danbooru.donmai.us/posts.json",
+            'params': {'limit': 1},
+            'user_env': "DANBOORU_USERNAME", 'key_env': "DANBOORU_API_KEY",
+            'user_param': 'login', 'key_param': 'api_key', # <-- ИЗМЕНЕНИЕ
+            'negative_tags': DANBOORU_NEGATIVE_TAGS
+        },
+        'gelbooru': {
+            'url': "https://gelbooru.com/index.php",
+            'params': {'page': 'dapi', 's': 'post', 'q': 'index', 'json': 1, 'limit': 1},
+            'user_env': "GELBOORU_USER_ID", 'key_env': "GELBOORU_API_KEY",
+            'user_param': 'user_id', 'key_param': 'api_key', # <-- ИЗМЕНЕНИЕ
+            'negative_tags': GELBOORU_NEGATIVE_TAGS
+        }
+    }
+
+    config = api_configs.get(api_type)
+    if not config:
+        print(f"[_fetch_from_booru_api] Unknown api_type: {api_type}")
+        return None
+
+    negative_tags_str = " ".join(config['negative_tags'])
+    final_tags = f'{base_tags} {rating_tag} {negative_tags_str} order:random'
+    
+    params = config['params'].copy()
+    params['tags'] = final_tags
+
+    user = os.getenv(config['user_env'])
+    key = os.getenv(config['key_env'])
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Унифицированный блок добавления учетных данных ---
+    if user and key:
+        params[config['user_param']] = user
+        params[config['key_param']] = key
+        print(f"[{api_type.capitalize()} API] Using authenticated request.")
+    else:
+        print(f"[{api_type.capitalize()} API] WARNING: Using anonymous request.")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    try:
+        async with session.get(config['url'], params=params, headers=headers) as response:
+            if response.status != 200:
+                print(f"[{api_type.capitalize()}] API Error: Status {response.status}")
+                return None
+            
+            try:
+                data = await response.json()
+            except aiohttp.ContentTypeError:
+                print(f"[{api_type.capitalize()}] Error: Response is not valid JSON. Body: {await response.text()}")
+                return None
+
+            if not data:
+                print(f"[{api_type.capitalize()}] Error: Empty data structure received.")
+                return None
+            
+            post = None
+            if api_type == 'danbooru' and isinstance(data, list) and data:
+                post = data[0]
+            elif api_type == 'gelbooru' and 'post' in data and isinstance(data['post'], list) and data['post']:
+                post = data['post'][0]
+
+            if not post or not isinstance(post, dict):
+                print(f"[{api_type.capitalize()}] Error: Post list is empty or has invalid format. Data: {data}")
+                return None
+            
+            image_url = post.get('file_url')
+            if image_url and isinstance(image_url, str) and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                return image_url
+            else:
+                print(f"[{api_type.capitalize()}] Post ignored. Reason: 'file_url' missing or invalid. Post: {post}")
+                return None
+
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        print(f"[{api_type.capitalize()}] Request failed due to network/timeout error: {e}")
+        return None
