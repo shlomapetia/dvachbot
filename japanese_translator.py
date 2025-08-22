@@ -920,16 +920,32 @@ async def _fetch_from_booru_api(
 ) -> Optional[str]:
     """
     Универсальная функция для получения изображения с Booru-подобных API.
-    Использует предзагруженную конфигурацию для избежания блокирующих вызовов os.getenv.
+    Использует предзагруженную конфигурацию и умную фильтрацию негативных тегов.
     """
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем предзагруженную конфигурацию ---
     config = BOORU_API_CONFIGS.get(api_type)
     if not config:
         print(f"[_fetch_from_booru_api] Unknown api_type: {api_type}")
         return None
 
-    negative_tags_str = " ".join(config['negative_tags'])
-    final_tags = f'{base_tags} {rating_tag} {negative_tags_str} order:random'
+    random_tag = 'sort:random' if api_type == 'gelbooru' else 'order:random'
+
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Умная фильтрация негативных тегов ---
+    active_negative_tags = config['negative_tags'].copy()
+
+    # Применяем фильтрацию только для Gelbooru, где обнаружен конфликт
+    if api_type == 'gelbooru':
+        if 'breasts' in base_tags:
+            active_negative_tags = [t for t in active_negative_tags if t not in ('-large_breasts', '-huge_breasts')]
+        if 'ass' in base_tags:
+            active_negative_tags = [t for t in active_negative_tags if t not in ('-large_ass', '-huge_ass')]
+        # Если базовый тег подразумевает наличие пениса, отключаем фильтры на его размер
+        if any(tag in base_tags for tag in ('blowjob', 'cum')):
+             active_negative_tags = [t for t in active_negative_tags if t not in ('-large_penis', '-huge_penis', '-monster_cock')]
+
+    negative_tags_str = " ".join(active_negative_tags)
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
+    final_tags = f'{base_tags} {rating_tag} {negative_tags_str} {random_tag}'
     
     params = config['params'].copy()
     params['tags'] = final_tags
@@ -943,7 +959,6 @@ async def _fetch_from_booru_api(
         print(f"[{api_type.capitalize()} API] Using authenticated request.")
     else:
         print(f"[{api_type.capitalize()} API] WARNING: Using anonymous request.")
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     try:
         async with session.get(config['url'], params=params, headers=headers) as response:
@@ -965,7 +980,7 @@ async def _fetch_from_booru_api(
             if api_type == 'danbooru' and isinstance(data, list) and data:
                 post = data[0]
             elif api_type == 'gelbooru' and 'post' in data and isinstance(data['post'], list) and data['post']:
-                post = data['post'][0]
+                post = data[0]
 
             if not post or not isinstance(post, dict):
                 print(f"[{api_type.capitalize()}] Error: Post list is empty or has invalid format. Data: {data}")
