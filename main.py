@@ -94,7 +94,7 @@ BOARD_CONFIG = {
         "username": "@dvach_chatbot",
         "token": os.getenv("BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()}
+        "admins": {int(x) for x in os.getenv("ADMINS", "").split(",") if (x := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'po': {
@@ -104,7 +104,7 @@ BOARD_CONFIG = {
         "username": "@dvach_po_chatbot",
         "token": os.getenv("PO_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("PO_ADMINS", "").split(",") if x.strip()}
+        "admins": {int(x) for x in os.getenv("PO_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'a': {
@@ -114,7 +114,7 @@ BOARD_CONFIG = {
         "username": "@dvach_a_chatbot",
         "token": os.getenv("A_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("A_ADMINS", "").split(",") if x.strip()}
+        "admins": {int(x) for x in os.getenv("A_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'sex': {
@@ -124,7 +124,7 @@ BOARD_CONFIG = {
         "username": "@dvach_sex_chatbot",
         "token": os.getenv("SEX_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("SEX_ADMINS", "").split(",") if x.strip()}
+        "admins": {int(x) for x in os.getenv("SEX_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'vg': {
@@ -134,7 +134,7 @@ BOARD_CONFIG = {
         "username": "@dvach_vg_chatbot",
         "token": os.getenv("VG_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("VG_ADMINS", "").split(",") if x.strip()}
+        "admins": {int(x) for x in os.getenv("VG_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'int': {
@@ -144,7 +144,7 @@ BOARD_CONFIG = {
         "username": "@tgchan_chatbot",
         "token": os.getenv("INT_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("INT_ADMINS", "").split(",") if x.strip()}
+        "admins": {int(x) for x in os.getenv("INT_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'thread': {
@@ -154,7 +154,7 @@ BOARD_CONFIG = {
         "username": "@thread_chatbot", 
         "token": os.getenv("THREAD_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("THREAD_ADMINS", "").split(",") if x.strip()}
+        "admins": {int(x) for x in os.getenv("THREAD_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'test': {
@@ -164,11 +164,10 @@ BOARD_CONFIG = {
         "username": "@tgchan_testbot", 
         "token": os.getenv("TEST_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("TEST_ADMINS", "").split(",") if x.strip()}
+        "admins": {int(x) for x in os.getenv("TEST_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     }
 }
-
 
 
 # ========== НОВЫЕ КОНСТАНТЫ ДЛЯ СИСТЕМЫ ТРЕДОВ ==========
@@ -643,7 +642,7 @@ async def auto_backup():
     """Автоматическое сохранение данных ВСЕХ досок и бэкап каждые 1 ч"""
     while True:
         try:
-            await asyncio.sleep(1800)  # 30 м
+            await asyncio.sleep(SAVE_INTERVAL)  # Используем константу
 
             if is_shutting_down:
                 break
@@ -664,12 +663,14 @@ def get_user_msgs_deque(user_id: int, board_id: str):
     """Получаем deque для юзера на конкретной доске. Очистка теперь централизована в auto_memory_cleaner."""
     last_user_msgs_for_board = board_data[board_id]['last_user_msgs']
     
-    if user_id not in last_user_msgs_for_board:
-        last_user_msgs_for_board[user_id] = deque(maxlen=10)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Используем setdefault для атомарного создания deque.
+    # Этот метод либо возвращает существующий deque, либо создает и возвращает новый
+    # за одну операцию, что предотвращает состояние гонки (race condition).
+    return last_user_msgs_for_board.setdefault(user_id, deque(maxlen=10))
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    return last_user_msgs_for_board[user_id]
 
-# Конфиг
 # Конфиг
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMINS = {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
@@ -680,7 +681,6 @@ SAVE_INTERVAL = 1800  # секунд
 STICKER_WINDOW = 10  # секунд
 STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
-REPLY_CACHE = 600  # сколько постов держать в кэше для каждой доски
 REPLY_FILE = "reply_cache.json"  # отдельный файл для reply
 MAX_MESSAGES_IN_MEMORY = 600  # храним только последние 600 постов в общей памяти
 
@@ -914,22 +914,34 @@ async def global_error_handler(event: types.ErrorEvent) -> bool:
         if user_id and telegram_object:
             board_id = get_board_id(telegram_object)
             if board_id:
-                board_data[board_id]['users']['active'].discard(user_id)
-                print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных.")
+                # --- НАЧАЛО ИЗМЕНЕНИЙ: Полная очистка данных пользователя ---
+                async with storage_lock:
+                    b_data = board_data[board_id]
+                    b_data['users']['active'].discard(user_id)
+                    # Удаляем все связанные данные, чтобы предотвратить "мусор" в памяти
+                    b_data['last_activity'].pop(user_id, None)
+                    b_data['last_texts'].pop(user_id, None)
+                    b_data['last_stickers'].pop(user_id, None)
+                    b_data['last_animations'].pop(user_id, None)
+                    b_data['spam_violations'].pop(user_id, None)
+                    b_data['spam_tracker'].pop(user_id, None)
+                    b_data['last_user_msgs'].pop(user_id, None)
+                    b_data['message_counter'].pop(user_id, None)
+                    b_data['user_state'].pop(user_id, None)
+                print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота. Все его данные удалены.")
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         return True
 
     # Обработка сетевых ошибок и конфликтов
     if isinstance(exception, (TelegramNetworkError, TelegramConflictError, aiohttp.ClientError)):
         print(f"🌐 Сетевая ошибка: {type(exception).__name__}: {exception}")
         await asyncio.sleep(10)
-        return False
-
-    # Обработка KeyError (проблемы с хранилищем) - логируем, но не останавливаемся
-    elif isinstance(exception, KeyError):
-        print(f"🔑 Потенциальная проблема с данными (KeyError): {exception}. Пропускаем обработку этого сообщения.")
+        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        # Возвращаем True, чтобы aiogram "проглотил" ошибку и продолжил обрабатывать
+        # следующие обновления. Это предотвращает остановку бота из-за временных сетевых проблем.
         return True
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: ЛОГИРОВАНИЕ ПОЛНОГО TRACEBACK ---
     # Все остальные ошибки считаются непредвиденными и требуют детальной отладки
     else:
         import traceback
@@ -950,7 +962,6 @@ async def global_error_handler(event: types.ErrorEvent) -> bool:
         # Возвращаем True, чтобы бот не пытался повторно обработать ошибочный апдейт,
         # но при этом продолжил работу со следующими.
         return True
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
 def escape_html(text: str) -> str:
     """Экранирует HTML символы"""
@@ -984,54 +995,48 @@ def is_admin(uid: int, board_id: str) -> bool:
 
 def _sync_get_board_activity(
     board_id: str,
-    time_threshold: datetime,
-    all_messages_storage: dict
+    relevant_board_ids: list[str]
 ) -> int:
     """
-    Синхронная, блокирующая функция для подсчета постов. Безопасна для executor'а.
-    Работает только с переданными ей данными.
+    Синхронная, блокирующая и оптимизированная функция для подсчета постов.
+    Работает с маленьким, предварительно отфильтрованным списком.
     """
-    post_count = 0
-    # --- ИЗМЕНЕНИЕ ---
-    # Заменяем sorted() на reversed() для итерации от новых постов к старым.
-    # Это избегает создания полной копии и сортировки, значительно экономя память и CPU.
-    for post_num in reversed(all_messages_storage):
-    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
-        post_data = all_messages_storage.get(post_num, {})
-        post_time = post_data.get("timestamp")
-
-        if not post_time or post_time < time_threshold:
-            # Так как мы идем от новых к старым, можно прерваться,
-            # как только встретили пост, который старше нужного порога.
-            break
-        
-        if post_data.get("board_id") == board_id:
-            post_count += 1
-            
-    return post_count
+    # Просто считаем количество вхождений нужного board_id в переданном списке.
+    # Это очень быстрая операция.
+    return relevant_board_ids.count(board_id)
 
 async def get_board_activity_last_hours(board_id: str, hours: int = 2) -> float:
     """
     Подсчитывает среднее количество постов в час для указанной доски за последние N часов.
-    Выполняет блокирующие операции в отдельном потоке, чтобы не замораживать event loop.
+    Оптимизировано для минимальной нагрузки и передачи данных в executor.
     """
     if hours <= 0:
         return 0.0
 
     time_threshold = datetime.now(UTC) - timedelta(hours=hours)
     
-    # 1. Быстро и безопасно копируем данные под блокировкой
+    # 1. Быстро и безопасно фильтруем данные под блокировкой
+    relevant_board_ids = []
     async with storage_lock:
-        messages_storage_copy = messages_storage.copy()
+        # Итерируемся от новых постов к старым
+        for post_data in reversed(messages_storage.values()):
+            post_time = post_data.get("timestamp")
+            # Прерываемся, как только дошли до слишком старых постов
+            if not post_time or post_time < time_threshold:
+                break
+            
+            # Собираем только ID досок - это очень легковесные данные
+            b_id = post_data.get("board_id")
+            if b_id:
+                relevant_board_ids.append(b_id)
 
-    # 2. Выполняем медленную, блокирующую операцию в отдельном потоке
+    # 2. Выполняем очень быструю операцию подсчета в отдельном потоке
     loop = asyncio.get_running_loop()
     post_count = await loop.run_in_executor(
-        save_executor,  # Используем существующий executor
+        save_executor,
         _sync_get_board_activity,
         board_id,
-        time_threshold,
-        messages_storage_copy
+        relevant_board_ids  # Передаем маленький и легкий список
     )
             
     activity = post_count / hours
@@ -1132,18 +1137,80 @@ async def save_all_boards_and_backup():
     """Сохраняет данные ВСЕХ досок параллельно и делает один общий бэкап в Git."""
     print("💾 Запуск параллельного сохранения и бэкапа...")
 
-    # 1. Создаем задачи для параллельного сохранения всех файлов
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Централизованный сбор данных для reply_cache ---
+    
+    # 1. Один раз собираем все данные, группируя их по board_id
+    grouped_data_for_cache = defaultdict(lambda: {
+        'post_keys': [],
+        'post_to_messages': {},
+        'message_to_post': {},
+        'storage_meta': {}
+    })
+
+    async with storage_lock:
+        # Сначала группируем все посты по доскам
+        posts_by_board = defaultdict(list)
+        for p_num, data in messages_storage.items():
+            b_id = data.get("board_id")
+            if b_id:
+                posts_by_board[b_id].append(p_num)
+
+        # Для каждой доски берем срез последних постов
+        for b_id, p_nums in posts_by_board.items():
+            recent_posts = sorted(p_nums)[-MAX_MESSAGES_IN_MEMORY:]
+            grouped_data_for_cache[b_id]['post_keys'] = set(recent_posts) # Используем set для быстрой проверки
+        
+        # Один раз итерируемся по большим словарям, раскидывая данные по доскам
+        all_recent_posts_flat = {p_num for data in grouped_data_for_cache.values() for p_num in data['post_keys']}
+        
+        for p_num, data in post_to_messages.items():
+            if p_num in all_recent_posts_flat:
+                b_id = messages_storage.get(p_num, {}).get("board_id")
+                if b_id:
+                    grouped_data_for_cache[b_id]['post_to_messages'][p_num] = data # Копирование не нужно, т.к. данные не меняются
+        
+        for key, p_num in message_to_post.items():
+            if p_num in all_recent_posts_flat:
+                b_id = messages_storage.get(p_num, {}).get("board_id")
+                if b_id:
+                    grouped_data_for_cache[b_id]['message_to_post'][key] = p_num
+
+        for b_id, data in grouped_data_for_cache.items():
+            for p_num in data['post_keys']:
+                post_meta = messages_storage.get(p_num)
+                if post_meta:
+                    data['storage_meta'][p_num] = {
+                        "author_id": post_meta.get("author_id", ""),
+                        "timestamp": post_meta.get("timestamp", datetime.now(UTC)).isoformat(),
+                        "author_message_id": post_meta.get("author_message_id"),
+                        "board_id": post_meta.get("board_id")
+                    }
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    # 2. Создаем задачи для параллельного сохранения всех файлов
     save_tasks = []
+    loop = asyncio.get_running_loop()
+
     for board_id in BOARDS:
         save_tasks.append(save_board_state(board_id))
-        save_tasks.append(save_reply_cache(board_id))
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        
+        # Используем предварительно собранные данные для сохранения кэша
+        board_cache_data = grouped_data_for_cache[board_id]
+        save_tasks.append(loop.run_in_executor(
+            save_executor,
+            _sync_save_reply_cache,
+            board_id,
+            list(board_cache_data['post_keys']), # Конвертируем set обратно в list для _sync_
+            board_cache_data['post_to_messages'],
+            board_cache_data['message_to_post'],
+            board_cache_data['storage_meta']
+        ))
+
         if board_id in THREAD_BOARDS:
             save_tasks.append(save_threads_data(board_id))
             save_tasks.append(save_user_states(board_id))
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-    # 2. Запускаем все задачи сохранения одновременно и ждем их завершения
+    # 3. Запускаем все задачи сохранения одновременно и ждем их завершения
     await asyncio.gather(*save_tasks)
     
     print("💾 Все файлы состояний обновлены, пушим в GitHub...")
@@ -1198,59 +1265,6 @@ def _sync_save_reply_cache(
     except Exception as e:
         print(f"⛔ [{board_id}] Ошибка в потоке сохранения reply_cache: {str(e)[:200]}")
         return False
-
-async def save_reply_cache(board_id: str):
-    """Асинхронная обертка для неблокирующего и потокобезопасного сохранения кэша ответов."""
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизированный сбор данных ---
-    async with storage_lock:
-        # 1. Сначала итерируем по всему хранилищу ОДИН раз, чтобы найти ключи постов для нужной доски.
-        all_board_post_keys = [
-            p_num for p_num, data in messages_storage.items()
-            if data.get("board_id") == board_id
-        ]
-        
-        # 2. Сортируем только этот, уже отфильтрованный и гораздо меньший список ключей.
-        # Берем срез последних N постов для кэша.
-        recent_board_posts = sorted(all_board_post_keys)[-REPLY_CACHE:]
-        recent_board_posts_set = set(recent_board_posts)
-
-        # 3. Эффективно собираем только необходимые данные, а не копируем всё.
-        # Теперь мы итерируем по маленькому сету `recent_board_posts_set`, а не по гигантским словарям.
-        post_to_messages_copy = {
-            p_num: data.copy()
-            for p_num, data in post_to_messages.items()
-            if p_num in recent_board_posts_set
-        }
-        
-        message_to_post_copy = {
-            key: p_num
-            for key, p_num in message_to_post.items()
-            if p_num in recent_board_posts_set
-        }
-        
-        messages_storage_meta_copy = {
-            p_num: {
-                "author_id": data.get("author_id", ""),
-                "timestamp": data.get("timestamp", datetime.now(UTC)).isoformat(),
-                "author_message_id": data.get("author_message_id"),
-                "board_id": data.get("board_id")
-            }
-            # Итерируемся только по недавним постам, а не по всему хранилищу
-            for p_num in recent_board_posts
-            if (data := messages_storage.get(p_num))
-        }
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(
-        save_executor,
-        _sync_save_reply_cache,
-        board_id,
-        recent_board_posts,
-        post_to_messages_copy,
-        message_to_post_copy,
-        messages_storage_meta_copy
-    )
 
 def load_state():
     """Загружает состояния для ВСЕХ досок в board_data."""
@@ -1482,28 +1496,26 @@ async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | Non
 
     # --- НАЧАЛО ИЗМЕНЕНИЙ: ПРАВИЛЬНЫЙ ПОРЯДОК ОСТАНОВКИ ---
 
-    # 3. Отменяем ВСЕ активные задачи (включая рассылку, фоновые таски и т.д.)
-    print("Отменяем все активные задачи...")
+    # 3. Выполняем финальный бэкап, ПОКА event loop еще полностью активен
+    print("💾 Попытка финального сохранения и бэкапа в GitHub (таймаут 120 секунд)...")
+    try:
+        # Выполняем сохранение как обычную асинхронную функцию, а не как новую задачу
+        await asyncio.wait_for(save_all_boards_and_backup(), timeout=120.0)
+        print("✅ Финальный бэкап успешно завершен в рамках таймаута.")
+    except asyncio.TimeoutError:
+        print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Финальный бэкап не успел выполниться и был прерван!")
+    except Exception as e:
+        print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Не удалось выполнить финальный бэкап: {e}")
+
+    # 4. ТОЛЬКО ПОСЛЕ сохранения отменяем все остальные фоновые задачи
+    print("Отменяем все активные фоновые задачи...")
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     for task in tasks:
         task.cancel()
     
     # Ждем завершения отмененных задач
     await asyncio.gather(*tasks, return_exceptions=True)
-    print("✅ Все задачи остановлены.")
-
-    # 4. ТОЛЬКО ТЕПЕРЬ делаем финальный бэкап. Сессия еще жива.
-    print("💾 Попытка финального сохранения и бэкапа в GitHub (таймаут 120 секунд)...")
-    backup_task = asyncio.create_task(save_all_boards_and_backup())
-    
-    try:
-        await asyncio.wait_for(backup_task, timeout=120.0)
-        print("✅ Финальный бэкап успешно завершен в рамках таймаута.")
-    except asyncio.TimeoutError:
-        print("⛔ КРИТИЧЕСКАЯ ОШИБКА: Финальный бэкап не успел выполниться и был прерван!")
-        backup_task.cancel()
-    except Exception as e:
-        print(f"⛔ КРИТИЧЕСКАЯ ОШИБКА: Не удалось выполнить финальный бэкап: {e}")
+    print("✅ Все фоновые задачи остановлены.")
 
     # 5. Завершаем работу с остальными компонентами (healthcheck, executor'ы)
     print("Завершение остальных компонентов...")
@@ -1524,7 +1536,6 @@ async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | Non
     # Это будет сделано в блоке finally функции main(), что является правильным местом.
     print("✅ Процедура graceful_shutdown завершена. Сессия будет закрыта в main().")
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
 # ========== БЛОК ДИАГНОСТИКИ ПАМЯТИ ==========
 
 def _sync_get_memory_summary() -> str:
@@ -1595,7 +1606,12 @@ async def auto_memory_cleaner():
             # --- Блок 1: Очистка старых постов ---
             if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
                 to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
-                deleted_post_keys = sorted(messages_storage.keys())[:to_delete_count]
+                # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+                # Преобразуем ключи в список один раз и берем срез с начала.
+                # Это избегает полной сортировки и намного эффективнее.
+                all_keys = list(messages_storage.keys())
+                deleted_post_keys = all_keys[:to_delete_count]
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                 
                 for post_num in deleted_post_keys:
                     messages_storage.pop(post_num, None)
@@ -1616,11 +1632,10 @@ async def auto_memory_cleaner():
             
             # Итеративно удаляем устаревшие ключи из оригинального словаря,
             # избегая создания его полной копии в памяти.
-            for key in keys_to_delete:
-                del message_to_post[key]
-
             deleted_count = len(keys_to_delete)
             if deleted_count > 0:
+                for key in keys_to_delete:
+                    del message_to_post[key]
                 print(f"🧹 Очистка message_to_post: удалено {deleted_count} неактуальных связей.")
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
@@ -1687,7 +1702,7 @@ async def auto_memory_cleaner():
                      media_group_timers.pop(group_id, None)
 
         # --- Блок 5: Очистка трекера реакций ---
-        tracker_inactive_threshold_sec = 24 * 3600
+        tracker_inactive_threshold_sec = 11 * 3600
         keys_to_delete_from_tracker = [
             author_id for author_id, timestamps in author_reaction_notify_tracker.items()
             if not timestamps or (now_ts - timestamps[-1] > tracker_inactive_threshold_sec)
@@ -1700,26 +1715,27 @@ async def auto_memory_cleaner():
         gc.collect()
         print(f"🧹 Очистка памяти завершена. Следующая через 10 минут.")
         
-def _sync_collect_board_statistics(hour_ago: datetime, all_messages_storage: dict) -> defaultdict[str, int]:
+def _sync_collect_board_statistics(hour_ago: datetime, all_messages_meta: dict) -> defaultdict[str, int]:
     """
     Синхронная, блокирующая функция для сбора статистики постов за последний час.
     Безопасна для выполнения в executor'е, работает только с переданными данными.
     """
     posts_per_hour = defaultdict(int)
-    # --- ИЗМЕНЕНИЕ ---
-    # Аналогично заменяем ресурсоемкую сортировку на легковесный итератор reversed().
-    for post_num in reversed(all_messages_storage):
-    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
-        post_data = all_messages_storage.get(post_num)
-        if not post_data:
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    # Итерируемся по ключам словаря в обратном порядке без полной сортировки.
+    # Это значительно быстрее и опирается на сохранение порядка вставки в dict (Python 3.7+).
+    for post_num in reversed(all_messages_meta.keys()):
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        post_meta = all_messages_meta.get(post_num)
+        if not post_meta:
             continue
         
-        post_time = post_data.get('timestamp')
+        post_time = post_meta.get('timestamp')
         if not post_time or post_time < hour_ago:
             # Прерываем цикл, так как все последующие посты будут еще старше.
             break
         
-        b_id = post_data.get('board_id')
+        b_id = post_meta.get('board_id')
         if b_id:
             posts_per_hour[b_id] += 1
             
@@ -3239,7 +3255,7 @@ async def motivation_broadcaster():
         while True:
             try:
                 # Случайная задержка от 2 до 4 часов
-                delay = random.randint(7200, 14400)
+                delay = random.randint(7000, 14000)
                 await asyncio.sleep(delay)
 
                 # --- НАЧАЛО ИЗМЕНЕНИЙ ---
@@ -5029,7 +5045,7 @@ async def thread_lifecycle_manager(bots: dict[str, Bot]):
                         threads_data.pop(thread_id, None)
                     print(f"🧹 [{board_id}] Очищено {len(threads_to_purge)} старых заархивированных тредов из памяти.")
                 # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+        
         # --- Блокировка освобождена ---
 
         # Фаза 2: Выполнение медленных операций без блокировки
@@ -6500,14 +6516,14 @@ async def cmd_suka_blyat(message: types.Message, board_id: str | None):
     b_data = board_data[board_id]
     user_id = message.from_user.id
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка на shadow_mute с уведомлением ---
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка на shadow_mute без уведомления ---
     if user_id in b_data['shadow_mutes'] and b_data['shadow_mutes'][user_id] > datetime.now(UTC):
         try:
-            await message.answer("❌ Ошибка: этот режим временно не поддерживается.")
+            # Просто молча удаляем команду
             await message.delete()
         except (TelegramBadRequest, TelegramForbiddenError):
             pass
-        return  # Выходим, не давая активировать режим
+        return  # И выходим, не давая активировать режим
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if not await check_cooldown(message, board_id):
@@ -6564,7 +6580,6 @@ async def cmd_suka_blyat(message: types.Message, board_id: str | None):
 
     asyncio.create_task(disable_suka_blyat_mode(303, board_id))
     await message.delete()
-
 
 async def disable_suka_blyat_mode(delay: int, board_id: str):
     await asyncio.sleep(delay)
