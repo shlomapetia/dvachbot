@@ -1512,7 +1512,59 @@ async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | Non
     # Это будет сделано в блоке finally функции main(), что является правильным местом.
     print("✅ Процедура graceful_shutdown завершена. Сессия будет закрыта в main().")
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+# ========== БЛОК ДИАГНОСТИКИ ПАМЯТИ ==========
+
+def _sync_get_memory_summary() -> str:
+    """
+    Синхронная, блокирующая функция для сбора и форматирования данных о памяти.
+    Предназначена для вызова в ThreadPoolExecutor.
+    """
+    # Импорты здесь, чтобы не загружать модуль, если функция не используется
+    import io
+    import sys
+    from pympler import muppy, summary
+
+    # Получаем все объекты, которые отслеживает сборщик мусора
+    all_objects = muppy.get_objects()
     
+    # Создаем сводку, ограничивая вывод 25 самыми "тяжелыми" типами объектов
+    sum_result = summary.summarize(all_objects)
+    
+    # Перехватываем стандартный вывод, чтобы записать результат в строку
+    old_stdout = sys.stdout
+    sys.stdout = captured_output = io.StringIO()
+    summary.print_(sum_result, limit=25)
+    sys.stdout = old_stdout # Возвращаем стандартный вывод на место
+    
+    return captured_output.getvalue()
+
+async def log_memory_summary():
+    """
+    Асинхронная обертка для неблокирующего логгирования состояния памяти.
+    """
+    print(f"\n--- 📝 Запуск анализа памяти в {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
+    
+    # Принудительно запускаем сборщик мусора перед анализом для получения более точных данных
+    gc.collect()
+    
+    loop = asyncio.get_running_loop()
+    try:
+        # Выполняем тяжелую операцию в отдельном потоке, чтобы не блокировать бота
+        summary_text = await loop.run_in_executor(
+            save_executor, # Используем существующий executor
+            _sync_get_memory_summary
+        )
+        
+        # Выводим результат в консоль
+        print(summary_text.strip())
+        print("--- ✅ Анализ памяти завершен ---\n")
+        
+    except Exception as e:
+        print(f"--- ❌ Ошибка при анализе памяти: {e} ---\n")
+
+# ===============================================
+
 async def auto_memory_cleaner():
     """
     Полная и честная очистка мусора каждые 10 минут.
@@ -5045,6 +5097,21 @@ async def thread_activity_monitor(bots: dict[str, Bot]):
             print(f"❌ Ошибка в thread_activity_monitor: {e}")
             await asyncio.sleep(120) # В случае ошибки ждем дольше перед повторной попыткой
 
+async def memory_logger_task():
+    """Фоновая задача для периодического логгирования состояния памяти."""
+    # Начальная задержка, чтобы не нагружать систему при старте
+    await asyncio.sleep(80) #1.5 минут
+    
+    while True:
+        try:
+            await log_memory_summary()
+            # Периодичность логгирования - 25 минут
+            await asyncio.sleep(1500)
+        except Exception as e:
+            # В случае ошибки в самом логгере, ждем дольше, чтобы не спамить в консоль
+            print(f"Критическая ошибка в memory_logger_task: {e}")
+            await asyncio.sleep(600)
+
 @dp.message(ThreadCreateStates.waiting_for_op_post, F.text)
 async def process_op_post_text(message: types.Message, state: FSMContext, board_id: str | None):
     """
@@ -7582,7 +7649,8 @@ async def start_background_tasks(bots: dict[str, Bot]):
         "board_statistics_broadcaster": board_statistics_broadcaster(),
         "thread_lifecycle_manager": thread_lifecycle_manager(bots),
         "thread_notifier": thread_notifier(),
-        "thread_activity_monitor": thread_activity_monitor(bots)
+        "thread_activity_monitor": thread_activity_monitor(bots),
+        "memory_logger_task": memory_logger_task() # <-- ИЗМЕНЕНИЕ
     }
 
     tasks = [
