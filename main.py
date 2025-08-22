@@ -980,13 +980,17 @@ def _sync_get_board_activity(
     Работает только с переданными ей данными.
     """
     post_count = 0
-    # Эта сортировка является основной причиной блокировки
-    sorted_post_keys = sorted(all_messages_storage.keys(), reverse=True)
-    for post_num in sorted_post_keys:
+    # --- ИЗМЕНЕНИЕ ---
+    # Заменяем sorted() на reversed() для итерации от новых постов к старым.
+    # Это избегает создания полной копии и сортировки, значительно экономя память и CPU.
+    for post_num in reversed(all_messages_storage):
+    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         post_data = all_messages_storage.get(post_num, {})
         post_time = post_data.get("timestamp")
 
         if not post_time or post_time < time_threshold:
+            # Так как мы идем от новых к старым, можно прерваться,
+            # как только встретили пост, который старше нужного порога.
             break
         
         if post_data.get("board_id") == board_id:
@@ -1187,17 +1191,19 @@ async def save_reply_cache(board_id: str):
     """Асинхронная обертка для неблокирующего и потокобезопасного сохранения кэша ответов."""
     # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизированный сбор данных ---
     async with storage_lock:
-        # 1. Определяем все посты доски
-        board_post_keys = {
+        # 1. Сначала итерируем по всему хранилищу ОДИН раз, чтобы найти ключи постов для нужной доски.
+        all_board_post_keys = [
             p_num for p_num, data in messages_storage.items()
             if data.get("board_id") == board_id
-        }
+        ]
         
-        # 2. Определяем недавние посты для этой доски
-        recent_board_posts = sorted(list(board_post_keys))[-REPLY_CACHE:]
+        # 2. Сортируем только этот, уже отфильтрованный и гораздо меньший список ключей.
+        # Берем срез последних N постов для кэша.
+        recent_board_posts = sorted(all_board_post_keys)[-REPLY_CACHE:]
         recent_board_posts_set = set(recent_board_posts)
 
-        # 3. Эффективно собираем только необходимые данные, а не копируем всё
+        # 3. Эффективно собираем только необходимые данные, а не копируем всё.
+        # Теперь мы итерируем по маленькому сету `recent_board_posts_set`, а не по гигантским словарям.
         post_to_messages_copy = {
             p_num: data.copy()
             for p_num, data in post_to_messages.items()
@@ -1533,17 +1539,22 @@ async def auto_memory_cleaner():
 
             # --- Блок 2: Эффективная очистка message_to_post "на месте" ---
             actual_post_nums = set(messages_storage.keys())
+            initial_size = len(message_to_post)
+
+            # --- ИЗМЕНЕНИЕ ---
+            # Пересоздаем словарь, оставляя только актуальные записи.
+            # Это более эффективно по памяти, чем создавать большой список ключей для удаления.
+            global message_to_post
+            message_to_post = {
+                key: post_num
+                for key, post_num in message_to_post.items()
+                if post_num in actual_post_nums
+            }
             
-            # Собираем ключи для удаления. Эта операция быстрая и не требует executor'а.
-            keys_to_delete = [
-                key for key, post_num in message_to_post.items()
-                if post_num not in actual_post_nums
-            ]
-            
-            if keys_to_delete:
-                for key in keys_to_delete:
-                    message_to_post.pop(key, None)
-                print(f"🧹 Очистка message_to_post: удалено {len(keys_to_delete)} неактуальных связей.")
+            deleted_count = initial_size - len(message_to_post)
+            if deleted_count > 0:
+                print(f"🧹 Очистка message_to_post: удалено {deleted_count} неактуальных связей.")
+            # --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
             # --- Блок 3: Агрессивная очистка данных неактивных пользователей ---
             for board_id in BOARDS:
@@ -1570,6 +1581,7 @@ async def auto_memory_cleaner():
                     b_data['spam_tracker'].pop(user_id, None)
                     b_data['last_user_msgs'].pop(user_id, None)
                     b_data['message_counter'].pop(user_id, None)
+                    b_data['user_state'].pop(user_id, None) 
                     purged_count += 1
                 
                 if purged_count > 0:
@@ -1626,16 +1638,17 @@ def _sync_collect_board_statistics(hour_ago: datetime, all_messages_storage: dic
     Безопасна для выполнения в executor'е, работает только с переданными данными.
     """
     posts_per_hour = defaultdict(int)
-    # Эта сортировка является основной причиной блокировки event loop'а
-    sorted_post_keys = sorted(all_messages_storage.keys(), reverse=True)
-    
-    for post_num in sorted_post_keys:
+    # --- ИЗМЕНЕНИЕ ---
+    # Аналогично заменяем ресурсоемкую сортировку на легковесный итератор reversed().
+    for post_num in reversed(all_messages_storage):
+    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         post_data = all_messages_storage.get(post_num)
         if not post_data:
             continue
         
         post_time = post_data.get('timestamp')
         if not post_time or post_time < hour_ago:
+            # Прерываем цикл, так как все последующие посты будут еще старше.
             break
         
         b_id = post_data.get('board_id')
@@ -2107,8 +2120,10 @@ async def delete_user_posts(bot_instance: Bot, user_id: int, time_period_minutes
             posts_to_delete_info = []
             
             # 1. Находим все посты пользователя за указанный период
-            sorted_post_keys = sorted(messages_storage.keys(), reverse=True)
-            for post_num in sorted_post_keys:
+            # --- ИЗМЕНЕНИЕ ---
+            # Замена sorted() на reversed() для итерации от новых постов к старым без сортировки всего хранилища.
+            for post_num in reversed(messages_storage):
+            # --- КОНЕЦ ИЗМЕНЕНИЯ ---
                 post_data = messages_storage.get(post_num, {})
                 post_time = post_data.get('timestamp')
 
@@ -2795,10 +2810,12 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
     """
     # --- НАЧАЛО ИЗМЕНЕНИЙ: Полный рефакторинг логики ---
     
-    # ЭТАП 1: Собираем ID всех сообщений для редактирования под одной блокировкой
+    # ЭТАП 1: Собираем ID всех сообщений для редактирования и базовые данные под одной блокировкой.
     message_copies_to_edit = {}
     board_id = None
     content_type = None
+    post_data_copy = {}
+    reply_author_id = None
     
     async with storage_lock:
         post_data = messages_storage.get(post_num)
@@ -2809,50 +2826,51 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
 
         # Копируем только то, что необходимо для дальнейшей работы
         message_copies_to_edit = message_copies.copy()
+        post_data_copy = post_data.copy()
         board_id = post_data.get('board_id')
         content_type = post_data.get('content', {}).get('type')
+        
+        reply_to_post_num = post_data.get('content', {}).get('reply_to_post')
+        if reply_to_post_num:
+            reply_author_id = messages_storage.get(reply_to_post_num, {}).get('author_id')
         
         can_be_edited = content_type in ['text', 'photo', 'video', 'animation', 'document', 'audio']
         if not can_be_edited or not board_id:
             return
 
-    # ЭТАП 2: Асинхронно подготавливаем данные для каждого пользователя и выполняем редактирование
-    async def _prepare_and_edit_one(user_id: int, message_id: int):
+    # ЭТАП 2: Асинхронно подготавливаем данные для каждого пользователя и выполняем редактирование БЕЗ блокировок.
+    async def _edit_one(user_id: int, message_id: int):
         full_text = ""
         try:
-            # Для каждого пользователя индивидуально и безопасно получаем актуальные данные
-            async with storage_lock:
-                post_data = messages_storage.get(post_num)
-                if not post_data: return
+            # Используем данные, скопированные на ЭТАПЕ 1.
+            content = post_data_copy.get('content', {})
+            
+            # Формируем заголовок с пометкой об ответе
+            header_text = content.get('header', '')
+            head = f"<i>{escape_html(header_text)}</i>"
+            if user_id == reply_author_id:
+                if board_id == 'int': head = head.replace("Post", "🔴 Post")
+                else: head = head.replace("Пост", "🔴 Пост")
 
-                content = post_data.get('content', {})
-                reply_to_post = content.get('reply_to_post')
-                reply_author_id = messages_storage.get(reply_to_post, {}).get('author_id') if reply_to_post else None
+            # Формируем тело с (You) и реакциями
+            content_for_user = content.copy()
+            text_or_caption = content_for_user.get('text') or content_for_user.get('caption')
+            if text_or_caption:
+                # add_you_to_my_posts больше не требует блокировки, так как работает с копией.
+                text_with_you = add_you_to_my_posts(text_or_caption, user_id)
+                if 'text' in content_for_user: content_for_user['text'] = text_with_you
+                elif 'caption' in content_for_user: content_for_user['caption'] = text_with_you
+            
+            # _format_message_body больше не требует блокировки.
+            formatted_body = await _format_message_body(
+                content=content_for_user,
+                user_id_for_context=user_id,
+                post_data=post_data_copy,
+                reply_to_post_author_id=reply_author_id
+            )
+            full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
 
-                # Формируем заголовок с пометкой об ответе
-                header_text = content.get('header', '')
-                head = f"<i>{escape_html(header_text)}</i>"
-                if user_id == reply_author_id:
-                    if board_id == 'int': head = head.replace("Post", "🔴 Post")
-                    else: head = head.replace("Пост", "🔴 Post")
-
-                # Формируем тело с (You) и реакциями, используя актуальные данные из storage
-                content_for_user = content.copy()
-                text_or_caption = content_for_user.get('text') or content_for_user.get('caption')
-                if text_or_caption:
-                    text_with_you = add_you_to_my_posts(text_or_caption, user_id)
-                    if 'text' in content_for_user: content_for_user['text'] = text_with_you
-                    elif 'caption' in content_for_user: content_for_user['caption'] = text_with_you
-                
-                formatted_body = await _format_message_body(
-                    content=content_for_user,
-                    user_id_for_context=user_id,
-                    post_data=post_data,
-                    reply_to_post_author_id=reply_author_id
-                )
-                full_text = f"{head}\n\n{formatted_body}" if formatted_body else head
-
-            # Выполняем медленную сетевую операцию ПОСЛЕ освобождения блокировки
+            # Выполняем медленную сетевую операцию
             if content_type == 'text':
                 if len(full_text) > 4096: full_text = full_text[:4093] + "..."
                 await bot_instance.edit_message_text(text=full_text, chat_id=user_id, message_id=message_id, parse_mode="HTML")
@@ -2864,17 +2882,15 @@ async def edit_post_for_all_recipients(post_num: int, bot_instance: Bot):
             if "message is not modified" not in e.message and "message to edit not found" not in e.message:
                  print(f"⚠️ Ошибка (BadRequest) при редактировании поста #{post_num} для {user_id}: {e}")
         except TelegramForbiddenError:
-            # Безопасно удаляем пользователя из активных, если он заблокировал бота
             b_data = board_data.get(board_id)
             if b_data:
                 b_data['users']['active'].discard(user_id)
-                print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота, удален из активных (при редактировании).")
         except Exception as e:
             print(f"❌ Неизвестная ошибка при редактировании поста #{post_num} для {user_id}: {e}")
 
     # Запускаем задачи на редактирование параллельно
     tasks = [
-        _prepare_and_edit_one(uid, mid)
+        _edit_one(uid, mid)
         for uid, mid in message_copies_to_edit.items()
     ]
     await asyncio.gather(*tasks)
@@ -4111,8 +4127,10 @@ async def cmd_active(message: types.Message, board_id: str | None):
     posts_last_24h = 0
     
     async with storage_lock:
-        sorted_post_keys = sorted(messages_storage.keys(), reverse=True)
-        for post_num in sorted_post_keys:
+        # --- ИЗМЕНЕНИЕ ---
+        # Замена sorted() на reversed() для эффективной итерации.
+        for post_num in reversed(messages_storage):
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
             post_data = messages_storage[post_num]
             post_time = post_data.get("timestamp")
             
