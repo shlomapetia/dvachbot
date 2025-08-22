@@ -1507,30 +1507,19 @@ async def graceful_shutdown(bots: list[Bot], healthcheck_site: web.TCPSite | Non
     print("✅ Процедура graceful_shutdown завершена. Сессия будет закрыта в main().")
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
-def _sync_collect_keys_to_delete(
-    current_message_to_post: dict, 
-    actual_post_nums: set
-) -> list:
-    """
-    Синхронная функция для сбора ключей, которые нужно удалить из message_to_post.
-    НЕ создает новый словарь, что экономит память.
-    """
-    keys_to_delete = [
-        key for key, post_num in current_message_to_post.items()
-        if post_num not in actual_post_nums
-    ]
-    return keys_to_delete
-
 async def auto_memory_cleaner():
-    """Полная и честная очистка мусора каждые 10 минут с выносом тяжелых операций."""
-    loop = asyncio.get_running_loop()
-
+    """
+    Полная и честная очистка мусора каждые 10 минут.
+    (ВЕРСИЯ 8.0 - БЕЗ EXECUTOR ДЛЯ ОЧИСТКИ СЛОВАРЕЙ)
+    """
     while True:
         await asyncio.sleep(600)  # 10 минут
 
-        # --- Блок 1: Очистка старых постов ---
         deleted_post_keys = []
+        
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизация и выполнение в одном потоке ---
         async with storage_lock:
+            # --- Блок 1: Очистка старых постов ---
             if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
                 to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
                 deleted_post_keys = sorted(messages_storage.keys())[:to_delete_count]
@@ -1539,29 +1528,24 @@ async def auto_memory_cleaner():
                     messages_storage.pop(post_num, None)
                     post_to_messages.pop(post_num, None)
 
-        if deleted_post_keys:
-            print(f"🧹 Очистка памяти: удалено {len(deleted_post_keys)} старых постов из основного хранилища.")
-        
-        # --- Блок 2: Неблокирующая очистка message_to_post ---
-        async with storage_lock:
-            actual_post_nums = set(messages_storage.keys())
-            message_to_post_copy = message_to_post.copy()
+            if deleted_post_keys:
+                print(f"🧹 Очистка памяти: удалено {len(deleted_post_keys)} старых постов из основного хранилища.")
 
-        keys_to_delete = await loop.run_in_executor(
-            save_executor,
-            _sync_collect_keys_to_delete,
-            message_to_post_copy,
-            actual_post_nums
-        )
-        
-        if keys_to_delete:
-            async with storage_lock:
+            # --- Блок 2: Эффективная очистка message_to_post "на месте" ---
+            actual_post_nums = set(messages_storage.keys())
+            
+            # Собираем ключи для удаления. Эта операция быстрая и не требует executor'а.
+            keys_to_delete = [
+                key for key, post_num in message_to_post.items()
+                if post_num not in actual_post_nums
+            ]
+            
+            if keys_to_delete:
                 for key in keys_to_delete:
                     message_to_post.pop(key, None)
-            print(f"🧹 Очистка message_to_post: удалено {len(keys_to_delete)} неактуальных связей.")
-        
-        # --- Блок 3: Агрессивная очистка данных неактивных пользователей ---
-        async with storage_lock:
+                print(f"🧹 Очистка message_to_post: удалено {len(keys_to_delete)} неактуальных связей.")
+
+            # --- Блок 3: Агрессивная очистка данных неактивных пользователей ---
             for board_id in BOARDS:
                 b_data = board_data[board_id]
                 now_utc = datetime.now(UTC)
@@ -1605,6 +1589,8 @@ async def auto_memory_cleaner():
                     spam_tracker_board[user_id] = [t for t in spam_tracker_board[user_id] if t > window_start]
                     if not spam_tracker_board[user_id]:
                         del spam_tracker_board[user_id]
+        
+        # --- КОНЕЦ БЛОКА ИЗМЕНЕНИЙ ---
         
         # --- Блок 4: Очистка зависших медиа-групп ---
         now_ts = time.time()
