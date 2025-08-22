@@ -94,7 +94,7 @@ BOARD_CONFIG = {
         "username": "@dvach_chatbot",
         "token": os.getenv("BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x) for x in os.getenv("ADMINS", "").split(",") if (x := x.strip()).isdigit()}
+        "admins": {int(y) for x in os.getenv("ADMINS", "").split(",") if (y := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'po': {
@@ -104,7 +104,7 @@ BOARD_CONFIG = {
         "username": "@dvach_po_chatbot",
         "token": os.getenv("PO_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x) for x in os.getenv("PO_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
+        "admins": {int(y) for x in os.getenv("PO_ADMINS", "").split(",") if (y := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'a': {
@@ -114,7 +114,7 @@ BOARD_CONFIG = {
         "username": "@dvach_a_chatbot",
         "token": os.getenv("A_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x) for x in os.getenv("A_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
+        "admins": {int(y) for x in os.getenv("A_ADMINS", "").split(",") if (y := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'sex': {
@@ -124,7 +124,7 @@ BOARD_CONFIG = {
         "username": "@dvach_sex_chatbot",
         "token": os.getenv("SEX_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x) for x in os.getenv("SEX_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
+        "admins": {int(y) for x in os.getenv("SEX_ADMINS", "").split(",") if (y := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'vg': {
@@ -134,7 +134,7 @@ BOARD_CONFIG = {
         "username": "@dvach_vg_chatbot",
         "token": os.getenv("VG_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x) for x in os.getenv("VG_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
+        "admins": {int(y) for x in os.getenv("VG_ADMINS", "").split(",") if (y := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'int': {
@@ -144,7 +144,7 @@ BOARD_CONFIG = {
         "username": "@tgchan_chatbot",
         "token": os.getenv("INT_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x) for x in os.getenv("INT_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
+        "admins": {int(y) for x in os.getenv("INT_ADMINS", "").split(",") if (y := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'thread': {
@@ -154,7 +154,7 @@ BOARD_CONFIG = {
         "username": "@thread_chatbot", 
         "token": os.getenv("THREAD_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x) for x in os.getenv("THREAD_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
+        "admins": {int(y) for x in os.getenv("THREAD_ADMINS", "").split(",") if (y := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'test': {
@@ -164,7 +164,7 @@ BOARD_CONFIG = {
         "username": "@tgchan_testbot", 
         "token": os.getenv("TEST_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x) for x in os.getenv("TEST_ADMINS", "").split(",") if (x := x.strip()).isdigit()}
+        "admins": {int(y) for x in os.getenv("TEST_ADMINS", "").split(",") if (y := x.strip()).isdigit()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     }
 }
