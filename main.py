@@ -15,12 +15,13 @@ import signal
 import subprocess
 import sys
 import time
-import weakref
 from asyncio import Semaphore
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone, UTC
 from typing import Tuple
+from dotenv import load_dotenv
+
 
 import aiohttp
 from aiohttp import web
@@ -52,14 +53,14 @@ from deanonymizer import (
     generate_deanon_info,
 )
 from help_text import HELP_TEXT_COMMANDS, HELP_TEXT_EN_COMMANDS, generate_boards_list, THREAD_PROMO_TEXT_RU, THREAD_PROMO_TEXT_EN
-from japanese_translator import anime_transform, get_random_anime_image, get_monogatari_image
+from japanese_translator import anime_transform, get_random_anime_image, get_monogatari_image, get_nsfw_anime_image
 from summarize import summarize_text_with_hf
 from thread_texts import thread_messages
 from ukrainian_mode import UKRAINIAN_PHRASES, ukrainian_transform
 from zaputin_mode import PATRIOTIC_PHRASES, zaputin_transform
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
-from typing import Callable, Dict, Any, Awaitable
+from typing import Callable, Dict, Any, Awaitable, Optional
 
 class BoardMiddleware(BaseMiddleware):
     """
@@ -93,7 +94,7 @@ BOARD_CONFIG = {
         "username": "@dvach_chatbot",
         "token": os.getenv("BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x}
+        "admins": {int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'po': {
@@ -103,7 +104,7 @@ BOARD_CONFIG = {
         "username": "@dvach_po_chatbot",
         "token": os.getenv("PO_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("PO_ADMINS", "").split(",") if x}
+        "admins": {int(x.strip()) for x in os.getenv("PO_ADMINS", "").split(",") if x.strip()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'a': {
@@ -113,7 +114,7 @@ BOARD_CONFIG = {
         "username": "@dvach_a_chatbot",
         "token": os.getenv("A_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("A_ADMINS", "").split(",") if x}
+        "admins": {int(x.strip()) for x in os.getenv("A_ADMINS", "").split(",") if x.strip()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'sex': {
@@ -123,7 +124,7 @@ BOARD_CONFIG = {
         "username": "@dvach_sex_chatbot",
         "token": os.getenv("SEX_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("SEX_ADMINS", "").split(",") if x}
+        "admins": {int(x.strip()) for x in os.getenv("SEX_ADMINS", "").split(",") if x.strip()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'vg': {
@@ -133,7 +134,7 @@ BOARD_CONFIG = {
         "username": "@dvach_vg_chatbot",
         "token": os.getenv("VG_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("VG_ADMINS", "").split(",") if x}
+        "admins": {int(x.strip()) for x in os.getenv("VG_ADMINS", "").split(",") if x.strip()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'int': {
@@ -143,7 +144,7 @@ BOARD_CONFIG = {
         "username": "@tgchan_chatbot",
         "token": os.getenv("INT_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("INT_ADMINS", "").split(",") if x}
+        "admins": {int(x.strip()) for x in os.getenv("INT_ADMINS", "").split(",") if x.strip()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'thread': {
@@ -153,7 +154,7 @@ BOARD_CONFIG = {
         "username": "@thread_chatbot", 
         "token": os.getenv("THREAD_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("THREAD_ADMINS", "").split(",") if x}
+        "admins": {int(x.strip()) for x in os.getenv("THREAD_ADMINS", "").split(",") if x.strip()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     },
     'test': {
@@ -163,7 +164,7 @@ BOARD_CONFIG = {
         "username": "@tgchan_testbot", 
         "token": os.getenv("TEST_BOT_TOKEN"),
         # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        "admins": {int(x.strip()) for x in os.getenv("TEST_ADMINS", "").split(",") if x}
+        "admins": {int(x.strip()) for x in os.getenv("TEST_ADMINS", "").split(",") if x.strip()}
         # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     }
 }
@@ -275,6 +276,17 @@ pending_edit_lock = asyncio.Lock()
 # ========== ОБЩИЕ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (остаются без изменений) ==========
 MODE_COOLDOWN = 3600  # 1 час в секундах
 MAX_ACTIVE_USERS_IN_MEMORY = 5000 # Лимит на юзера в памяти для get_user_msgs_deque
+
+# Глобальные переменные для cooldown /fap, /gatari, /hent
+ANIME_CMD_COOLDOWN = 10 # 10 секунд
+ANIME_CMD_COOLDOWN_PHRASES = [
+    "НЯ! Подожди немного, сэмпай!",
+    "Слишком быстро! Перезаряжаю вайфу-пушку...",
+    "Кулдаун, бака! Не так часто!",
+    "Подожди, я ищу самую лучшую картинку для тебя!",
+    "Терпение, анон-тян! ( ´ ▽ ` )ﾉ"
+]
+anime_cmd_lock = asyncio.Lock()
 
 # --- Конфигурация "счастливых" номеров постов ---
 SPECIAL_NUMERALS_CONFIG = {
@@ -631,7 +643,7 @@ async def auto_backup():
     """Автоматическое сохранение данных ВСЕХ досок и бэкап каждые 1 ч"""
     while True:
         try:
-            await asyncio.sleep(900)  # 15 м
+            await asyncio.sleep(1800)  # 30 м
 
             if is_shutting_down:
                 break
@@ -645,7 +657,7 @@ async def auto_backup():
             
 # Настройка сборщика мусора
 gc.set_threshold(
-    700, 10, 10)  # Оптимальные настройки для баланса памяти/производительности
+    500, 5, 5)  # Оптимальные настройки для баланса памяти/производительности
 
 
 def get_user_msgs_deque(user_id: int, board_id: str):
@@ -664,13 +676,13 @@ ADMINS = {int(x) for x in os.getenv("ADMINS", "").split(",") if x}
 SPAM_LIMIT = 14
 SPAM_WINDOW = 15
 STATE_FILE = 'state.json'
-SAVE_INTERVAL = 900  # секунд
+SAVE_INTERVAL = 1800  # секунд
 STICKER_WINDOW = 10  # секунд
 STICKER_LIMIT = 7
 REST_SECONDS = 30  # время блокировки
-REPLY_CACHE = 2900  # сколько постов держать в кэше для каждой доски
+REPLY_CACHE = 600  # сколько постов держать в кэше для каждой доски
 REPLY_FILE = "reply_cache.json"  # отдельный файл для reply
-MAX_MESSAGES_IN_MEMORY = 2500  # храним только последние 2500 постов в общей памяти
+MAX_MESSAGES_IN_MEMORY = 600  # храним только последние 600 постов в общей памяти
 
 
 # Мотивационные сообщения для приглашений
@@ -1568,11 +1580,11 @@ async def log_memory_summary():
 async def auto_memory_cleaner():
     """
     Полная и честная очистка мусора каждые 10 минут.
-    (ВЕРСИЯ 8.0 - БЕЗ EXECUTOR ДЛЯ ОЧИСТКИ СЛОВАРЕЙ)
+    (ВЕРСЯ 8.0 - БЕЗ EXECUTOR ДЛЯ ОЧИСТКИ СЛОВАРЕЙ)
     """
     # --- ИЗМЕНЕНИЕ: Перемещено в начало функции ---
     global message_to_post
-    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     while True:
         await asyncio.sleep(600)  # 10 минут
 
@@ -1594,19 +1606,23 @@ async def auto_memory_cleaner():
 
             # --- Блок 2: Эффективная очистка message_to_post "на месте" ---
             actual_post_nums = set(messages_storage.keys())
-            initial_size = len(message_to_post)
-
-            # Пересоздаем словарь, оставляя только актуальные записи.
-            # Это более эффективно по памяти, чем создавать большой список ключей для удаления.
-            message_to_post = {
-                key: post_num
-                for key, post_num in message_to_post.items()
-                if post_num in actual_post_nums
-            }
             
-            deleted_count = initial_size - len(message_to_post)
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизация очистки ---
+            # Собираем ключи, которые ссылаются на уже удаленные посты
+            keys_to_delete = [
+                key for key, post_num in message_to_post.items()
+                if post_num not in actual_post_nums
+            ]
+            
+            # Итеративно удаляем устаревшие ключи из оригинального словаря,
+            # избегая создания его полной копии в памяти.
+            for key in keys_to_delete:
+                del message_to_post[key]
+
+            deleted_count = len(keys_to_delete)
             if deleted_count > 0:
                 print(f"🧹 Очистка message_to_post: удалено {deleted_count} неактуальных связей.")
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             # --- Блок 3: Агрессивная очистка данных неактивных пользователей ---
             for board_id in BOARDS:
@@ -2363,7 +2379,7 @@ async def process_new_post(
 ):
     """
     Унифицированная функция для обработки, сохранения и постановки в очередь нового поста.
-    (ФИНАЛЬНАЯ ВЕРСИЯ)
+    (ФИНАЛЬНАЯ ВЕРСЯ С УЛУЧШЕННОЙ ОБРАБОТКОЙ ОШИБОК)
     """
     b_data = board_data[board_id]
     current_post_num = None
@@ -2443,7 +2459,6 @@ async def process_new_post(
 
         content_for_author = await _apply_mode_transformations(content.copy(), board_id)
         
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Меняем порядок сохранения и вызова ---
         author_results = await send_message_to_users(
             bot_instance=bot_instance, recipients={user_id},
             content=content_for_author, reply_info=reply_info_for_author
@@ -2455,28 +2470,23 @@ async def process_new_post(
             author_message_id_to_archive = messages_to_save[0].message_id
             
             async with storage_lock:
-                # Сначала обновляем author_message_id в хранилище
                 if current_post_num in messages_storage:
                     messages_storage[current_post_num]['author_message_id'] = author_message_id_to_archive
                 
-                # Остальная логика сохранения связей
                 for m in messages_to_save:
                     post_to_messages.setdefault(current_post_num, {})[user_id] = m.message_id
                     message_to_post[(user_id, m.message_id)] = current_post_num
         
-        # Теперь ставим пост в очередь для других
         if not is_shadow_muted and recipients:
             await message_queues[board_id].put({
                 'recipients': recipients, 'content': content, 'post_num': current_post_num,
                 'board_id': board_id, 'thread_id': thread_id
             })
 
-        # И только теперь, когда author_message_id сохранен, вызываем архивацию
         if not content.get('is_system_message'):
             asyncio.create_task(_forward_post_to_realtime_archive(
                 bot_instance=bot_instance, board_id=board_id, post_num=current_post_num, content=content
             ))
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     except TelegramForbiddenError:
         b_data['users']['active'].discard(user_id)
@@ -2484,8 +2494,8 @@ async def process_new_post(
         if current_post_num:
             async with storage_lock:
                 messages_storage.pop(current_post_num, None)
+    # ИЗМЕНЕНИЕ: Добавлен traceback.format_exc() для полного логирования неожиданных ошибок
     except Exception as e:
-        import traceback
         print(f"❌ Критическая ошибка в process_new_post для user {user_id}: {e}\n{traceback.format_exc()}")
         if current_post_num:
             async with storage_lock:
@@ -4997,12 +5007,29 @@ async def thread_lifecycle_manager(bots: dict[str, Bot]):
                         notifications_to_queue.append((board_id, recipients, content, None))
                         threads_to_delete.append(thread_id)
 
-                # Этап 1.3: Физическое удаление тредов из состояния
+                # Этап 1.3: Физическое удаление тредов (из-за переполнения) из состояния
                 if threads_to_delete:
                     for thread_id in threads_to_delete:
                         threads_data.pop(thread_id, None)
                     print(f"🧹 [{board_id}] Удалено {len(threads_to_delete)} старых тредов из состояния.")
-        
+                
+                # --- НАЧАЛО ИЗМЕНЕНИЙ: Очистка старых заархивированных тредов ---
+                threads_to_purge = []
+                now_ts = time.time()
+                ARCHIVE_LIFETIME_SECONDS = 24 * 3600  # 24 часа
+
+                for thread_id, thread_info in threads_data.items():
+                    if thread_info.get('is_archived'):
+                        last_activity = thread_info.get('last_activity_at', 0)
+                        if (now_ts - last_activity) > ARCHIVE_LIFETIME_SECONDS:
+                            threads_to_purge.append(thread_id)
+                
+                if threads_to_purge:
+                    for thread_id in threads_to_purge:
+                        threads_data.pop(thread_id, None)
+                    print(f"🧹 [{board_id}] Очищено {len(threads_to_purge)} старых заархивированных тредов из памяти.")
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
         # --- Блокировка освобождена ---
 
         # Фаза 2: Выполнение медленных операций без блокировки
@@ -6077,16 +6104,63 @@ async def disable_anime_mode(delay: int, board_id: str):
     })
 
 
-@dp.message(Command("gatari", "monogatari"))
-async def cmd_monogatari(message: types.Message, board_id: str | None):
-    """Отправляет в чат SFW-изображение из серии Monogatari."""
-    if not board_id:
+async def check_anime_cmd_cooldown(message: types.Message, board_id: str) -> bool:
+    """
+    Проверяет и применяет кулдаун для команд /fap, /gatari, /hent на уровне доски.
+    Возвращает True, если команду можно выполнить, иначе False.
+    """
+    current_time = time.time()
+    async with anime_cmd_lock:
+        b_data = board_data[board_id]
+        last_usage = b_data.get('last_anime_cmd_time', 0)
+
+        if current_time - last_usage < ANIME_CMD_COOLDOWN:
+            cooldown_msg = random.choice(ANIME_CMD_COOLDOWN_PHRASES)
+            try:
+                sent_msg = await message.answer(cooldown_msg)
+                asyncio.create_task(delete_message_after_delay(sent_msg, 5))
+            # ИЗМЕНЕНИЕ 1: Замена Exception на конкретные исключения Telegram
+            except (TelegramBadRequest, TelegramForbiddenError) as e:
+                # Логируем ошибку, чтобы понимать, почему сообщение не отправилось
+                print(f"Could not send cooldown message to chat {message.chat.id}: {e}")
+                pass
+            
+            try:
+                await message.delete()
+            # ИЗМЕНЕНИЕ 2: Замена Exception на конкретное исключение Telegram
+            except TelegramBadRequest as e:
+                # Ошибка может возникнуть, если сообщение уже удалено, это нормально
+                print(f"Could not delete command message in chat {message.chat.id}: {e}")
+                pass
+            
+            return False
+        
+        b_data['last_anime_cmd_time'] = current_time
+        return True
+
+
+async def _process_anime_command(
+    message: types.Message,
+    board_id: str,
+    image_fetcher: Callable[[], Awaitable[Optional[str]]],
+    fail_texts: dict[str, str]
+):
+    """
+    Унифицированный обработчик для команд, отправляющих изображения с API.
+    
+    :param message: Объект сообщения от Aiogram.
+    :param board_id: ID текущей доски.
+    :param image_fetcher: Асинхронная функция для получения URL изображения.
+    :param fail_texts: Словарь с текстами ошибок для разных языков {'ru': '...', 'en': '...'}.
+    """
+    # 1. Общая проверка кулдауна
+    if not await check_anime_cmd_cooldown(message, board_id):
         return
 
     user_id = message.from_user.id
     b_data = board_data[board_id]
 
-    # --- Базовые проверки пользователя ---
+    # 2. Общие проверки пользователя (бан, мут)
     if user_id in b_data['users']['banned'] or \
        (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
         try:
@@ -6095,40 +6169,40 @@ async def cmd_monogatari(message: types.Message, board_id: str | None):
             pass
         return
 
-    # Получаем изображение
-    image_url = await get_monogatari_image()
+    # 3. Получение изображения с помощью переданной функции
+    image_url = await image_fetcher()
     
-    # Удаляем команду пользователя в любом случае
+    # 4. Удаление сообщения с командой в любом случае
     try:
         await message.delete()
     except TelegramBadRequest:
         pass
 
-    # Если изображение не найдено, выходим
+    # 5. Общая обработка случая, когда изображение не найдено
     if not image_url:
         lang = 'en' if board_id == 'int' else 'ru'
-        fail_text = "Sorry, couldn't fetch a Monogatari image right now. Please try again later." \
-            if lang == 'en' else "Не удалось получить изображение. Попробуйте позже."
+        fail_text = fail_texts.get(lang, "Could not get an image.")
         try:
-            # Отправляем временное сообщение об ошибке
             error_msg = await message.answer(fail_text)
-            # Запускаем задачу на его удаление через 10 секунд
             asyncio.create_task(delete_message_after_delay(error_msg, 10))
         except (TelegramForbiddenError, TelegramBadRequest):
             pass
         return
 
-    # --- Подготовка и отправка поста ---
+    # 6. Общая подготовка и отправка поста
     is_shadow_muted = (user_id in b_data['shadow_mutes'] and
                        b_data['shadow_mutes'][user_id] > datetime.now(UTC))
 
+    # Унифицированное определение типа контента
+    content_type = 'animation' if image_url.lower().endswith('.gif') else 'photo'
+    
     content = {
-        'type': 'photo',
+        'type': content_type,
         'image_url': image_url,
-        'caption': '' # Подпись не нужна, так как это просто картинка по команде
+        'caption': '' # Подпись не нужна
     }
 
-    # Используем существующий обработчик для консистентной отправки
+    # Вызов общего обработчика постов
     await process_new_post(
         bot_instance=message.bot,
         board_id=board_id,
@@ -6136,6 +6210,25 @@ async def cmd_monogatari(message: types.Message, board_id: str | None):
         content=content,
         reply_to_post=None,
         is_shadow_muted=is_shadow_muted
+    )
+
+
+@dp.message(Command("gatari", "monogatari"))
+async def cmd_monogatari(message: types.Message, board_id: str | None):
+    """Отправляет в чат SFW-изображение из серии Monogatari."""
+    if not board_id:
+        return
+
+    fail_texts = {
+        'ru': "Не удалось получить изображение Monogatari. Попробуйте позже.",
+        'en': "Sorry, couldn't fetch a Monogatari image right now. Please try again later."
+    }
+    
+    await _process_anime_command(
+        message=message,
+        board_id=board_id,
+        image_fetcher=get_monogatari_image,
+        fail_texts=fail_texts
     )
 
 @dp.message(Command("hent", "fap"))
@@ -6143,64 +6236,38 @@ async def cmd_hentai(message: types.Message, board_id: str | None):
     """Отправляет в чат случайное SFW/NSFW аниме-изображение или GIF."""
     if not board_id:
         return
-
-    user_id = message.from_user.id
-    b_data = board_data[board_id]
-
-    # --- Базовые проверки пользователя ---
-    if user_id in b_data['users']['banned'] or \
-       (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
-        try:
-            await message.delete()
-        except TelegramBadRequest:
-            pass
-        return
-
-    # Получаем изображение или GIF
-    image_url = await get_random_anime_image()
-    
-    # Удаляем команду пользователя в любом случае
-    try:
-        await message.delete()
-    except TelegramBadRequest:
-        pass
-
-    # Если изображение не найдено, уведомляем и выходим
-    if not image_url:
-        lang = 'en' if board_id == 'int' else 'ru'
-        fail_text = "Sorry, couldn't fetch an image right now. Please try again later." \
-            if lang == 'en' else "Не удалось получить изображение. Попробуйте позже."
-        try:
-            error_msg = await message.answer(fail_text)
-            asyncio.create_task(delete_message_after_delay(error_msg, 10))
-        except (TelegramForbiddenError, TelegramBadRequest):
-            pass
-        return
-
-    # --- Подготовка и отправка поста ---
-    is_shadow_muted = (user_id in b_data['shadow_mutes'] and
-                       b_data['shadow_mutes'][user_id] > datetime.now(UTC))
-
-    # Определяем тип контента по расширению файла
-    content_type = 'animation' if image_url.lower().endswith('.gif') else 'photo'
-    
-    content = {
-        'type': content_type,
-        'file_id': image_url,  # Для URL-адресов aiogram сам обработает file_id
-        'image_url': image_url,
-        'caption': '' # Подпись не нужна
+        
+    fail_texts = {
+        'ru': "Не удалось получить изображение. Попробуйте позже.",
+        'en': "Sorry, couldn't fetch an image right now. Please try again later."
     }
 
-    # Используем существующий обработчик для консистентной отправки
-    await process_new_post(
-        bot_instance=message.bot,
+    await _process_anime_command(
+        message=message,
         board_id=board_id,
-        user_id=user_id,
-        content=content,
-        reply_to_post=None,
-        is_shadow_muted=is_shadow_muted
+        image_fetcher=get_random_anime_image,
+        fail_texts=fail_texts
     )
 
+@dp.message(Command("nsfw"))
+async def cmd_nsfw(message: types.Message, board_id: str | None):
+    """Отправляет в чат гарантированно NSFW-изображение."""
+    if not board_id:
+        return
+        
+    fail_texts = {
+        'ru': "Не удалось получить NSFW-изображение. Попробуйте позже.",
+        'en': "Sorry, couldn't fetch an NSFW image right now. Please try again later."
+    }
+
+    await _process_anime_command(
+        message=message,
+        board_id=board_id,
+        image_fetcher=get_nsfw_anime_image,
+        fail_texts=fail_texts
+    )
+
+    
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: Message, board_id: str | None):
     if not board_id: return
@@ -6298,7 +6365,10 @@ async def delete_message_after_delay(message: types.Message, delay: int):
     await asyncio.sleep(delay)
     try:
         await message.delete()
-    except Exception:
+    # ИЗМЕНЕНИЕ 3: Замена Exception на конкретное исключение Telegram
+    except TelegramBadRequest:
+        # Это ожидаемое поведение, если сообщение уже было удалено
+        # вручную или другим процессом. Просто игнорируем.
         pass
     
 @dp.message(Command("zaputin"))
@@ -7608,7 +7678,7 @@ async def thread_notifier():
                     })
 
 
-async def _run_background_task(task_coro: Awaitable, task_name: str):
+async def _run_background_task(task_coro: Awaitable[Any], task_name: str):
     """
     Надежная обертка для фоновых задач, обеспечивающая логирование ошибок и перезапуск.
     """
