@@ -7,3 +7,4 @@ future
 python-dotenv
 gitpython
 markovify
+pympler
