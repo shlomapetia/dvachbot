@@ -629,7 +629,8 @@ GELBOORU_NEGATIVE_TAGS = [
     "-monster_cock",
 ]
 
-# --- КОНСТАНТЫ С БАЗОВЫМИ ТЕГАМИ ДЛЯ УЛУЧШЕНИЯ РАЗНООБРАЗИЯ ---
+# japanese_translator.py
+
 GELBOORU_NSFW_BASE_TAGS = [
     "1girl", "solo", "ass", "pussy", "breasts", "panties", "thighhighs",
     "nude", "sex", "oral", "blowjob", "cum", "ahegao", "masturbation",
@@ -640,6 +641,31 @@ GELBOORU_NSFW_BASE_TAGS = [
 WAIFUPICS_NSFW_CATEGORIES = [
     "waifu", "neko", "blowjob",
 ]
+
+# --- НОВЫЙ БЛОК: Предзагрузка конфигурации Booru API для избежания блокирующих вызовов ---
+BOORU_API_CONFIGS = {
+    'danbooru': {
+        'url': "https://danbooru.donmai.us/posts.json",
+        'params': {'limit': 1},
+        'user_param': 'login',
+        'key_param': 'api_key',
+        'negative_tags': DANBOORU_NEGATIVE_TAGS,
+        # Загружаем учетные данные один раз при старте
+        'user': os.getenv("DANBOORU_USERNAME"),
+        'key': os.getenv("DANBOORU_API_KEY"),
+    },
+    'gelbooru': {
+        'url': "https://gelbooru.com/index.php",
+        'params': {'page': 'dapi', 's': 'post', 'q': 'index', 'json': 1, 'limit': 1},
+        'user_param': 'user_id',
+        'key_param': 'api_key',
+        'negative_tags': GELBOORU_NEGATIVE_TAGS,
+        # Загружаем учетные данные один раз при старте
+        'user': os.getenv("GELBOORU_USER_ID"),
+        'key': os.getenv("GELBOORU_API_KEY"),
+    }
+}
+# --- КОНЕЦ НОВОГО БЛОКА ---
 
 def convert_number(num_str):
     try:
@@ -771,14 +797,57 @@ async def _process_api_response(api_source: str, response: aiohttp.ClientRespons
     
     return image_url
 
+async def _fetch_image_from_apis(
+    api_definitions: list[dict],
+    fail_message: str,
+    timeout: int = 6
+) -> Optional[str]:
+    """
+    Универсальная функция для обхода списка API и получения URL изображения.
+    """
+    random.shuffle(api_definitions)
+    headers = {'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'}
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+        for api in api_definitions:
+            try:
+                image_url = None
+                api_source_name = api.get("source", "Unknown").capitalize()
+
+                if api.get("type") == "booru":
+                    image_url = await _fetch_from_booru_api(
+                        session=session,
+                        api_type=api["source"],
+                        base_tags=api["base_tags"],
+                        rating_tag=api["rating_tag"],
+                        headers=headers
+                    )
+                elif api.get("type") == "fallback":
+                    async with session.get(api["url"]) as response:
+                        if response.status != 200:
+                            print(f"[{api_source_name}] API Error: Status {response.status}")
+                            continue
+                        image_url = await _process_api_response(api['source'], response)
+                
+                if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
+                    print(f"[{api_source_name}] Image received: {image_url}")
+                    return image_url
+                elif image_url is not None:
+                    print(f"[{api_source_name}] Invalid image URL or format: {image_url}")
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                print(f"[{api.get('source', 'Unknown').capitalize()}] Request failed: {e}")
+                continue
+    
+    print(f"⛔ {fail_message}")
+    return None
+
 async def get_random_anime_image() -> Optional[str]:
     """
-    Получает URL случайной аниме-картинки с нескольких API, включая Gelbooru для NSFW.
-    (ВЕРСЯ С ИСПРАВЛЕННОЙ ФИЛЬТРАЦИЕЙ ТЕГОВ)
+    Получает URL случайной аниме-картинки. Логика вынесена в _fetch_image_from_apis.
     """
     is_nsfw_request = random.random() < 0.25
     is_gif_request = random.random() < 0.1
-
     apis = []
     
     if is_gif_request:
@@ -797,7 +866,7 @@ async def get_random_anime_image() -> Optional[str]:
         print(f"[ANIME DEBUG] Attempting to fetch a static image (NSFW: {is_nsfw_request})...")
         if is_nsfw_request:
             apis = [
-                {"type": "booru", "source": "gelbooru"},
+                {"type": "booru", "source": "gelbooru", "base_tags": random.choice(GELBOORU_NSFW_BASE_TAGS), "rating_tag": random.choice(['rating:explicit', 'rating:questionable'])},
                 {"type": "fallback", "url": f"https://api.waifu.pics/nsfw/{random.choice(['waifu', 'neko'])}", "source": "waifu.pics (nsfw-static)"},
                 {"type": "fallback", "url": f"https://nekos.best/api/v2/{random.choice(['pussy', 'neko', 'feet', 'yuri', 'cum', 'erofeet', 'blowjob', 'lewd'])}", "source": "nekos.best (nsfw-static)"}
             ]
@@ -807,150 +876,40 @@ async def get_random_anime_image() -> Optional[str]:
                 {"type": "fallback", "url": "https://nekos.best/api/v2/waifu", "source": "nekos.best (sfw-static)"}
             ]
 
-    random.shuffle(apis)
-
-    headers = {'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'}
-    
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as session:
-        for api in apis:
-            try:
-                image_url = None
-                api_source_name = api.get("source", "Unknown").capitalize()
-
-                if api.get("type") == "booru":
-                    # --- ИЗМЕНЕНИЕ: Упрощенный и корректный вызов ---
-                    image_url = await _fetch_from_booru_api(
-                        session=session,
-                        api_type=api["source"],
-                        base_tags=random.choice(GELBOORU_NSFW_BASE_TAGS),
-                        rating_tag=random.choice(['rating:explicit', 'rating:questionable']),
-                        headers=headers
-                    )
-                elif api.get("type") == "fallback":
-                    async with session.get(api["url"]) as response:
-                        if response.status != 200:
-                            print(f"[{api_source_name}] API Error: Status {response.status}")
-                            continue
-                        image_url = await _process_api_response(api['source'], response)
-                
-                if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
-                    print(f"[{api_source_name}] Image received: {image_url}")
-                    return image_url
-                else:
-                    if image_url is not None:
-                        print(f"[{api_source_name}] Invalid image URL or format: {image_url}")
-
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                print(f"[{api.get('source', 'Unknown').capitalize()}] Request failed due to network/timeout error: {e}")
-                continue
-    
-    print("⛔ All random image APIs failed to provide an image.")
-    return None
+    return await _fetch_image_from_apis(apis, "All random image APIs failed to provide an image.")
 
 async def get_monogatari_image() -> Optional[str]:
     """
-    Получает URL случайной картинки из серии Monogatari.
-    (ФИНАЛЬНАЯ ВЕРСИЯ С РЕФАКТОРИНГОМ)
+    Получает URL случайной картинки из серии Monogatari. Логика вынесена в _fetch_image_from_apis.
     """
+    rating_tag = 'rating:safe'
+    if random.random() < 0.15:
+        rating_tag = random.choice(['rating:questionable', 'rating:explicit'])
+        
     apis = [
-        {"type": "booru", "source": "danbooru"},
-        {"type": "booru", "source": "gelbooru"},
+        {"type": "booru", "source": "danbooru", "base_tags": "monogatari_series", "rating_tag": rating_tag},
+        {"type": "booru", "source": "gelbooru", "base_tags": "monogatari_series", "rating_tag": rating_tag},
         {"type": "fallback", "url": "https://api.waifu.pics/sfw/waifu", "source": "waifu.pics (fallback)"},
         {"type": "fallback", "url": "https://nekos.best/api/v2/waifu", "source": "nekos.best (fallback)"}
     ]
-    random.shuffle(apis)
-
-    headers = {'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'}
     
-    if random.random() < 0.15:
-        rating_tag = random.choice(['rating:questionable', 'rating:explicit'])
-    else:
-        rating_tag = 'rating:safe'
-    
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
-        for api in apis:
-            try:
-                image_url = None
-                if api["type"] == "booru":
-                    # --- ИЗМЕНЕНИЕ: Упрощенный вызов ---
-                    image_url = await _fetch_from_booru_api(
-                        session=session,
-                        api_type=api["source"],
-                        base_tags='monogatari_series',
-                        rating_tag=rating_tag,
-                        headers=headers
-                    )
-                else:
-                    async with session.get(api["url"]) as response:
-                        if response.status != 200:
-                            print(f"[{api['source']}] API Error: Status {response.status}")
-                            continue
-                        image_url = await _process_api_response(api['source'], response)
-
-                if image_url and image_url.lower().endswith(('.png', 'jpeg', '.jpg', '.gif', '.webp')):
-                    print(f"[{api['source'].capitalize()}] Image received: {image_url}")
-                    return image_url
-                else:
-                    if image_url is not None:
-                        print(f"[{api['source'].capitalize()}] Invalid image URL or format: {image_url}")
-                    continue
-
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                print(f"[{api['source'].capitalize()}] Request failed due to network/timeout error: {e}")
-                continue
-    
-    print("⛔ All Monogatari-related and fallback APIs failed to provide an image.")
-    return None
+    return await _fetch_image_from_apis(
+        api_definitions=apis,
+        fail_message="All Monogatari-related and fallback APIs failed to provide an image.",
+        timeout=8
+    )
 
 async def get_nsfw_anime_image() -> Optional[str]:
     """
-    Получает URL ГАРАНТИРОВАННО NSFW аниме-картинки с нескольких API.
-    (ФИНАЛЬНАЯ ВЕРСИЯ С РЕФАКТОРИНГОМ)
+    Получает URL ГАРАНТИРОВАННО NSFW аниме-картинки. Логика вынесена в _fetch_image_from_apis.
     """
     apis = [
-        {"type": "booru", "source": "gelbooru"},
+        {"type": "booru", "source": "gelbooru", "base_tags": random.choice(GELBOORU_NSFW_BASE_TAGS), "rating_tag": random.choice(['rating:explicit', 'rating:questionable'])},
         {"type": "fallback", "url": f"https://api.waifu.pics/nsfw/{random.choice(WAIFUPICS_NSFW_CATEGORIES)}", "source": "waifu.pics (nsfw-static)"},
         {"type": "fallback", "url": f"https://nekos.best/api/v2/{random.choice(['pussy', 'neko', 'feet', 'yuri', 'cum', 'erofeet', 'blowjob', 'lewd'])}", "source": "nekos.best (nsfw-static)"}
     ]
-    random.shuffle(apis)
 
-    headers = {'User-Agent': 'DvachChatBot/1.0 (by ShlomaPetia on Telegram)'}
-    
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as session:
-        for api in apis:
-            try:
-                image_url = None
-                api_source_name = api.get("source", "Unknown").capitalize()
-
-                if api.get("type") == "booru":
-                    # --- ИЗМЕНЕНИЕ: Упрощенный вызов ---
-                    image_url = await _fetch_from_booru_api(
-                        session=session,
-                        api_type=api["source"],
-                        base_tags=random.choice(GELBOORU_NSFW_BASE_TAGS),
-                        rating_tag=random.choice(['rating:explicit', 'rating:questionable']),
-                        headers=headers
-                    )
-                elif api.get("type") == "fallback":
-                    async with session.get(api["url"]) as response:
-                        if response.status != 200:
-                            print(f"[{api_source_name}] API Error: Status {response.status}")
-                            continue
-                        image_url = await _process_api_response(api['source'], response)
-                
-                if image_url and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
-                    print(f"[{api_source_name}] Image received: {image_url}")
-                    return image_url
-                else:
-                    if image_url is not None:
-                        print(f"[{api_source_name}] Invalid image URL or format: {image_url}")
-
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                print(f"[{api.get('source', 'Unknown').capitalize()}] Request failed due to network/timeout error: {e}")
-                continue
-    
-    print("⛔ All NSFW image APIs failed to provide an image.")
-    return None
+    return await _fetch_image_from_apis(apis, "All NSFW image APIs failed to provide an image.")
 
 async def _fetch_from_booru_api(
     session: aiohttp.ClientSession,
@@ -961,26 +920,10 @@ async def _fetch_from_booru_api(
 ) -> Optional[str]:
     """
     Универсальная функция для получения изображения с Booru-подобных API.
-    (ФИНАЛЬНАЯ ВЕРСИЯ С РЕФАКТОРИНГОМ)
+    Использует предзагруженную конфигурацию для избежания блокирующих вызовов os.getenv.
     """
-    api_configs = {
-        'danbooru': {
-            'url': "https://danbooru.donmai.us/posts.json",
-            'params': {'limit': 1},
-            'user_env': "DANBOORU_USERNAME", 'key_env': "DANBOORU_API_KEY",
-            'user_param': 'login', 'key_param': 'api_key', # <-- ИЗМЕНЕНИЕ
-            'negative_tags': DANBOORU_NEGATIVE_TAGS
-        },
-        'gelbooru': {
-            'url': "https://gelbooru.com/index.php",
-            'params': {'page': 'dapi', 's': 'post', 'q': 'index', 'json': 1, 'limit': 1},
-            'user_env': "GELBOORU_USER_ID", 'key_env': "GELBOORU_API_KEY",
-            'user_param': 'user_id', 'key_param': 'api_key', # <-- ИЗМЕНЕНИЕ
-            'negative_tags': GELBOORU_NEGATIVE_TAGS
-        }
-    }
-
-    config = api_configs.get(api_type)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Используем предзагруженную конфигурацию ---
+    config = BOORU_API_CONFIGS.get(api_type)
     if not config:
         print(f"[_fetch_from_booru_api] Unknown api_type: {api_type}")
         return None
@@ -991,10 +934,9 @@ async def _fetch_from_booru_api(
     params = config['params'].copy()
     params['tags'] = final_tags
 
-    user = os.getenv(config['user_env'])
-    key = os.getenv(config['key_env'])
+    user = config['user']
+    key = config['key']
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Унифицированный блок добавления учетных данных ---
     if user and key:
         params[config['user_param']] = user
         params[config['key_param']] = key
@@ -1030,7 +972,7 @@ async def _fetch_from_booru_api(
                 return None
             
             image_url = post.get('file_url')
-            if image_url and isinstance(image_url, str) and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+            if image_url and isinstance(image_url, str) and image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
                 return image_url
             else:
                 print(f"[{api_type.capitalize()}] Post ignored. Reason: 'file_url' missing or invalid. Post: {post}")
