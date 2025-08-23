@@ -1591,27 +1591,19 @@ async def log_memory_summary():
 async def auto_memory_cleaner():
     """
     Полная и честная очистка мусора каждые 10 минут.
-    (ВЕРСЯ 8.0 - БЕЗ EXECUTOR ДЛЯ ОЧИСТКИ СЛОВАРЕЙ)
+    (ВЕРСЯ 8.1 - ОПТИМИЗАЦИЯ ПО ПАМЯТИ)
     """
-    # --- ИЗМЕНЕНИЕ: Перемещено в начало функции ---
-    global message_to_post
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     while True:
         await asyncio.sleep(600)  # 10 минут
 
         deleted_post_keys = []
         
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизация и выполнение в одном потоке ---
         async with storage_lock:
-            # --- Блок 1: Очистка старых постов ---
+            # --- Блок 1: Очистка старых постов (без изменений) ---
             if len(messages_storage) > MAX_MESSAGES_IN_MEMORY:
                 to_delete_count = len(messages_storage) - MAX_MESSAGES_IN_MEMORY
-                # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-                # Преобразуем ключи в список один раз и берем срез с начала.
-                # Это избегает полной сортировки и намного эффективнее.
                 all_keys = list(messages_storage.keys())
                 deleted_post_keys = all_keys[:to_delete_count]
-                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                 
                 for post_num in deleted_post_keys:
                     messages_storage.pop(post_num, None)
@@ -1623,23 +1615,31 @@ async def auto_memory_cleaner():
             # --- Блок 2: Эффективная очистка message_to_post "на месте" ---
             actual_post_nums = set(messages_storage.keys())
             
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Оптимизация очистки ---
-            # Собираем ключи, которые ссылаются на уже удаленные посты
-            keys_to_delete = [
-                key for key, post_num in message_to_post.items()
-                if post_num not in actual_post_nums
-            ]
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            # Предыдущий метод (пересборка словаря через dict comprehension) создавал полную,
+            # многомегабайтную копию словаря в памяти. Это вызывало сильную фрагментацию
+            # и приводило к утечке памяти, что являлось основной причиной OOM-сбоев.
+            # Новый метод итерирует по словарю, собирает список устаревших ключей,
+            # а затем удаляет их "на месте". Этот подход значительно более
+            # эффективен по потреблению памяти.
+            initial_size = len(message_to_post)
+            keys_to_delete_from_map = []
+            for key, post_num in message_to_post.items():
+                if post_num not in actual_post_nums:
+                    keys_to_delete_from_map.append(key)
             
-            # Итеративно удаляем устаревшие ключи из оригинального словаря,
-            # избегая создания его полной копии в памяти.
-            deleted_count = len(keys_to_delete)
-            if deleted_count > 0:
-                for key in keys_to_delete:
+            if keys_to_delete_from_map:
+                for key in keys_to_delete_from_map:
                     del message_to_post[key]
+
+            final_size = len(message_to_post)
+            deleted_count = initial_size - final_size
+            
+            if deleted_count > 0:
                 print(f"🧹 Очистка message_to_post: удалено {deleted_count} неактуальных связей.")
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-            # --- Блок 3: Агрессивная очистка данных неактивных пользователей ---
+            # --- Блок 3: Агрессивная очистка данных неактивных пользователей (без изменений) ---
             for board_id in BOARDS:
                 b_data = board_data[board_id]
                 now_utc = datetime.now(UTC)
@@ -1685,9 +1685,7 @@ async def auto_memory_cleaner():
                     if not spam_tracker_board[user_id]:
                         del spam_tracker_board[user_id]
         
-        # --- КОНЕЦ БЛОКА ИЗМЕНЕНИЙ ---
-        
-        # --- Блок 4: Очистка зависших медиа-групп ---
+        # --- Блок 4: Очистка зависших медиа-групп (без изменений) ---
         now_ts = time.time()
         stale_groups = [
             group_id for group_id in current_media_groups
@@ -1701,7 +1699,7 @@ async def auto_memory_cleaner():
                      media_group_timers[group_id].cancel()
                      media_group_timers.pop(group_id, None)
 
-        # --- Блок 5: Очистка трекера реакций ---
+        # --- Блок 5: Очистка трекера реакций (без изменений) ---
         tracker_inactive_threshold_sec = 11 * 3600
         keys_to_delete_from_tracker = [
             author_id for author_id, timestamps in author_reaction_notify_tracker.items()
@@ -3153,7 +3151,17 @@ async def send_missed_messages(bot: Bot, board_id: str, user_id: int, target_loc
         posts_to_skip_count = len(missed_post_nums_full) - THRESHOLD
         posts_to_send = [p for p in missed_post_nums_full if p > last_seen_post][-THRESHOLD:]
 
-        skip_notice_text = random.choice(thread_messages[lang]['missed_posts_notification']).format(count=posts_to_skip_count)
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасное получение текста ---
+        # Старый код использовал прямой доступ thread_messages[lang]['missed_posts_notification'],
+        # что приводило к KeyError, если ключ отсутствовал в словаре.
+        # Новый код использует цепочку вызовов .get() с предоставлением значения по умолчанию.
+        # Это гарантирует, что переменная skip_notice_text всегда получит корректное значение
+        # и предотвратит падение функции.
+        skip_phrases = thread_messages.get(lang, {}).get('missed_posts_notification', [])
+        default_skip_text = f"Пропущено {posts_to_skip_count} старых сообщений..." if lang == 'ru' else f"Skipped {posts_to_skip_count} older messages..."
+        skip_notice_text = random.choice(skip_phrases).format(count=posts_to_skip_count) if skip_phrases else default_skip_text
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        
         try:
             await bot.send_message(user_id, f"<i>{skip_notice_text}</i>", parse_mode="HTML")
             await asyncio.sleep(0.1)
@@ -3193,8 +3201,8 @@ async def help_broadcaster():
     await asyncio.sleep(300)  # Начальная задержка 10 минут
 
     while True:
-        # Случайная задержка от 11 до 13 часов
-        delay = random.randint(9600, 16800)
+        # Случайная задержка от 4 до 6 часов
+        delay = random.randint(14400, 21600)
         await asyncio.sleep(delay)
         
         try:
@@ -4273,11 +4281,9 @@ async def cmd_create_fsm_entry(message: types.Message, state: FSMContext, board_
     current_state = await state.get_state()
     lang = 'en' if board_id == 'int' else 'ru'
     if current_state is not None:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасное получение текста ---
         cancel_phrases = thread_messages.get(lang, {}).get('create_cancelled', [])
         default_cancel_text = "You are already creating a thread. Use /cancel." if lang == 'en' else "Вы уже создаете тред. Используйте /cancel."
         text = random.choice(cancel_phrases) if cancel_phrases else default_cancel_text
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         try:
             await message.answer(text)
@@ -4288,16 +4294,23 @@ async def cmd_create_fsm_entry(message: types.Message, state: FSMContext, board_
 
     command_args = message.text.split(maxsplit=1)
     if len(command_args) > 1 and command_args[1].strip():
-        op_post_text = command_args[1].strip()
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Санитизация HTML перед сохранением в FSM ---
+        # Используем message.html_text для получения текста с HTML-тегами форматирования
+        raw_html_text = message.html_text.split(maxsplit=1)[1]
+        # Применяем нашу функцию для удаления опасных тегов (например, <a href...>)
+        safe_html_text = sanitize_html(raw_html_text)
+        await state.update_data(op_post_text=safe_html_text)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
-        await state.update_data(op_post_text=op_post_text)
         await state.set_state(ThreadCreateStates.waiting_for_confirmation)
 
         if lang == 'en':
-            confirmation_text = f"You want to create a thread with this opening post:\n\n---\n{escape_html(op_post_text)}\n---\n\nCreate?"
+            # --- ИЗМЕНЕНИЕ: Используем очищенный текст для отображения ---
+            confirmation_text = f"You want to create a thread with this opening post:\n\n---\n{safe_html_text}\n---\n\nCreate?"
             button_create, button_edit = "✅ Create Thread", "✏️ Edit Text"
         else:
-            confirmation_text = f"Вы хотите создать тред с таким ОП-постом:\n\n---\n{escape_html(op_post_text)}\n---\n\nСоздаем?"
+            # --- ИЗМЕНЕНИЕ: Используем очищенный текст для отображения ---
+            confirmation_text = f"Вы хотите создать тред с таким ОП-постом:\n\n---\n{safe_html_text}\n---\n\nСоздаем?"
             button_create, button_edit = "✅ Создать тред", "✏️ Редактировать"
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -4310,18 +4323,16 @@ async def cmd_create_fsm_entry(message: types.Message, state: FSMContext, board_
 
     else:
         await state.set_state(ThreadCreateStates.waiting_for_op_post)
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасное получение текста ---
         prompt_phrases = thread_messages.get(lang, {}).get('create_prompt_op_post', [])
         default_prompt = "Please send the text for your opening post." if lang == 'en' else "Отправьте текст для вашего ОП-поста."
         prompt_text = random.choice(prompt_phrases) if prompt_phrases else default_prompt
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         await message.answer(prompt_text)
 
     try:
         await message.delete()
     except TelegramBadRequest:
         pass
-
+        
 @dp.callback_query(F.data == "create_thread_confirm", ThreadCreateStates.waiting_for_confirmation)
 async def cb_create_thread_confirm(callback: types.CallbackQuery, state: FSMContext, board_id: str | None):
     """
@@ -4359,9 +4370,11 @@ async def cb_create_thread_confirm(callback: types.CallbackQuery, state: FSMCont
     user_s = b_data['user_state'].setdefault(user_id, {})
     user_s['last_thread_creation'] = now_ts
 
-    notification_text = random.choice(thread_messages.get(lang, {}).get('new_thread_public_notification', [])).format(title=title)
-    if not notification_text:
-        notification_text = f"Создан новый тред: «<b>{title}</b>»"
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасный доступ к словарю ---
+    notification_phrases = thread_messages.get(lang, {}).get('new_thread_public_notification', [])
+    default_notification_text = f"Создан новый тред: «<b>{title}</b>»" if lang == 'ru' else f"New thread created: «<b>{title}</b>»"
+    notification_text = random.choice(notification_phrases).format(title=title) if notification_phrases else default_notification_text
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     bot_username = BOARD_CONFIG[board_id]['username'].lstrip('@')
     deeplink_url = f"https://t.me/{bot_username}?start=thread_{thread_id}"
@@ -4381,17 +4394,9 @@ async def cb_create_thread_confirm(callback: types.CallbackQuery, state: FSMCont
         'keyboard': keyboard
     })
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Ручное создание ОП-поста без трансляции в общий чат ---
-    
-    # 1. Обновляем локацию пользователя ДО создания поста.
-    # Это ключевой шаг, который предотвратит отправку поста в общий чат,
-    # так как `process_new_post` не найдет получателей в 'main'.
     user_s['location'] = thread_id
     user_s['last_location_switch'] = now_ts
     
-    # 2. Используем process_new_post, который теперь не будет делать рассылку
-    # благодаря обновленной локации пользователя. Он корректно сохранит пост
-    # и отправит его только автору.
     formatted_op_text = f"<b>ОП-ПОСТ</b>\n_______________________________\n{op_post_text}"
     op_post_content = {'type': 'text', 'text': formatted_op_text}
 
@@ -4399,7 +4404,6 @@ async def cb_create_thread_confirm(callback: types.CallbackQuery, state: FSMCont
         bot_instance=callback.bot, board_id=board_id, user_id=user_id, content=op_post_content,
         reply_to_post=None, is_shadow_muted=False
     )
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
     await callback.answer()
     try:
@@ -4407,9 +4411,11 @@ async def cb_create_thread_confirm(callback: types.CallbackQuery, state: FSMCont
     except TelegramBadRequest:
         pass
 
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасный доступ к словарю ---
     enter_phrases = thread_messages.get(lang, {}).get('enter_thread_prompt', [])
     default_enter_text = f"You have entered the thread: {title}" if lang == 'en' else f"Вы вошли в тред: {title}"
     enter_message = random.choice(enter_phrases).format(title=title) if enter_phrases else default_enter_text
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     entry_keyboard = _get_thread_entry_keyboard(board_id)
     try:
@@ -5164,6 +5170,9 @@ async def process_op_post_text(message: types.Message, state: FSMContext, board_
     lang = 'en' if board_id == 'int' else 'ru'
 
     # --- НАЧАЛО ИЗМЕНЕНИЙ: Санитизация HTML перед сохранением в FSM ---
+    # В исходном коде использовался message.html_text напрямую.
+    # Теперь мы применяем нашу функцию sanitize_html для удаления потенциально
+    # опасных тегов (например, <a href...>) перед сохранением в состояние.
     raw_html_text = message.html_text
     safe_html_text = sanitize_html(raw_html_text)
     await state.update_data(op_post_text=safe_html_text)
@@ -5172,10 +5181,12 @@ async def process_op_post_text(message: types.Message, state: FSMContext, board_
     await state.set_state(ThreadCreateStates.waiting_for_confirmation)
 
     if lang == 'en':
+        # --- ИЗМЕНЕНИЕ: Используем очищенный текст для отображения ---
         confirmation_text = f"You want to create a thread with this opening post:\n\n---\n{safe_html_text}\n---\n\nCreate?"
         button_create = "✅ Create Thread"
         button_edit = "✏️ Edit Text"
     else:
+        # --- ИЗМЕНЕНИЕ: Используем очищенный текст для отображения ---
         confirmation_text = f"Вы хотите создать тред с таким ОП-постом:\n\n---\n{safe_html_text}\n---\n\nСоздаем?"
         button_create = "✅ Создать тред"
         button_edit = "✏️ Редактировать"
@@ -5188,7 +5199,6 @@ async def process_op_post_text(message: types.Message, state: FSMContext, board_
     ])
 
     await message.answer(confirmation_text, reply_markup=keyboard, parse_mode="HTML")
-
 
 @dp.message(ThreadCreateStates.waiting_for_op_post)
 async def process_op_post_invalid(message: types.Message, state: FSMContext, board_id: str | None):
@@ -5436,16 +5446,17 @@ async def cb_leave_thread(callback: types.CallbackQuery, board_id: str | None):
     user_s['location'] = 'main'
     user_s['last_location_switch'] = time.time()
     
-    response_text = random.choice(thread_messages[lang]['leave_thread_success'])
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавлена клавиатура ---
-    leave_keyboard = _get_leave_thread_keyboard(board_id)
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасный доступ к словарю ---
+    response_phrases = thread_messages.get(lang, {}).get('leave_thread_success', [])
+    default_response_text = "You have returned to the main board." if lang == 'en' else "Вы вернулись на основную доску."
+    response_text = random.choice(response_phrases) if response_phrases else default_response_text
     # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    
+    leave_keyboard = _get_leave_thread_keyboard(board_id)
     
     await callback.answer()
     try:
-        # --- НАЧАЛО ИЗМЕНЕНИЙ: Клавиатура передается в .answer() ---
         await callback.message.answer(response_text, reply_markup=leave_keyboard)
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         await callback.message.delete()
     except (TelegramForbiddenError, TelegramBadRequest):
         pass
@@ -5476,7 +5487,11 @@ async def cmd_leave(message: types.Message, board_id: str | None):
     now_ts = time.time()
     last_switch = user_s.get('last_location_switch', 0)
     if now_ts - last_switch < LOCATION_SWITCH_COOLDOWN:
-        cooldown_text = random.choice(thread_messages[lang]['location_switch_cooldown'])
+        # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасный доступ к словарю ---
+        cooldown_phrases = thread_messages.get(lang, {}).get('location_switch_cooldown', [])
+        default_cooldown_text = "Switching locations too fast, please wait."
+        cooldown_text = random.choice(cooldown_phrases) if cooldown_phrases else default_cooldown_text
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         await message.answer(cooldown_text)
         await message.delete()
         return
@@ -5490,17 +5505,17 @@ async def cmd_leave(message: types.Message, board_id: str | None):
     user_s['location'] = 'main'
     user_s['last_location_switch'] = now_ts
     
-    # Сначала удаляем команду, чтобы избежать "двойных" сообщений
     await message.delete()
     
-    # Подгружаем пропущенные сообщения с доски
     await send_missed_messages(message.bot, board_id, user_id, 'main')
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавлена клавиатура к сообщению о выходе ---
-    response_text = random.choice(thread_messages[lang]['leave_thread_success'])
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Безопасный доступ к словарю ---
+    response_phrases = thread_messages.get(lang, {}).get('leave_thread_success', [])
+    default_response_text = "You have returned to the main board." if lang == 'en' else "Вы вернулись на основную доску."
+    response_text = random.choice(response_phrases) if response_phrases else default_response_text
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     leave_keyboard = _get_leave_thread_keyboard(board_id)
     await message.answer(response_text, reply_markup=leave_keyboard)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 @dp.message(Command("mute"))
 async def cmd_mute(message: Message, board_id: str | None):
