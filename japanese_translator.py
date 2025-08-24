@@ -702,78 +702,82 @@ def transliterate_word(word, kana_map):
             word = word[1:]
     return ''.join(result)
 
-def to_kana(text, kana_map):
-    tokens = re.findall(r'[\w-]+|[^\w\s-]', text.lower())
-    result = []
-    for token in tokens:
-        if token.isdigit():
-            result.append(convert_number(token))
-        elif re.match(r'^[a-zA-Zа-яА-ЯёЁ-]+$', token):
-            result.append(transliterate_word(token, kana_map))
-        else:
-            result.append(token)
-    return ''.join(result)
+# Компилируем регулярное выражение один раз при загрузке модуля для максимальной производительности.
+# Оно разбивает строку, сохраняя разделители (пробелы, знаки препинания).
+TOKENIZER_REGEX = re.compile(r'([\s.,!?;:]+)')
 
-
-def anime_transform(text):
-    """Гибридная функция преобразования в аниме-стиль с улучшенной грамматикой и обработкой смеха."""
+def anime_transform(text: str) -> str:
+    """
+    Гибридная функция преобразования в аниме-стиль. Оптимизирована для высокой производительности.
+    """
     if not text.strip():
         return text
 
-    # --- ИЗМЕНЕНИЕ: Предварительная обработка смеха ---
-    # Паттерн для поиска повторяющихся "ах", "ха", "хв" и т.д. длиной 4+ символов
     laugh_pattern = r'([ахвхвaхвхв]+[ахвхвaхвхв]{3,})'
     japanese_laughs = ["草", "www", "（笑）", "www草", "大草原"]
     text = re.sub(laugh_pattern, lambda m: random.choice(japanese_laughs), text, flags=re.IGNORECASE)
 
-    words = text.split(' ')
-    transformed_words = []
+    # Используем один вызов re.split для токенизации всего текста.
+    tokens = TOKENIZER_REGEX.split(text)
+    
+    transformed_tokens = []
     kana_map = random.choice([HIRAGANA_MAP, KATAKANA_MAP])
 
-    for word in words:
-        if not word: continue
-        
-        match = re.match(r'^(.+?)([.,!?;:]+)$', word)
-        if match:
-            clean_word, punctuation = match.groups()
-        else:
-            clean_word, punctuation = word, ''
-        base_word = clean_word.lower()
+    for token in tokens:
+        if not token: continue
 
+        # Проверяем, является ли токен разделителем. Если да, просто добавляем его.
+        if TOKENIZER_REGEX.match(token):
+            transformed_tokens.append(token)
+            continue
+        
+        base_word = token.lower()
+        
+        # Сначала ищем точное совпадение в словаре замен.
         if base_word in JAPANESE_WORD_REPLACEMENTS:
             translation = JAPANESE_WORD_REPLACEMENTS[base_word]
             translated_word = random.choice(translation) if isinstance(translation, list) else translation
             
             if base_word in PRONOUNS:
-                if random.random() < 0.7:
-                    translated_word += 'は'
-                else:
-                    translated_word += 'が'
+                if random.random() < 0.7: translated_word += 'は'
+                else: translated_word += 'が'
             
-            transformed_words.append(translated_word + punctuation)
+            transformed_tokens.append(translated_word)
+        # Если нет, транслитерируем.
         else:
-            transliterated_word = to_kana(clean_word, kana_map)
-            transformed_words.append(transliterated_word + punctuation)
+            transliterated_word = to_kana(token, kana_map)
+            transformed_tokens.append(transliterated_word)
 
+    # Собираем финальную фразу и добавляем случайные частицы/смайлики.
+    result_text = ''.join(transformed_tokens)
+    words_for_embellishment = result_text.split()
+    
     final_words = []
-    for word in transformed_words:
+    for word in words_for_embellishment:
         final_words.append(word)
-        if random.random() < 0.15:
-            final_words[-1] += random.choice(PARTICLES)
-        if random.random() < 0.10:
-            final_words[-1] += random.choice(NYA_INTERJECTIONS)
-        if random.random() < 0.08:
-            final_words.append(random.choice(KAWAII_EMOJIS).strip())
-
+        if random.random() < 0.15: final_words[-1] += random.choice(PARTICLES)
+        if random.random() < 0.10: final_words[-1] += random.choice(NYA_INTERJECTIONS)
+        if random.random() < 0.08: final_words.append(random.choice(KAWAII_EMOJIS).strip())
+    
     result = ' '.join(final_words)
-
-    if random.random() < 0.35:
-        result += random.choice(END_PHRASES)
-
-    if random.random() < 0.5:
-        result += random.choice(KAWAII_EMOJIS)
+    
+    if random.random() < 0.35: result += random.choice(END_PHRASES)
+    if random.random() < 0.5: result += random.choice(KAWAII_EMOJIS)
         
     return result.strip()
+
+def to_kana(text: str, kana_map: dict) -> str:
+    """
+    Транслитерирует одно слово. Больше не использует re.findall для оптимизации.
+    """
+    if text.isdigit():
+        return convert_number(text)
+    elif re.match(r'^[a-zA-Zа-яА-ЯёЁ-]+$', text):
+        return transliterate_word(text, kana_map)
+    else:
+        return text
+
+# --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 
 async def _process_api_response(api_source: str, response: aiohttp.ClientResponse) -> Optional[str]:
