@@ -41,7 +41,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-time.sleep(3)
+time.sleep(4)
 
 import deanonymizer
 from deanonymizer import (
@@ -3224,8 +3224,8 @@ async def help_broadcaster():
     await asyncio.sleep(300)  # Начальная задержка 10 минут
 
     while True:
-        # Случайная задержка от 4 до 6 часов
-        delay = random.randint(14400, 21600)
+        # Случайная задержка от 6 до 20 часов
+        delay = random.randint(21600, 72000)
         await asyncio.sleep(delay)
         
         try:
