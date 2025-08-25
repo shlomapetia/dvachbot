@@ -930,11 +930,15 @@ async def global_error_handler(event: types.ErrorEvent) -> bool:
                     # Используем list() для создания копии ключей, чтобы безопасно изменять словарь во время итерации
                     for post_num in list(post_to_messages.keys()):
                         # Проверяем, есть ли пользователь в получателях этого поста
-                        if user_id in post_to_messages[post_num]:
+                        if user_id in post_to_messages.get(post_num, {}):
                             del post_to_messages[post_num][user_id]
                             # Если у поста больше не осталось получателей, удаляем и сам пост из словаря
                             if not post_to_messages[post_num]:
                                 del post_to_messages[post_num]
+                
+                # --- ДОБАВЛЕНО: Очистка из глобального трекера реакций ---
+                async with author_reaction_notify_lock:
+                    author_reaction_notify_tracker.pop(user_id, None)
 
                 print(f"🚫 [{board_id}] Пользователь {user_id} заблокировал бота. Все его данные удалены.")
                 # --- КОНЕЦ ИЗМЕНЕНИЙ ---
@@ -1686,14 +1690,16 @@ async def auto_memory_cleaner():
             if deleted_post_keys:
                 print(f"🧹 Очистка памяти: удалено {len(deleted_post_keys)} старых постов из основного хранилища.")
 
-            # --- Блок 2: Эффективная очистка message_to_post "на месте" ---
+            # --- НАЧАЛО ИЗМЕНЕНИЙ: Эффективная очистка message_to_post ---
+            # Создаем множество актуальных номеров постов для быстрой проверки
             actual_post_nums = set(messages_storage.keys())
             
             initial_size = len(message_to_post)
-            keys_to_delete_from_map = []
-            for key, post_num in message_to_post.items():
-                if post_num not in actual_post_nums:
-                    keys_to_delete_from_map.append(key)
+            # Собираем ключи для удаления, чтобы не изменять словарь во время итерации
+            keys_to_delete_from_map = [
+                key for key, post_num in message_to_post.items()
+                if post_num not in actual_post_nums
+            ]
             
             if keys_to_delete_from_map:
                 for key in keys_to_delete_from_map:
@@ -1704,8 +1710,9 @@ async def auto_memory_cleaner():
             
             if deleted_count > 0:
                 print(f"🧹 Очистка message_to_post: удалено {deleted_count} неактуальных связей.")
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Полная очистка данных неактивных пользователей и post_to_messages ---
+            # --- Блок 3: Полная очистка данных неактивных пользователей и post_to_messages ---
             
             # 1. Сначала находим и удаляем неактивных пользователей из данных каждой доски,
             # включая их удаление из множества 'active'.
@@ -1767,7 +1774,6 @@ async def auto_memory_cleaner():
             if purged_post_to_messages_count > 0:
                 print(f"🧹 Глубокая очистка post_to_messages: удалено {purged_post_to_messages_count} неактуальных записей пользователей.")
 
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             # --- Блок 4: Очистка истекших мутов и старых спам-трекеров (логика без изменений) ---
             for board_id in BOARDS:
@@ -7519,115 +7525,123 @@ async def handle_voice(message: Message, board_id: str | None):
 @dp.message(F.media_group_id)
 async def handle_media_group_init(message: Message, board_id: str | None):
     media_group_id = message.media_group_id
-    if not media_group_id or media_group_id in sent_media_groups:
-        return
-
     user_id = message.from_user.id
-    if not board_id: return
-
-    b_data = board_data[board_id]
-
-    if user_id in b_data['users']['banned'] or \
-       (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
+    if not board_id or not media_group_id:
         return
-    
-    b_data['last_activity'][user_id] = datetime.now(UTC)
 
-    is_leader = False
-    async with media_group_creation_lock:
-        if media_group_id not in current_media_groups:
-            is_leader = True
-            current_media_groups[media_group_id] = {
-                'is_initializing': True,
-                'init_event': asyncio.Event() 
-            }
+    # --- НАЧАЛО ИЗМЕНЕНИЙ: Синхронизация обработки по user_id ---
+    async with user_spam_locks[user_id]:
+        if media_group_id in sent_media_groups:
+            return
 
-    group = current_media_groups.get(media_group_id)
-    if not group:
-        return
-    
-    if is_leader:
-        try:
-            fake_text_message = types.Message(
-                message_id=message.message_id, date=message.date, chat=message.chat,
-                from_user=message.from_user, content_type='text', text=f"media_group_{media_group_id}"
-            )
-            if not await check_spam(user_id, fake_text_message, board_id):
-                current_media_groups.pop(media_group_id, None) 
-                await apply_penalty(message.bot, user_id, 'text', board_id)
-                try:
-                    await message.delete()
-                except TelegramBadRequest:
-                    pass
-                if 'init_event' in group:
-                    group['init_event'].set()
-                return
-            
-            reply_to_post = None
-            if message.reply_to_message:
-                async with storage_lock:
-                    lookup_key = (message.chat.id, message.reply_to_message.message_id)
-                    reply_to_post = message_to_post.get(lookup_key)
+        b_data = board_data[board_id]
 
-            user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
-            thread_id = None
-            
-            if board_id in THREAD_BOARDS and user_location != 'main':
-                thread_id = user_location
-                thread_info = b_data.get('threads_data', {}).get(thread_id)
-                if thread_info and not thread_info.get('is_archived'):
-                    _, post_num = await format_header(board_id)
-                    local_post_num = len(thread_info.get('posts', [])) + 1
-                    header = await format_thread_post_header(board_id, local_post_num, user_id, thread_info)
-                else:
-                    thread_id = None
-                    header, post_num = await format_header(board_id)
-            else:
-                header, post_num = await format_header(board_id)
-
-            # --- НАЧАЛО ИЗМЕНЕНИЙ: Санитизация HTML в подписи ---
-            raw_caption_html = getattr(message, 'caption_html_text', message.caption or "")
-            safe_caption_html = sanitize_html(raw_caption_html)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-            group.update({
-                'board_id': board_id, 'post_num': post_num, 'header': header, 'author_id': user_id,
-                'timestamp': datetime.now(UTC), 'media': [], 'caption': safe_caption_html, # <-- ИЗМЕНЕНО
-                'reply_to_post': reply_to_post, 'processed_messages': set(),
-                'source_message_ids': set(),
-                'thread_id': thread_id
-            })
-            group.pop('is_initializing', None)
-        finally:
-            if 'init_event' in group:
-                group['init_event'].set()
-    else:
-        if 'init_event' in group:
-            await group['init_event'].wait()
-
-        group = current_media_groups.get(media_group_id)
-        if not group or group.get('is_initializing'):
+        if user_id in b_data['users']['banned'] or \
+           (b_data['mutes'].get(user_id) and b_data['mutes'][user_id] > datetime.now(UTC)):
             return
         
-    group.get('source_message_ids', set()).add(message.message_id)
-        
-    if message.message_id not in group.get('processed_messages', set()):
-        media_data = {'type': message.content_type, 'file_id': None}
-        if message.photo: media_data['file_id'] = message.photo[-1].file_id
-        elif message.video: media_data['file_id'] = message.video.file_id
-        elif message.document: media_data['file_id'] = message.document.file_id
-        elif message.audio: media_data['file_id'] = message.audio.file_id
-        
-        if media_data['file_id']:
-            group.get('media', []).append(media_data)
-            group.get('processed_messages', set()).add(message.message_id)
+        b_data['last_activity'][user_id] = datetime.now(UTC)
 
-    if media_group_id in media_group_timers:
-        media_group_timers[media_group_id].cancel()
-    
-    media_group_timers[media_group_id] = asyncio.create_task(
-        complete_media_group_after_delay(media_group_id, message.bot, delay=1.5)
-    )
+        is_leader = False
+        async with media_group_creation_lock:
+            if media_group_id not in current_media_groups:
+                is_leader = True
+                current_media_groups[media_group_id] = {
+                    'is_initializing': True,
+                    'init_event': asyncio.Event() 
+                }
+
+        group = current_media_groups.get(media_group_id)
+        if not group:
+            return
+        
+        if is_leader:
+            try:
+                fake_text_message = types.Message(
+                    message_id=message.message_id, date=message.date, chat=message.chat,
+                    from_user=message.from_user, content_type='text', text=f"media_group_{media_group_id}"
+                )
+                if not await check_spam(user_id, fake_text_message, board_id):
+                    current_media_groups.pop(media_group_id, None) 
+                    await apply_penalty(message.bot, user_id, 'text', board_id)
+                    try:
+                        await message.delete()
+                    except TelegramBadRequest:
+                        pass
+                    if 'init_event' in group:
+                        group['init_event'].set()
+                    return
+                
+                reply_to_post = None
+                if message.reply_to_message:
+                    async with storage_lock:
+                        lookup_key = (message.chat.id, message.reply_to_message.message_id)
+                        reply_to_post = message_to_post.get(lookup_key)
+
+                user_location = b_data.get('user_state', {}).get(user_id, {}).get('location', 'main')
+                thread_id = None
+                
+                if board_id in THREAD_BOARDS and user_location != 'main':
+                    thread_id = user_location
+                    thread_info = b_data.get('threads_data', {}).get(thread_id)
+                    if thread_info and not thread_info.get('is_archived'):
+                        _, post_num = await format_header(board_id)
+                        local_post_num = len(thread_info.get('posts', [])) + 1
+                        header = await format_thread_post_header(board_id, local_post_num, user_id, thread_info)
+                    else:
+                        thread_id = None
+                        header, post_num = await format_header(board_id)
+                else:
+                    header, post_num = await format_header(board_id)
+
+                raw_caption_html = getattr(message, 'caption_html_text', message.caption or "")
+                safe_caption_html = sanitize_html(raw_caption_html)
+
+                group.update({
+                    'board_id': board_id, 'post_num': post_num, 'header': header, 'author_id': user_id,
+                    'timestamp': datetime.now(UTC), 'media': [], 'caption': safe_caption_html,
+                    'reply_to_post': reply_to_post, 'processed_messages': set(),
+                    'source_message_ids': set(),
+                    'thread_id': thread_id
+                })
+                group.pop('is_initializing', None)
+            finally:
+                if 'init_event' in group:
+                    group['init_event'].set()
+        else:
+            if 'init_event' in group:
+                # --- НАЧАЛО ИЗМЕНЕНИЙ: Добавление таймаута ---
+                try:
+                    await asyncio.wait_for(group['init_event'].wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    print(f"⚠️ Таймаут ожидания инициализации для media_group {media_group_id}")
+                    return # Прерываем выполнение, если лидер не ответил вовремя
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+            group = current_media_groups.get(media_group_id)
+            if not group or group.get('is_initializing'):
+                return
+            
+        group.get('source_message_ids', set()).add(message.message_id)
+            
+        if message.message_id not in group.get('processed_messages', set()):
+            media_data = {'type': message.content_type, 'file_id': None}
+            if message.photo: media_data['file_id'] = message.photo[-1].file_id
+            elif message.video: media_data['file_id'] = message.video.file_id
+            elif message.document: media_data['file_id'] = message.document.file_id
+            elif message.audio: media_data['file_id'] = message.audio.file_id
+            
+            if media_data['file_id']:
+                group.get('media', []).append(media_data)
+                group.get('processed_messages', set()).add(message.message_id)
+
+        if media_group_id in media_group_timers:
+            media_group_timers[media_group_id].cancel()
+        
+        media_group_timers[media_group_id] = asyncio.create_task(
+            complete_media_group_after_delay(media_group_id, message.bot, delay=1.5)
+        )
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
     
 async def complete_media_group_after_delay(media_group_id: str, bot_instance: Bot, delay: float = 1.5):
     try:
