@@ -465,7 +465,7 @@ async def start_healthcheck():
 
 
 GITHUB_REPO = "https://github.com/shlomapetia/dvachbot-backup.git"
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Проверь, что переменная есть в Railway!
+GITHUB_TOKEN = os.getenv("GATHUB_TOKEN")  # Проверь, что переменная есть в Railway!
 
 async def git_commit_and_push():
     """Надежная функция бэкапа в GitHub"""
@@ -478,7 +478,7 @@ async def git_commit_and_push():
 
     async with git_semaphore:
         try:
-            token = os.getenv("GITHUB_TOKEN")
+            token = os.getenv("GATHUB_TOKEN")
             if not token:
                 print("❌ Нет GITHUB_TOKEN")
                 return False
